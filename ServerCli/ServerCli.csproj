@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <Content Include="..\.dockerignore">
+        <Link>.dockerignore</Link>
+      </Content>
+      <Content Update="raindrop.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+    </ItemGroup>
+
+    <!-- Database driver modules. Each one is discovered at startup and sits idle until the server
+         owner names it in raindrop.json; drop a reference here (or a DLL in the drivers/ folder next
+         to the executable) to make another database available. -->
+    <ItemGroup>
+      <ProjectReference Include="..\RaindropServer.Data.Sqlite\RaindropServer.Data.Sqlite.csproj" />
+      <ProjectReference Include="..\RaindropServer.Data.Postgres\RaindropServer.Data.Postgres.csproj" />
+      <ProjectReference Include="..\RaindropServer.Data.SqlServer\RaindropServer.Data.SqlServer.csproj" />
+    </ItemGroup>
+
+    <!-- The media server voice calls run on. Idle until raindrop.json's voice.provider names it. -->
+    <ItemGroup>
+      <ProjectReference Include="..\RaindropServer.Voice.LiveKit\RaindropServer.Voice.LiveKit.csproj" />
+    </ItemGroup>
+
+</Project>

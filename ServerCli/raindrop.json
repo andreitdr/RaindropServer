@@ -1,0 +1,53 @@
+{
+  "urls": [ "https://localhost:5001" ],
+
+  "tls": {
+    "enabled": true,
+    "certificatePath": "raindrop.pfx",
+    "certificatePassword": null,
+    "hostNames": null
+  },
+
+  "database": {
+    "provider": "sqlite",
+    "connectionString": "Data Source=raindrop.db",
+    "autoCreateSchema": true
+  },
+
+  "users": {
+    "dataRetentionDays": 730,
+    "sessionIdleTimeoutHours": 12,
+    "minimumPasswordLength": 8
+  },
+
+  "channels": {
+    "maximumMessageLength": 4000,
+    "defaultHistoryPageSize": 50,
+    "maximumHistoryPageSize": 200
+  },
+
+  // What a fresh server starts with. The everyone role is seeded from
+  // defaultMemberPermissions the first time the server runs; after that it is
+  // edited through the API, and changing this setting leaves it alone.
+  "roles": {
+    "defaultMemberPermissions": [ "view_channel", "send_messages", "create_channels", "connect", "speak" ],
+    "channelCreatorModeratesOwnChannels": true,
+    "firstMemberBecomesOwner": true
+  },
+
+  // Voice calls need a media server to carry the audio. Set "provider" to
+  // "livekit" and point "livekit" at one to switch them on; with null, voice
+  // channels can be created but nobody can join them. Clients never reach
+  // LiveKit's apiUrl themselves — they connect through this server — so only
+  // LiveKit's media ports (UDP 7882, TCP 7881) need to be reachable from outside.
+  // Prefer RAINDROP_LIVEKIT_API_SECRET to writing the secret here.
+  "voice": {
+    "provider": null,
+    "maximumParticipants": 25,
+    "livekit": {
+      "apiUrl": "http://localhost:7880",
+      "apiKey": "devkey",
+      "apiSecret": "secret"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+.idea/
+
+# The default SQLite database a locally-run server creates
+raindrop.db
+raindrop.db-shm
+raindrop.db-wal
+
+# The server's TLS key, generated on first start
+raindrop.pfx
+
+# Local database data for docker-compose (postgres/, sqlserver/) and secrets
+/data/
+.env

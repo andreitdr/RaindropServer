@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- No LiveKit SDK: the access tokens are plain HS256 JWTs and the room API is Twirp over JSON, both
+       small enough to own outright rather than pull a protobuf stack in for. -->
+  <ItemGroup>
+    <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+  </ItemGroup>
+
+</Project>
