@@ -1,3 +1,4 @@
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 
 namespace RaindropServer;
@@ -16,6 +17,20 @@ public sealed class ServerHostOptions
     /// proxy that terminates TLS, or for local development over plain HTTP.
     /// </summary>
     public X509Certificate2? Certificate { get; set; }
+
+    /// <summary>
+    /// The TLS versions a client may negotiate. TLS 1.3 alone by default: it drops every legacy
+    /// cipher and always gives forward secrecy, and every platform the client runs on speaks it. Add
+    /// <see cref="SslProtocols.Tls12"/> only for an older client you cannot update.
+    /// </summary>
+    public SslProtocols SslProtocols { get; set; } = SslProtocols.Tls13;
+
+    /// <summary>
+    /// Whether this platform's TLS stack can serve TLS 1.3. macOS cannot: .NET serves TLS there
+    /// through Apple's SecureTransport, which stops at 1.2, so a TLS 1.3-only server on a Mac would
+    /// refuse every client. Linux (OpenSSL) and current Windows can.
+    /// </summary>
+    public static bool PlatformServesTls13 => !OperatingSystem.IsMacOS();
 
     /// <summary>
     /// How long a graceful shutdown may take before the remaining connections are dropped and the
@@ -41,5 +56,8 @@ public sealed class ServerHostOptions
             throw new InvalidOperationException(
                 "Listening on an https:// address needs a certificate. Enable TLS in the configuration, " +
                 "or listen on http:// only when a reverse proxy is terminating TLS for you.");
+
+        if ((SslProtocols & ~(SslProtocols.Tls12 | SslProtocols.Tls13)) != 0 || SslProtocols == SslProtocols.None)
+            throw new InvalidOperationException("Only TLS 1.2 and TLS 1.3 may be enabled.");
     }
 }

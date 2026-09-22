@@ -20,4 +20,11 @@ public interface IDeletedMessageStore
     /// and so is anything already preserved.
     /// </summary>
     Task ArchiveChannelMessagesAsync(ChannelDeletion deletion, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the whole archive of deleted messages' text and returns how many rows went. Part of the
+    /// owner console's <c>purge-plaintext</c>; a store that predates it refuses.
+    /// </summary>
+    Task<int> PurgeAsync(CancellationToken cancellationToken) =>
+        throw new NotSupportedException($"{GetType().Name} cannot purge the archive.");
 }

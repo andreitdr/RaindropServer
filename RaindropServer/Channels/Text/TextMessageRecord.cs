@@ -39,11 +39,28 @@ public sealed record TextMessageRecord
     public bool IsDeleted => DeletedAtUtc is not null;
 
     /// <summary>
+    /// For an end-to-end encrypted message: the MLS application message (a <c>PrivateMessage</c>)
+    /// exactly as the sender's device produced it. The server cannot read it. Null for a plaintext
+    /// message, and once the message is deleted.
+    /// </summary>
+    public byte[]? Ciphertext { get; init; }
+
+    /// <summary>The MLS epoch an encrypted message was sent in; null for a plaintext one.</summary>
+    public long? Epoch { get; init; }
+
+    /// <summary>Which of the author's devices sent an encrypted message; null for a plaintext one.</summary>
+    public Guid? SenderDeviceId { get; init; }
+
+    /// <summary>Whether this is an end-to-end encrypted message, deleted or not.</summary>
+    public bool IsEncrypted => Epoch is not null;
+
+    /// <summary>
     /// Erases the text while keeping the row, the author and the position in the conversation.
     /// </summary>
     public TextMessageRecord AsDeleted(Guid deletedBy, DateTime utcNow) => this with
     {
         Content = null,
+        Ciphertext = null,
         DeletedAtUtc = utcNow,
         DeletedBy = deletedBy
     };

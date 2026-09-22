@@ -87,6 +87,29 @@ internal abstract class RelationalStore
         return rows;
     }
 
+    /// <summary>
+    /// Runs <paramref name="work"/> in one transaction, committing when it returns and rolling back
+    /// when it throws. Commands it creates must be given the transaction.
+    /// </summary>
+    protected async Task<T> InTransactionAsync<T>(
+        Func<DbConnection, DbTransaction, Task<T>> work, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            var result = await work(connection, transaction);
+            await transaction.CommitAsync(cancellationToken);
+            return result;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
     /// <summary>Adds a parameter, mapping a null to <see cref="DBNull"/>.</summary>
     protected static void AddValue(DbCommand command, string name, object? value)
     {

@@ -72,6 +72,29 @@ public sealed class InMemorySessionStore : ISessionStore
         }
     }
 
+    public bool BindDevice(string token, Guid deviceId)
+    {
+        while (_sessions.TryGetValue(token, out var session))
+        {
+            if (session.ExpiresAtUtc <= _time.GetUtcNow().UtcDateTime)
+                return false;
+
+            if (_sessions.TryUpdate(token, session with { DeviceId = deviceId }, session))
+                return true;
+        }
+
+        return false;
+    }
+
+    public void RemoveAllForDevice(Guid userId, Guid deviceId)
+    {
+        foreach (var (token, session) in _sessions)
+        {
+            if (session.UserId == userId && session.DeviceId == deviceId)
+                _sessions.TryRemove(token, out _);
+        }
+    }
+
     public void RenameUser(Guid userId, string username)
     {
         foreach (var (token, session) in _sessions)

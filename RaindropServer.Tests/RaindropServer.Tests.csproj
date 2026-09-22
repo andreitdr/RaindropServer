@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- MLS messages and a device certificate produced by the real Rust core (RaindropCrypto), so the
+       server's parsers are tested against exactly what clients send. -->
+  <ItemGroup>
+    <None Include="Fixtures\*.hex" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+    <ProjectReference Include="..\RaindropServer.Data.Sqlite\RaindropServer.Data.Sqlite.csproj" />
+    <ProjectReference Include="..\RaindropServer.Data.Postgres\RaindropServer.Data.Postgres.csproj" />
+    <ProjectReference Include="..\RaindropServer.Data.SqlServer\RaindropServer.Data.SqlServer.csproj" />
+    <ProjectReference Include="..\RaindropServer.Voice.LiveKit\RaindropServer.Voice.LiveKit.csproj" />
+  </ItemGroup>
+
+</Project>

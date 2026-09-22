@@ -32,4 +32,12 @@ public interface ITextMessageStore
 
     /// <summary>Removes every message in a channel, for when the channel itself is deleted.</summary>
     Task DeleteChannelMessagesAsync(Guid channelId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes every plaintext message — everything posted before the server required end-to-end
+    /// encryption — and returns how many. Encrypted messages are untouched. The owner console's
+    /// <c>purge-plaintext</c>; a store that predates encryption refuses.
+    /// </summary>
+    Task<int> PurgePlaintextAsync(CancellationToken cancellationToken) =>
+        throw new NotSupportedException($"{GetType().Name} cannot purge plaintext messages.");
 }

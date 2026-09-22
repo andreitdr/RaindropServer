@@ -35,6 +35,21 @@ public interface ISessionStore
     /// </summary>
     void RemoveAllForUser(Guid userId);
 
+    /// <summary>
+    /// Records that a session proved it runs on one of its user's devices. Returns false when the
+    /// token no longer names a live session.
+    /// </summary>
+    /// <remarks>
+    /// Default implementations keep a session store written before end-to-end encryption loading;
+    /// such a store simply cannot bind sessions.
+    /// </remarks>
+    bool BindDevice(string token, Guid deviceId) =>
+        throw new NotSupportedException($"{GetType().Name} does not support binding sessions to devices.");
+
+    /// <summary>Ends every session bound to one device — when the device is revoked.</summary>
+    void RemoveAllForDevice(Guid userId, Guid deviceId) =>
+        throw new NotSupportedException($"{GetType().Name} does not support binding sessions to devices.");
+
     /// <summary>Keeps every live session for a user in step with a username change.</summary>
     void RenameUser(Guid userId, string username);
 

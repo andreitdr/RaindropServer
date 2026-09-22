@@ -10,9 +10,15 @@ namespace RaindropServer.Users;
 /// <param name="Username">The user's current username, kept here so endpoints avoid a lookup.</param>
 /// <param name="CreatedAtUtc">When the session was opened.</param>
 /// <param name="ExpiresAtUtc">When the session lapses if the client stops making requests.</param>
+/// <param name="DeviceId">
+/// The end-to-end encryption device this session proved it runs on (see
+/// <c>E2ee/DeviceService.BindSessionAsync</c>), or null until it has. A password alone opens a
+/// session; only a device's key binds one, and some operations require that.
+/// </param>
 public sealed record UserSession(
     string Token,
     Guid UserId,
     string Username,
     DateTime CreatedAtUtc,
-    DateTime ExpiresAtUtc);
+    DateTime ExpiresAtUtc,
+    Guid? DeviceId = null);

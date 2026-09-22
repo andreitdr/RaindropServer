@@ -4,7 +4,8 @@
 
 [`IDatabaseDriver`](../RaindropServer/Data/IDatabaseDriver.cs) is the whole contract a database module
 implements: a `Name`, a store per kind of data (`IUserStore`, `IChannelStore`, `IRoleStore`,
-`ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`), and idempotent schema DDL (`EnsureSchemaAsync` — must be safe to run on every
+`ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`, and for end-to-end encryption
+`IDeviceStore` and `IKeyBackupStore`), and idempotent schema DDL (`EnsureSchemaAsync` — must be safe to run on every
 startup, since it runs unless `DatabaseOptions.AutoCreateSchema` is turned off).
 
 ## Discovery
@@ -75,7 +76,19 @@ Each is one file: `SqliteDatabaseDriver.cs`, `PostgresDatabaseDriver.cs`, `SqlSe
 
 Tables: `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`, `raindrop_roles`,
 `raindrop_member_roles`, `raindrop_deleted_messages`, `raindrop_permission_rollouts`,
-`raindrop_voice_mutes`.
+`raindrop_voice_mutes`, and for [end-to-end encryption](e2ee.md#storage) `raindrop_user_identities`,
+`raindrop_devices`, `raindrop_key_backups` and the delivery service's `raindrop_mls_groups`,
+`raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`, and
+`raindrop_encrypted_messages` (encrypted messages, merged with `raindrop_text_messages` when history is
+read), `raindrop_message_reports` (reported encrypted messages, with the text the reporter revealed) — public keys and opaque blobs in byte columns (`BLOB`, `bytea`, `varbinary`), epochs as `bigint`.
+
+`CreateDeviceStore`, `CreateKeyBackupStore`, `CreateMlsGroupStore`, `CreateKeyPackageStore`,
+`CreateWelcomeStore` and `CreateMessageReportStore` have **default interface implementations** that throw
+`NotSupportedException`, so a third-party driver written before end-to-end encryption still loads; it
+fails only when those stores are used. `RelationalDatabaseDriver` implements both, so a driver deriving
+from it needs only their `CREATE TABLE` statements added to its DDL. The commit log's primary key
+`(channel_id, epoch)` is load-bearing: it is what refuses a second commit for an epoch.
+`RelationalStore.InTransactionAsync` runs the commit's epoch bump and log insert in one transaction.
 
 `raindrop_permission_rollouts(rollout_id PK, applied_at)` records which one-time
 [permission rollouts](roles-and-permissions.md#permission-rollouts) this database has had.

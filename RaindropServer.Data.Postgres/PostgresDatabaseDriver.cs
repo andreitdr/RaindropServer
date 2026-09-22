@@ -158,6 +158,131 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
             muted_by varchar(36) NOT NULL,
             muted_at timestamptz NOT NULL
         )
+        """,
+
+        // End-to-end encryption: users' public identity keys, their devices, and sealed key backups.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_user_identities (
+            user_id      varchar(36) NOT NULL PRIMARY KEY,
+            identity_key bytea       NOT NULL,
+            updated_at   timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_devices (
+            user_id       varchar(36) NOT NULL,
+            device_id     varchar(36) NOT NULL,
+            signature_key bytea       NOT NULL,
+            certificate   bytea       NOT NULL,
+            created_at    timestamptz NOT NULL,
+            revoked_at    timestamptz NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_key_backups (
+            user_id    varchar(36) NOT NULL PRIMARY KEY,
+            blob_data  bytea       NOT NULL,
+            updated_at timestamptz NOT NULL
+        )
+        """,
+
+        // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_groups (
+            channel_id       varchar(36) NOT NULL PRIMARY KEY,
+            epoch            bigint      NOT NULL,
+            group_info       bytea       NULL,
+            group_info_epoch bigint      NOT NULL,
+            updated_at       timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_commits (
+            channel_id     varchar(36) NOT NULL,
+            epoch          bigint      NOT NULL,
+            message        bytea       NOT NULL,
+            sender_user_id varchar(36) NOT NULL,
+            created_at     timestamptz NOT NULL,
+            PRIMARY KEY (channel_id, epoch)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_key_packages (
+            package_id  varchar(36) NOT NULL PRIMARY KEY,
+            user_id     varchar(36) NOT NULL,
+            device_id   varchar(36) NOT NULL,
+            key_package bytea       NOT NULL,
+            last_resort integer     NOT NULL,
+            created_at  timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_mls_key_packages_device
+            ON raindrop_mls_key_packages (user_id, device_id, last_resort, created_at)
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_welcomes (
+            welcome_id varchar(36) NOT NULL PRIMARY KEY,
+            user_id    varchar(36) NOT NULL,
+            device_id  varchar(36) NOT NULL,
+            channel_id varchar(36) NOT NULL,
+            epoch      bigint      NOT NULL,
+            welcome    bytea       NOT NULL,
+            created_at timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_mls_welcomes_device
+            ON raindrop_mls_welcomes (user_id, device_id)
+        """,
+
+        // End-to-end encrypted messages: MLS ciphertext the server cannot read.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_encrypted_messages (
+            message_id varchar(36) NOT NULL PRIMARY KEY,
+            channel_id varchar(36) NOT NULL,
+            author_id  varchar(36) NOT NULL,
+            device_id  varchar(36) NULL,
+            epoch      bigint      NOT NULL,
+            ciphertext bytea       NULL,
+            sent_at    timestamptz NOT NULL,
+            deleted_at timestamptz NULL,
+            deleted_by varchar(36) NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_encrypted_messages_history
+            ON raindrop_encrypted_messages (channel_id, sent_at, message_id)
+        """,
+
+        // Reported messages: the text of an encrypted message a member chose to reveal.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_message_reports (
+            report_id   varchar(36) NOT NULL PRIMARY KEY,
+            message_id  varchar(36) NOT NULL,
+            channel_id  varchar(36) NOT NULL,
+            author_id   varchar(36) NOT NULL,
+            device_id   varchar(36) NOT NULL,
+            reporter_id varchar(36) NOT NULL,
+            body        text        NOT NULL,
+            reason      text        NULL,
+            sent_at     timestamptz NOT NULL,
+            reported_at timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_message_reports_channel
+            ON raindrop_message_reports (channel_id, reported_at)
         """
     ];
 }

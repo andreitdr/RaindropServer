@@ -1,6 +1,7 @@
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
+using RaindropServer.E2ee;
 using RaindropServer.Roles;
 using RaindropServer.Users;
 
@@ -51,6 +52,38 @@ public interface IDatabaseDriver
     /// of voice state that has to survive a restart.
     /// </summary>
     IVoiceMuteStore CreateVoiceMuteStore(DatabaseOptions options);
+
+    /// <summary>
+    /// Creates the persistence for users' public identity keys and their devices — what end-to-end
+    /// encryption needs the server to remember. Drivers derived from
+    /// <see cref="Relational.RelationalDatabaseDriver"/> get it for free; the default refuses, so a
+    /// driver written before end-to-end encryption still loads and fails only when this is used.
+    /// </summary>
+    IDeviceStore CreateDeviceStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support end-to-end encryption devices.");
+
+    /// <summary>Creates the persistence for users' sealed key backups. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IKeyBackupStore CreateKeyBackupStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support key backups.");
+
+    /// <summary>
+    /// Creates the MLS delivery service's persistence for groups and their commit logs. Same default
+    /// as <see cref="CreateDeviceStore"/>.
+    /// </summary>
+    IMlsGroupStore CreateMlsGroupStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support end-to-end encrypted groups.");
+
+    /// <summary>Creates the persistence for devices' MLS key packages. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IKeyPackageStore CreateKeyPackageStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support MLS key packages.");
+
+    /// <summary>Creates the persistence for pending MLS Welcomes. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IWelcomeStore CreateWelcomeStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support MLS Welcomes.");
+
+    /// <summary>Creates the persistence for reported messages. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IMessageReportStore CreateMessageReportStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support message reports.");
 
     /// <summary>
     /// Creates any missing tables and indexes. Must be idempotent: it runs on every startup unless

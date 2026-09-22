@@ -65,6 +65,9 @@ public sealed class LiveKitJwt
                 ["roomJoin"] = true,
                 ["canSubscribe"] = true,
                 ["canPublish"] = grant.CanSpeak,
+                // No data channel at all. Calls are end-to-end encrypted with keys from the voice
+                // channel's MLS group, which travel through Raindrop's delivery service, never
+                // through LiveKit: nothing that could carry key material passes through it.
                 ["canPublishData"] = false,
                 ["canPublishSources"] = new JsonArray("microphone"),
                 ["canUpdateOwnMetadata"] = false

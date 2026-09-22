@@ -156,6 +156,136 @@ public sealed class SqliteDatabaseDriver : RelationalDatabaseDriver
             muted_by TEXT NOT NULL,
             muted_at TEXT NOT NULL
         )
+        """,
+
+        // End-to-end encryption: users' public identity keys, their devices, and sealed key backups.
+        // Only public keys and opaque blobs — nothing here decrypts anything.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_user_identities (
+            user_id      TEXT NOT NULL PRIMARY KEY,
+            identity_key BLOB NOT NULL,
+            updated_at   TEXT NOT NULL
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_devices (
+            user_id       TEXT NOT NULL,
+            device_id     TEXT NOT NULL,
+            signature_key BLOB NOT NULL,
+            certificate   BLOB NOT NULL,
+            created_at    TEXT NOT NULL,
+            revoked_at    TEXT NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_key_backups (
+            user_id    TEXT NOT NULL PRIMARY KEY,
+            blob_data  BLOB NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+
+        // The MLS delivery service: groups (one per channel), their commit logs, devices' key
+        // packages and pending Welcomes. Every message is opaque; the server cannot read any of it.
+        // The commit log's key (channel_id, epoch) is what refuses a second commit for an epoch.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_groups (
+            channel_id       TEXT    NOT NULL PRIMARY KEY,
+            epoch            INTEGER NOT NULL,
+            group_info       BLOB    NULL,
+            group_info_epoch INTEGER NOT NULL,
+            updated_at       TEXT    NOT NULL
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_commits (
+            channel_id     TEXT    NOT NULL,
+            epoch          INTEGER NOT NULL,
+            message        BLOB    NOT NULL,
+            sender_user_id TEXT    NOT NULL,
+            created_at     TEXT    NOT NULL,
+            PRIMARY KEY (channel_id, epoch)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_key_packages (
+            package_id  TEXT    NOT NULL PRIMARY KEY,
+            user_id     TEXT    NOT NULL,
+            device_id   TEXT    NOT NULL,
+            key_package BLOB    NOT NULL,
+            last_resort INTEGER NOT NULL,
+            created_at  TEXT    NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_mls_key_packages_device
+            ON raindrop_mls_key_packages (user_id, device_id, last_resort, created_at)
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_welcomes (
+            welcome_id TEXT    NOT NULL PRIMARY KEY,
+            user_id    TEXT    NOT NULL,
+            device_id  TEXT    NOT NULL,
+            channel_id TEXT    NOT NULL,
+            epoch      INTEGER NOT NULL,
+            welcome    BLOB    NOT NULL,
+            created_at TEXT    NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_mls_welcomes_device
+            ON raindrop_mls_welcomes (user_id, device_id)
+        """,
+
+        // End-to-end encrypted messages: MLS ciphertext the server cannot read. A table of its own so
+        // existing databases gain it without an ALTER; history reads merge it with the one above.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_encrypted_messages (
+            message_id TEXT    NOT NULL PRIMARY KEY,
+            channel_id TEXT    NOT NULL,
+            author_id  TEXT    NOT NULL,
+            device_id  TEXT    NULL,
+            epoch      INTEGER NOT NULL,
+            ciphertext BLOB    NULL,
+            sent_at    TEXT    NOT NULL,
+            deleted_at TEXT    NULL,
+            deleted_by TEXT    NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_encrypted_messages_history
+            ON raindrop_encrypted_messages (channel_id, sent_at, message_id)
+        """,
+
+        // Reported messages: the text of an encrypted message a member chose to reveal, proven by
+        // its author's attestation. The only encrypted content the server ever holds.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_message_reports (
+            report_id   TEXT NOT NULL PRIMARY KEY,
+            message_id  TEXT NOT NULL,
+            channel_id  TEXT NOT NULL,
+            author_id   TEXT NOT NULL,
+            device_id   TEXT NOT NULL,
+            reporter_id TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            reason      TEXT NULL,
+            sent_at     TEXT NOT NULL,
+            reported_at TEXT NOT NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_message_reports_channel
+            ON raindrop_message_reports (channel_id, reported_at)
         """
     ];
 }

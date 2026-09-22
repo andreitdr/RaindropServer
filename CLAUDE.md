@@ -22,7 +22,25 @@ dotnet build
 dotnet run --project ServerCli
 ```
 
-There is no test project in this repository yet.
+Tests are in `RaindropServer.Tests` (xUnit):
+
+```bash
+dotnet test
+```
+
+They cover:
+- the MLS envelope parser and device certificates, against real fixtures from the Rust core
+  (`RaindropServer.Tests/Fixtures/*.hex`)
+- Ed25519 (RFC 8032 vectors) and the server identity key
+- the stores under real concurrency: racing commits for one epoch, racing key-package claims, history
+  paging across plaintext and encrypted messages
+- the delivery-service and device-service rules
+- LiveKit option validation
+
+Store tests run on SQLite, and also on PostgreSQL and SQL Server when `RAINDROP_TEST_POSTGRES` or
+`RAINDROP_TEST_SQLSERVER` holds a connection string (the docker-compose services will do). End-to-end
+tests against a running server, with the real Rust core, are in the client:
+`RaindropClient/test/integration/`.
 
 Once the CLI is running, exercise endpoints with curl. The server presents a self-signed
 certificate by default, so `-k` is needed until you trust it:
@@ -63,6 +81,8 @@ In the running CLI's console, `drivers` lists the installed database modules, `d
 one, `fingerprint` prints the TLS fingerprint for clients to pin, `roles` lists the server's roles
 and what each grants, `grant <user> <role>` and `revoke <user> <role>` change who holds one,
 `events` shows how many clients have the event stream open, `voice` lists who is in which voice call,
+`purge-plaintext` deletes every pre-encryption message and the deleted-message archive (after a `yes`),
+`reports` shows the latest reported messages,
 and `quit` shuts the server down gracefully. With no console attached (a container started
 without a TTY) the server keeps serving until it receives SIGINT/SIGTERM.
 
@@ -79,7 +99,8 @@ docker build -f ServerCli/Dockerfile -t raindrop-server .
 
 ## Architecture
 
-A solution of six projects targeting `net10.0`:
+A solution of seven projects targeting `net10.0` (the seventh, `RaindropServer.Tests`, is the xUnit
+suite):
 
 - **RaindropServer** (`RaindropServer/`) — the library: hosts an ASP.NET Core app on a background
   thread, auto-discovers endpoints, and owns the domain layer behind them (users, sessions, password
@@ -164,17 +185,69 @@ instead and clients can verify it normally.
 The fingerprint is printed at startup, available from the `fingerprint` console command, and served
 by `GET /api/server/info`.
 
+TLS is 1.3-only (`tls.allowTls12` to relax; macOS cannot serve 1.3, so it allows 1.2 there too), and a
+generated certificate is ECDSA P-256. A long-lived **server identity key** (`ServerIdentityKey`,
+`server-identity.key`) signs the certificate's fingerprint; `/api/server/info` serves the key and
+signature, and clients pin the key so a replaced certificate is followed only when that key vouches
+for it. See `docs/transport-security.md`. LiveKit's API URL must be https unless loopback or a
+container name, and weak or `--dev` LiveKit secrets are refused (`LiveKitOptions.Validate`).
+
 Two consequences worth remembering:
 
-- The certificate file **must persist**. Regenerating it changes the fingerprint and locks out every
-  client that pinned the old one. In Docker it lives on a mounted volume for exactly this reason.
+- The identity key file **must persist** (and the certificate should). Losing the key locks out every
+  client that pinned it. In Docker both live on a mounted volume for exactly this reason.
 - Nothing sensitive goes in a URL. The lookups that would naturally be GETs with query parameters
   (`status`, `username-available`, `lookup`) are POSTs carrying a body instead, so UUIDs and
   usernames stay inside the encrypted body rather than in a line that tends to end up in logs.
 
 This is transport encryption: the server can read everything it stores and relays. End-to-end
-encryption, where the server owner cannot read messages either, is a separate layer that would sit
-on top of this and does not exist yet.
+encryption sits on top — see **End-to-end encryption** below.
+
+### End-to-end encryption
+
+`RaindropServer/E2ee/`; full reference [`docs/e2ee.md`](docs/e2ee.md). MLS runs on clients (the Rust
+core in `../RaindropCrypto`); **the server holds public keys and opaque blobs only**. Implemented so far:
+the identity layer, the MLS delivery service, encrypted text messages and encrypted calls.
+
+- **Identity key per user** (Ed25519, public half stored in `raindrop_user_identities`); the first
+  device registered establishes it, later certificates signed by another key get `identity_mismatch`.
+- **Devices** (`raindrop_devices`) are registered from a certificate (`E2ee/DeviceCertificate.cs`,
+  parsed from the exact bytes the Rust core writes — the signature covers the ids *as text*, so they
+  are never re-formatted) and revoked, never deleted.
+- **Session binding**: a password opens a session, a device key *binds* it — `UserSession.DeviceId`,
+  set by `DeviceService.BindSessionAsync` after the device signs a one-time challenge. Revoking another
+  device, replacing the backup and approving a link need a bound session, so a password alone cannot
+  take the owner's devices or backup away. Revoking a device ends its sessions.
+- **Key backup** (`raindrop_key_backups`), **device linking** through `IDeviceLinkRelay` (in memory,
+  opaque offer/approval; the link code's commitment stops the server substituting keys), **identity
+  reset** with the password (publishes `e2ee.identity.reset`).
+- **Delivery service** (`MlsDeliveryService`): one MLS group per channel (group id = channel UUID,
+  16 big-endian bytes); the server reads only the cleartext envelope (`MlsFraming`). **One commit per
+  epoch** — epoch bump and log insert in one transaction, and `raindrop_mls_commits`' key
+  `(channel_id, epoch)` refuses a second; the loser gets `epoch_conflict`. Every call needs a bound
+  session. Who belongs is `IE2eeMembershipPolicy` (default: `view_channel`, plus `connect` for voice),
+  checked on every request, fan-out, claim and Welcome, so lost access cuts traffic at once;
+  `GroupMembershipReconciler` sends `e2ee.group.reconcile` on role/member/device changes and members
+  commit the difference against `groups/roster` — the server cannot change a group. Key packages
+  (one-time + last resort), Welcomes addressed to recipient devices the committer names, a bounded
+  commit log (`resyncRequired` beyond it). Key packages must be `MLSMessage`-wrapped.
+- **Encrypted messages** (`TextChannelService.SendEncryptedAsync`, `send-encrypted`): an MLS
+  application message for the channel's group, epoch within `MaximumPastEpochs` of the group's
+  (`stale_epoch` otherwise), from a bound session; stored as ciphertext in
+  `raindrop_encrypted_messages` (a new table — `RelationalTextMessageStore` routes by
+  `TextMessageRecord.IsEncrypted` and merges both tables for history under the same cursor), never
+  archived. Plaintext `send` answers `encryption_required` unless `channels.allowPlaintextMessages`;
+  the console's `purge-plaintext` deletes old plaintext and the deleted-message archive.
+- **Reports** (`MessageReportService`): a device attests every message it sends (Ed25519 over the
+  channel, client message id, time, type and body, inside the encrypted payload); a reporter reveals
+  the text and the attestation, the server verifies it against the sending device's key and stores
+  it in `raindrop_message_reports` — the only encrypted-message text the server ever holds — and
+  sends `message.reported` to channel moderators (`manage_messages`). Console: `reports`.
+- Ed25519 verification is BouncyCastle, confined to `Security/Ed25519Signatures.cs` (.NET has none).
+- Seams: `IDeviceStore`/`IKeyBackupStore` (driver factories with refusing defaults), `IDeviceLinkRelay`,
+  `IDeviceListener`, `ISessionStore.BindDevice`/`RemoveAllForDevice` (refusing defaults), `E2eeOptions`;
+  `IE2eeMembershipPolicy`, `IMlsGroupStore`/`IKeyPackageStore`/`IWelcomeStore`; registered by
+  `AddRaindropE2ee`, called from `AddRaindropServer`. Capabilities `e2ee.devices.v1`, `e2ee.delivery.v1`.
 
 ### Users
 
@@ -437,8 +510,11 @@ outcome as a grant — a join token whose `canPublish` says whether the micropho
 - **The signalling relay.** Clients connect LiveKit's SDK to `/api/channels/voice/signal` on the server
   they already pin, and `LiveKitSignalRelay` forwards only `rtc` and `rtc/validate` — one certificate,
   LiveKit's HTTP port stays private, and the relay refuses a token whose member Raindrop has not
-  admitted to that room. Only LiveKit's media ports (UDP 7882, TCP 7881) face the internet. Audio is
-  DTLS-SRTP as far as LiveKit, which can hear it.
+  admitted to that room. Only LiveKit's media ports (UDP 7882, TCP 7881) face the internet.
+- **Calls are end-to-end encrypted** (`e2ee.voice.v1`): clients' LiveKit frame cryptor encrypts every
+  frame with a key exported from the voice channel's MLS group (`raindrop/voice/v1`, slot `epoch mod
+  16`), so LiveKit forwards audio it cannot hear; tokens grant no data channel, so no key material
+  crosses LiveKit. The server holds no key; see `docs/voice.md#end-to-end-encrypted-calls`.
 - **One call per member per server**, enforced atomically by the state store; joining from a second
   device takes the call over; a leave names its channel and must come from the joining session.
 - Anything slow (a role change re-checking every participant, telling LiveKit about a mute) goes
@@ -476,8 +552,9 @@ clients exactly like the API's. Over HTTP/2 a WebSocket is an extended `CONNECT`
 ### Database modules
 
 `IDatabaseDriver` is the whole contract: a name, a store per kind of data (`IUserStore`,
-`IChannelStore`, `IRoleStore`, `ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`), and
-idempotent schema DDL. Drivers
+`IChannelStore`, `IRoleStore`, `ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`, and
+`IDeviceStore`/`IKeyBackupStore`, whose factories have refusing default implementations so older
+drivers still load), and idempotent schema DDL. Drivers
 are discovered by `DatabaseDriverRegistry` from loaded assemblies, from `RaindropServer.Data.*.dll`
 next to the executable, and from any `*.dll` in a `drivers/` folder — which is how a third-party
 driver gets added without touching this repo. A driver is only *used* when the owner names it in
@@ -498,9 +575,12 @@ Adding a driver: derive from `RelationalDatabaseDriver`, override `CreateConnect
 `SchemaStatements` (as `protected override` — the base declares them `protected internal`), and give
 it a unique `Name`. The tables are `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`,
 `raindrop_roles`, `raindrop_member_roles`, `raindrop_deleted_messages` (the owner-only archive of deleted
-message text), `raindrop_permission_rollouts` (which one-time permission grants this database has had)
-and `raindrop_voice_mutes` (members muted for everyone) — the last three added as new tables, so
-existing databases gain them without an `ALTER`.
+message text), `raindrop_permission_rollouts` (which one-time permission grants this database has had),
+`raindrop_voice_mutes` (members muted for everyone), and for end-to-end encryption
+`raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, and the delivery service's
+`raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`,
+`raindrop_encrypted_messages` and `raindrop_message_reports` — everything after the first five added as
+new tables, so existing databases gain them without an `ALTER`.
 
 `EnsureSchemaAsync` **only creates what is missing** — there is no migration mechanism, so adding a
 column to a table that already exists in the wild needs a guarded `ALTER TABLE` per dialect, which
@@ -576,8 +656,29 @@ the API cannot be used to enumerate who is on the server.
 
 Event types: `ready`, `message.created`, `message.deleted`, `channel.created`, `channel.renamed`,
 `channel.deleted`, `member.joined`, `member.renamed`, `member.left`, `member.presence`, `member.roles`,
-`role.created`, `role.updated`, `role.deleted`, `voice.state`, `voice.left`. A non-WebSocket request gets `426 websocket_required`.
+`role.created`, `role.updated`, `role.deleted`, `voice.state`, `voice.left`, `e2ee.device.added`,
+`e2ee.device.revoked`, `e2ee.identity.reset`, `e2ee.handshake`, `e2ee.welcome`, `e2ee.group.reconcile`,
+`e2ee.keypackages.low`, `message.reported`. A non-WebSocket request gets `426 websocket_required`.
 Close codes: `1001` server stopping, `1008` client sent data, `4401` session ended, `4429` too slow.
+
+### E2EE API
+
+All authenticated; see [`docs/e2ee.md`](docs/e2ee.md#api) for request shapes and error codes.
+
+| Method | Route | Purpose |
+|---|---|---|
+| POST | `/api/e2ee/devices/register` | register a device from its certificate (first one sets the identity key) |
+| POST | `/api/e2ee/devices/list` | identity keys and active devices of up to 500 users |
+| POST | `/api/e2ee/devices/revoke` | revoke one of your devices (bound session, unless it is this one) |
+| POST | `/api/e2ee/identity/reset` | with the password: forget identity key and backup, revoke every device |
+| POST | `/api/e2ee/session/challenge` | one-time nonce to sign with a device key |
+| POST | `/api/e2ee/session/bind` | bind this session to a device with that signature |
+| GET | `/api/e2ee/backup` | the sealed key backup |
+| POST | `/api/e2ee/backup/put` | replace it (bound session) |
+| POST | `/api/e2ee/device-link/start` · `offer` · `approve` · `approval` | link a new device through the relay |
+| POST | `/api/e2ee/groups/create` · `state` · `commit` · `info` · `sync` · `roster` | a channel's MLS group: start, read, commit (one per epoch), publish group info, catch up, who belongs |
+| POST | `/api/e2ee/keypackages/upload` · `claim`, GET `…/count` | devices' key packages |
+| GET | `/api/e2ee/welcomes`, POST `…/ack` | Welcomes waiting for this device |
 
 ### Member API
 
@@ -629,7 +730,10 @@ see Transport security.
 | POST | `/api/channels/get` | one channel, and what the caller may do in it |
 | POST | `/api/channels/rename` | rename it — needs `RenameChannels`, or having created it |
 | POST | `/api/channels/delete` | delete it and everything in it — needs `DeleteChannels`, or having created it |
-| POST | `/api/channels/text/messages/send` | post a message — needs `SendMessages` |
+| POST | `/api/channels/text/messages/send-encrypted` | post an end-to-end encrypted message — needs `SendMessages` and a bound session |
+| POST | `/api/channels/text/messages/send` | post a plaintext message — `encryption_required` unless `channels.allowPlaintextMessages` |
+| POST | `/api/channels/text/messages/report` | report an encrypted message, revealing its text with the author's attestation |
+| POST | `/api/channels/text/messages/reports` | a channel's reports — needs `ManageMessages` |
 | POST | `/api/channels/text/messages/history` | one page of history, newest page first; follow `nextCursor` |
 | POST | `/api/channels/text/messages/delete` | delete a message: your own always, anyone else's with `ManageMessages` |
 | GET | `/api/channels/voice` | whether voice works here, and who is in every call the caller can see |
@@ -642,6 +746,7 @@ see Transport security.
 Channel error codes on top of the user ones: `invalid_channel_type`, `channel_type_unsupported`,
 `invalid_channel_name`, `channel_name_taken`, `channel_not_found`, `wrong_channel_type`,
 `missing_permission`, `invalid_message`, `message_too_long`, `message_not_found`, `invalid_cursor`,
+`encryption_required`, `device_required`, `invalid_mls_message`, `wrong_group`, `group_not_found`, `stale_epoch`,
 and for voice `voice_unavailable`, `channel_full`, `not_in_voice`, `member_not_found`.
 
 
@@ -677,8 +782,9 @@ error rather than a silent downgrade.
 ## Local databases and LiveKit (Docker)
 
 `docker-compose.yml` runs Postgres and SQL Server locally for development against a real database
-instead of the default SQLite, and LiveKit (`--dev`, key `devkey`, secret `secret`) for voice calls —
-not part of the deployed server. `docker compose up -d livekit`, then run with
+instead of the default SQLite, and LiveKit (configured by `livekit.yaml`, key and secret from
+`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` in `.env`; the server refuses `--dev` credentials) for voice
+calls — not part of the deployed server. `docker compose up -d livekit`, then run with
 `RAINDROP_VOICE_PROVIDER=livekit`; `LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for
 audio (127.0.0.1 for clients on this machine, the LAN address otherwise).
 

@@ -51,20 +51,26 @@ services:
       start_period: 30s
 
   livekit:
-    # The media server voice calls run on — see docs/voice.md. --dev means API key "devkey" and
-    # secret "secret", which match raindrop.json's defaults: fine on your own machine, never on a
-    # server anybody else can reach.
+    # The media server voice calls run on — see docs/voice.md. Its settings are in livekit.yaml; the
+    # API key and secret come from .env, and must match what Raindrop is given. Raindrop refuses
+    # LiveKit's --dev credentials, so there is no insecure default to forget to change.
     #
     # --node-ip is the address LiveKit tells clients to send audio to. Docker cannot work it out from
     # inside the container, so set LIVEKIT_NODE_IP in .env: 127.0.0.1 when every client runs on this
     # machine, this machine's LAN address when phones or other computers join.
     image: livekit/livekit-server:latest
     restart: unless-stopped
-    command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    command: --config /etc/livekit.yaml --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-raindrop}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env — openssl rand -base64 48}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
       # The HTTP API and signalling. Only Raindrop talks to it — clients connect through Raindrop's
       # relay — so it is published on loopback alone.
       - "127.0.0.1:7880:7880"
-      # The media: UDP, and TCP for networks that block UDP. These are what clients reach.
+      # The media: UDP, and TCP for networks that block UDP. These are what clients reach. Media is
+      # DTLS-SRTP encrypted in transit, and end-to-end encrypted above that, so LiveKit forwards
+      # frames it cannot read.
       - "7881:7881"
       - "7882:7882/udp"

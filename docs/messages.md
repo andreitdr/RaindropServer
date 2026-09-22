@@ -9,6 +9,64 @@ A message belongs to a channel and is tied to the author's **UUID** — never to
 may be erased, and never to their username, which may change. `POST /api/users/lookup` (see
 [Users](users.md)) is how a client turns that UUID into a display name.
 
+## End-to-end encryption
+
+**Messages are end-to-end encrypted.** A member's device encrypts each message for the channel's MLS
+group (see [E2EE](e2ee.md)) and posts the ciphertext to `send-encrypted`. The server stores and relays
+it without being able to read it. What it does check is what it can see:
+
+- the message is an MLS application message (`PrivateMessage`) for **this** channel's group
+- it was sent in the group's current epoch or one of the last `MaximumPastEpochs` (2); otherwise
+  `409 stale_epoch`, and the client catches up and encrypts again
+- it comes from a session **bound to one of the author's devices** (`device_required`)
+- it is no more than `MaximumEncryptedMessageBytes` (64 KiB) of ciphertext
+- the author has `SendMessages`, as for any post
+
+An encrypted `ChannelMessage` has no `Content`. Instead it carries `Ciphertext`, `Epoch` and
+`SenderDeviceId`, and those three are null on a plaintext message.
+
+- **Plaintext posting is off by default** (`channels.allowPlaintextMessages`, see
+  [Configuration](configuration.md#channels)). The plain `send` answers `400 encryption_required`
+  unless an owner turns it back on for clients that cannot encrypt.
+- **Messages from before the switch stay plaintext.** Clients mark them as not end-to-end encrypted.
+  The owner console's `purge-plaintext` (it asks for `yes`) deletes every one of them and the whole
+  deleted-message archive: everything the server could read.
+- **Storage.** Encrypted messages live in `raindrop_encrypted_messages`, a table of their own, so
+  existing databases gain it without an `ALTER`. `RelationalTextMessageStore` routes each record by
+  `TextMessageRecord.IsEncrypted` and merges both tables when reading history. Both are ordered by
+  the same `(sent_at, message_id)` cursor, so paging stays exact across old plaintext and new
+  ciphertext.
+- **Deletion** works the same, as a tombstone: the ciphertext is nulled, `deleted_at`/`deleted_by`
+  are set, and the row stays.
+- **The archive.** Nothing is archived for an encrypted message: the server never had its text, and
+  `ArchivingMessageDeletionListener` skips a message with no `Content`.
+- **Forward-only history.** A device can decrypt only what was sent after it joined the channel's
+  group, and keeps the plaintext in its own encrypted store. Nothing, the server included, can give a
+  new device the keys to older messages.
+
+### Reporting an encrypted message
+
+The server cannot read an encrypted message, so a report has to bring the text with it, in a way that
+proves who wrote it. `MessageReportService` does this.
+
+- **The attestation.** When a device sends a message, it signs an *attestation* with its Ed25519
+  device key and puts it inside the encrypted payload (`a`). The signature covers
+  `"raindrop/message-attestation/v1\n"` followed by the channel id (lower case), the client message
+  id, the client's send time in ms, the type and the body. Each text field is a 4-byte big-endian
+  length and its UTF-8.
+- **Reporting.** A member who reports the message (`POST .../report`) reveals those fields and the
+  attestation. The server recomputes the bytes and verifies the signature against the key of the
+  device the stored message came from (`SenderDeviceId`, in `raindrop_devices`; a revoked device
+  still counts, since it held that key when it wrote). A reporter can therefore reveal a message, but
+  cannot invent one or change its words (`invalid_attestation`).
+- **Where reports go.** Accepted reports are stored in `raindrop_message_reports`, the only place the
+  server holds encrypted-message text, and only what a member chose to reveal. They are sent as
+  `message.reported` to members with `manage_messages` in the channel, who can list them with
+  `POST .../reports`. The owner console's `reports` command shows the latest 20.
+- **What it proves** is authorship: that device wrote those words in that channel. It does not bind
+  them to the exact stored ciphertext, which only group members can decrypt. A reporter could present
+  a different message the same device genuinely sent in the same channel.
+
 ## Deletion is a tombstone
 
 **Deleting a message keeps the row.** The text is nulled and `deleted_at`/`deleted_by` are set, so the
@@ -95,21 +153,28 @@ All authenticated, all under `/api/channels/text/messages`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/channels/text/messages/send` | Post a message — needs `SendMessages` |
+| POST | `/api/channels/text/messages/send-encrypted` | Post an end-to-end encrypted message (`{channelId, message}`) — needs `SendMessages` and a bound session |
+| POST | `/api/channels/text/messages/send` | Post a plaintext message — refused with `encryption_required` unless `allowPlaintextMessages` |
 | POST | `/api/channels/text/messages/history` | One page of history, newest page first; follow `nextCursor` |
 | POST | `/api/channels/text/messages/delete` | Delete a message: your own always, anyone else's with `ManageMessages` |
+| POST | `/api/channels/text/messages/report` | Report an encrypted message: `{messageId, body, clientMessageId, clientSentAtUnixMs, type, attestation, reason?}` |
+| POST | `/api/channels/text/messages/reports` | A channel's reports, newest first — needs `ManageMessages` there |
 
 Endpoint implementations:
 [`ServerCli/Endpoints/Channels/Text/`](../ServerCli/Endpoints/Channels/Text/)
-(`SendMessageEndpoint.cs`, `MessageHistoryEndpoint.cs`, `DeleteMessageEndpoint.cs`).
+(`SendEncryptedMessageEndpoint.cs`, `SendMessageEndpoint.cs`, `MessageHistoryEndpoint.cs`,
+`DeleteMessageEndpoint.cs`).
 
 ### Request/response shapes
 
 Defined in
 [`RaindropServer/Channels/Text/TextChannelContracts.cs`](../RaindropServer/Channels/Text/TextChannelContracts.cs):
 
-- `ChannelMessage(MessageId, ChannelId, AuthorId, Content?, SentAtUtc, Deleted, DeletedAtUtc?, DeletedBy?)`
-  — `Content` is null once deleted; `Deleted` is the flag a client renders the tombstone from.
+- `ChannelMessage(MessageId, ChannelId, AuthorId, Content?, SentAtUtc, Deleted, DeletedAtUtc?, DeletedBy?,
+  Ciphertext?, Epoch?, SenderDeviceId?)` — `Content` is null once deleted, and always for an encrypted
+  message, which carries `Ciphertext` (null once deleted), `Epoch` and `SenderDeviceId`; `Deleted` is
+  the flag a client renders the tombstone from.
+- `SendEncryptedMessageRequest(ChannelId, Message)` — `Message` is the MLS ciphertext.
 - `SendMessageRequest(ChannelId, Content)`
 - `MessageHistoryRequest(ChannelId, Before?, Limit?)` — `Before` is the previous page's `NextCursor`,
   or omitted for the newest messages; `Limit` defaults to the server's configured page size and is
@@ -120,7 +185,9 @@ Defined in
 ### Error codes
 
 On top of the [channel error codes](channels.md#error-codes): `invalid_message`,
-`message_too_long`, `message_not_found`, `invalid_cursor`.
+`message_too_long`, `message_not_found`, `invalid_cursor`, and for encryption `encryption_required`,
+`device_required`, `invalid_mls_message`, `wrong_group`, `group_not_found`, `stale_epoch`, and for
+reports `not_encrypted`, `invalid_attestation`, `invalid_reason`.
 
 ## Related
 

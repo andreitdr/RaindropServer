@@ -14,7 +14,9 @@ is how the Docker container is configured without editing the file.
     "enabled": true,
     "certificatePath": "raindrop.pfx",
     "certificatePassword": null,
-    "hostNames": null
+    "hostNames": null,
+    "identityKeyPath": "server-identity.key",
+    "allowTls12": false
   },
 
   "database": {
@@ -32,7 +34,8 @@ is how the Docker container is configured without editing the file.
   "channels": {
     "maximumMessageLength": 4000,
     "defaultHistoryPageSize": 50,
-    "maximumHistoryPageSize": 200
+    "maximumHistoryPageSize": 200,
+    "allowPlaintextMessages": false
   },
 
   "roles": {
@@ -46,8 +49,9 @@ is how the Docker container is configured without editing the file.
     "maximumParticipants": 25,
     "livekit": {
       "apiUrl": "http://localhost:7880",
-      "apiKey": "devkey",
-      "apiSecret": "secret"
+      "apiKey": null,
+      "apiSecret": null,
+      "allowWeakSecret": false
     }
   }
 }
@@ -71,9 +75,15 @@ fingerprint pinning).
   CA-issued PFX instead to skip client-side pinning entirely.
 - `certificatePassword` — the PFX's password, if any.
 - `hostNames` — optional; used when generating a self-signed certificate.
+- `identityKeyPath` — the server's long-lived identity key, generated on first start. It signs the
+  certificate's fingerprint, so you can replace the certificate without clients refusing it. See
+  [Transport security](transport-security.md#the-server-identity-key-changing-the-certificate-without-breaking-pins).
+- `allowTls12` — also accept TLS 1.2. Off by default (TLS 1.3 only, except on macOS; see Transport
+  security).
 
-**The certificate file must persist across restarts/redeploys.** Regenerating it changes the
-fingerprint and locks out every client that pinned the old one.
+**The identity key must persist across restarts and redeploys, and belongs in backups.** Losing it
+locks out every client that pinned it. The certificate can be replaced freely as long as the identity
+key stays.
 
 ### `database`
 
@@ -102,6 +112,9 @@ See [Messages](messages.md) for history paging behavior.
 - `maximumMessageLength` — messages longer than this are refused with `message_too_long`.
 - `defaultHistoryPageSize` — used when a history request omits `Limit`.
 - `maximumHistoryPageSize` — a requested `Limit` above this is silently trimmed down to it.
+- `allowPlaintextMessages` — whether the plaintext `send` still works. Off by default: every message
+  must be end-to-end encrypted (see [Messages](messages.md#end-to-end-encryption)). Turn it on only for
+  clients that cannot encrypt.
 
 ### `roles`
 
@@ -130,9 +143,14 @@ See [Voice](voice.md) for the model these configure.
 - `livekit.apiUrl` — where *this server* reaches LiveKit's API and signalling; keep it private. Clients
   never connect to it: they go through this server's relay (`/api/channels/voice/signal`), over its
   pinned TLS. Only LiveKit's media ports (UDP 7882, TCP 7881) need to be reachable from outside.
-- `livekit.apiKey` / `livekit.apiSecret` — the key pair LiveKit was configured with (`devkey`/`secret`
-  in its `--dev` mode). Both are required when the provider is `livekit`; prefer
+- `livekit.apiUrl` must be `https://` unless it is a loopback address or a single-label (container)
+  host name.
+- `livekit.apiKey` / `livekit.apiSecret` — the key pair LiveKit was configured with (`LIVEKIT_API_KEY`
+  / `LIVEKIT_API_SECRET` in `.env` for docker-compose). Both are required when the provider is
+  `livekit`. The secret must be 32 or more random characters (`openssl rand -base64 48`). Prefer
   `RAINDROP_LIVEKIT_API_SECRET` to writing the secret into this file.
+- `livekit.allowWeakSecret` — accept a short or well-known secret such as LiveKit's `--dev` `secret`.
+  Only for a throwaway server on your own machine.
 
 ## Environment variable overrides
 
@@ -150,6 +168,7 @@ Used by the Docker container instead of editing `raindrop.json` directly:
 | `RAINDROP_LIVEKIT_API_URL` | `voice.livekit.apiUrl` |
 | `RAINDROP_LIVEKIT_API_KEY` | `voice.livekit.apiKey` |
 | `RAINDROP_LIVEKIT_API_SECRET` | `voice.livekit.apiSecret` |
+| `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET` | `voice.livekit.allowWeakSecret` |
 
 ## The owner console
 

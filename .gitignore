@@ -10,8 +10,9 @@ raindrop.db
 raindrop.db-shm
 raindrop.db-wal
 
-# The server's TLS key, generated on first start
+# The server's TLS key and identity key, generated on first start
 raindrop.pfx
+server-identity.key
 
 # Local database data for docker-compose (postgres/, sqlserver/) and secrets
 /data/

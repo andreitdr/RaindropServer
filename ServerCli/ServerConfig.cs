@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Authentication;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RaindropServer;
@@ -98,7 +99,10 @@ public sealed record ServerConfig
                     ApiUrl = Environment.GetEnvironmentVariable("RAINDROP_LIVEKIT_API_URL")
                              ?? Voice.LiveKit?.ApiUrl ?? new LiveKitConfig().ApiUrl,
                     ApiKey = Environment.GetEnvironmentVariable("RAINDROP_LIVEKIT_API_KEY") ?? Voice.LiveKit?.ApiKey,
-                    ApiSecret = Environment.GetEnvironmentVariable("RAINDROP_LIVEKIT_API_SECRET") ?? Voice.LiveKit?.ApiSecret
+                    ApiSecret = Environment.GetEnvironmentVariable("RAINDROP_LIVEKIT_API_SECRET") ?? Voice.LiveKit?.ApiSecret,
+                    AllowWeakSecret = Environment.GetEnvironmentVariable("RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET") is { } weak
+                        ? weak.Equals("true", StringComparison.OrdinalIgnoreCase)
+                        : Voice.LiveKit?.AllowWeakSecret ?? false
                 }
             }
         };
@@ -131,6 +135,7 @@ public sealed record ServerConfig
         options.ApiUrl = livekit.ApiUrl;
         options.ApiKey = livekit.ApiKey ?? "";
         options.ApiSecret = livekit.ApiSecret ?? "";
+        options.AllowWeakSecret = livekit.AllowWeakSecret;
     }
 
     /// <summary>Applies the configured database settings to the options the server reads.</summary>
@@ -155,6 +160,7 @@ public sealed record ServerConfig
         options.MaximumMessageLength = Channels.MaximumMessageLength;
         options.DefaultHistoryPageSize = Channels.DefaultHistoryPageSize;
         options.MaximumHistoryPageSize = Channels.MaximumHistoryPageSize;
+        options.AllowPlaintextMessages = Channels.AllowPlaintextMessages;
     }
 
     /// <summary>
@@ -191,7 +197,13 @@ public sealed record ServerConfig
     /// </summary>
     public ServerHostOptions CreateHostOptions()
     {
-        var options = new ServerHostOptions { Urls = Urls };
+        var options = new ServerHostOptions
+        {
+            Urls = Urls,
+            SslProtocols = Tls.AllowTls12 || !ServerHostOptions.PlatformServesTls13
+                ? SslProtocols.Tls12 | SslProtocols.Tls13
+                : SslProtocols.Tls13
+        };
 
         if (Tls.Enabled)
             options.Certificate = ServerCertificate.LoadOrCreate(
@@ -233,6 +245,12 @@ public sealed record ServerConfig
         return hosts;
     }
 
+    /// <summary>
+    /// Loads — or, on first start, generates and saves — the key this server signs its certificate
+    /// with, so clients can follow a certificate change without losing their pin.
+    /// </summary>
+    public ServerIdentityKey LoadIdentityKey() => ServerIdentityKey.LoadOrCreate(ResolvePath(Tls.IdentityKeyPath));
+
     /// <summary>Resolves a relative path against the executable, so it sits next to raindrop.json.</summary>
     private static string ResolvePath(string path) =>
         Path.IsPathRooted(path) ? path : Path.Combine(AppContext.BaseDirectory, path);
@@ -250,11 +268,22 @@ public sealed record ServerConfig
 /// The names and IP addresses clients reach this server by, for a generated certificate. Derived
 /// from the listening URLs when left out.
 /// </param>
+/// <param name="IdentityKeyPath">
+/// The server's long-lived signing key, relative to the executable, generated on first start. It
+/// vouches for whichever certificate the server presents, which is what lets you replace
+/// <paramref name="CertificatePath"/> without every client refusing to connect. Back it up with the
+/// certificate; losing it makes the server a stranger to every client.
+/// </param>
+/// <param name="AllowTls12">
+/// Whether clients may still negotiate TLS 1.2. Off by default: TLS 1.3 alone.
+/// </param>
 public sealed record TlsConfig(
     bool Enabled = true,
     string CertificatePath = "raindrop.pfx",
     string? CertificatePassword = null,
-    string[]? HostNames = null);
+    string[]? HostNames = null,
+    string IdentityKeyPath = "server-identity.key",
+    bool AllowTls12 = false);
 
 /// <param name="Provider">The database module to enable: sqlite, postgres, sqlserver, or a driver you added.</param>
 /// <param name="ConnectionString">The ADO.NET connection string for that database.</param>
@@ -277,10 +306,15 @@ public sealed record UserConfig(
 /// <param name="MaximumMessageLength">The longest message this server accepts, in characters.</param>
 /// <param name="DefaultHistoryPageSize">How many messages a history request returns by default.</param>
 /// <param name="MaximumHistoryPageSize">The most messages one history request may return.</param>
+/// <param name="AllowPlaintextMessages">
+/// Whether members may still post plaintext messages the server can read. Off by default: every
+/// message must be end-to-end encrypted.
+/// </param>
 public sealed record ChannelConfig(
     int MaximumMessageLength = 4000,
     int DefaultHistoryPageSize = 50,
-    int MaximumHistoryPageSize = 200);
+    int MaximumHistoryPageSize = 200,
+    bool AllowPlaintextMessages = false);
 
 /// <param name="DefaultMemberPermissions">
 /// What the built-in <c>everyone</c> role is created with on a server that has never had one, as
@@ -321,7 +355,12 @@ public sealed record VoiceConfig(
 /// <param name="ApiSecret">
 /// Its secret. Better set through <c>RAINDROP_LIVEKIT_API_SECRET</c> than written into this file.
 /// </param>
+/// <param name="AllowWeakSecret">
+/// Accept a short or well-known secret such as LiveKit's <c>--dev</c> one. Only for a throwaway
+/// server on your own machine: anyone who knows the secret can mint tokens into any call.
+/// </param>
 public sealed record LiveKitConfig(
     string ApiUrl = "http://localhost:7880",
     string? ApiKey = null,
-    string? ApiSecret = null);
+    string? ApiSecret = null,
+    bool AllowWeakSecret = false);

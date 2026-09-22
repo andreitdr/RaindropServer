@@ -61,4 +61,7 @@ internal sealed class RelationalDeletedMessageStore : RelationalStore, IDeletedM
             AddValue(command, "@deleted_by", deletion.DeletedBy.ToString());
             AddValue(command, "@reason", DeletedMessageReasons.ChannelDeleted);
         }, cancellationToken);
+
+    public Task<int> PurgeAsync(CancellationToken cancellationToken) =>
+        ExecuteAsync($"DELETE FROM {Table}", _ => { }, cancellationToken);
 }

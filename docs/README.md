@@ -15,6 +15,7 @@ with [Architecture overview](architecture-overview.md) if you're new to the code
 | [Endpoint model & DI wiring](endpoint-model.md) | The four endpoint interfaces, auto-discovery, `AddRaindropServer` and friends |
 | [Wire formats](wire-formats.md) | JSON vs. MessagePack negotiation |
 | [Transport security](transport-security.md) | TLS, self-signed certificates, fingerprint pinning |
+| [End-to-end encryption](e2ee.md) | Identity keys, devices, session binding, key backup and device linking, and the MLS delivery service (groups, commits, key packages, Welcomes) — the server side of E2EE |
 | [Users](users.md) | Registration, login, sessions, leaving/rejoining, password hashing, User API |
 | [Members](members.md) | The roster and presence, Member API |
 | [Roles & permissions](roles-and-permissions.md) | The permission model, built-in roles, who may change what, Role API |
@@ -37,9 +38,15 @@ with [Architecture overview](architecture-overview.md) if you're new to the code
 - **Push:** a WebSocket at `GET /api/events` delivers every change a member may see, as it happens.
 - **What's implemented:** accounts, sessions, roles/permissions, text channels and messages, voice
   channels (audio on a LiveKit sidecar), push events.
+- **End-to-end encryption:** both the identity layer (identity keys, devices, session binding, key
+  backup, device linking) and the MLS delivery service (groups, commits, key packages, Welcomes) are
+  implemented server-side; see [E2EE](e2ee.md). Encrypted text messages and calls don't reach users yet
+  — the client's `E2eeApi` wrapper is wired and tested against the delivery service, but nothing in the
+  app drives a channel's group through it yet.
 - **What's not implemented yet:** camera and screen sharing in voice channels, per-channel permission
-  overrides, end-to-end encryption, schema migrations, event replay/resume (a reconnecting client
-  re-reads instead).
+  overrides, the app actually sending end-to-end encrypted messages and calls (the server and Rust core
+  are ready; see [RaindropCrypto's docs](../../RaindropCrypto/docs/README.md#quick-facts)), schema
+  migrations, event replay/resume (a reconnecting client re-reads instead).
 
 ## Keeping this wiki current
 

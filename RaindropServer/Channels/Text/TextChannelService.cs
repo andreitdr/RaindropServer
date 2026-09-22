@@ -1,3 +1,4 @@
+using RaindropServer.E2ee;
 using RaindropServer.Events;
 using RaindropServer.Roles;
 using RaindropServer.Users;
@@ -18,6 +19,7 @@ public sealed class TextChannelService
 {
     private readonly ChannelService _channels;
     private readonly ITextMessageStore _messages;
+    private readonly IMlsGroupStore _groups;
     private readonly ChannelOptions _options;
     private readonly IEventPublisher _events;
     private readonly IReadOnlyList<IMessageDeletionListener> _deletionListeners;
@@ -26,6 +28,7 @@ public sealed class TextChannelService
     public TextChannelService(
         ChannelService channels,
         ITextMessageStore messages,
+        IMlsGroupStore groups,
         ChannelOptions options,
         IEventPublisher events,
         IEnumerable<IMessageDeletionListener> deletionListeners,
@@ -33,6 +36,7 @@ public sealed class TextChannelService
     {
         _channels = channels;
         _messages = messages;
+        _groups = groups;
         _options = options;
         _events = events;
         _deletionListeners = deletionListeners.ToList();
@@ -47,6 +51,10 @@ public sealed class TextChannelService
     {
         var access = await _channels.ResolveAsync(session.UserId, request.ChannelId, ChannelType.Text, cancellationToken);
         access.Permissions.Require(Permission.SendMessages, "post in this channel");
+
+        if (!_options.AllowPlaintextMessages)
+            throw ApiException.BadRequest("encryption_required",
+                "This server only accepts end-to-end encrypted messages. Update your client.");
 
         var content = ValidateContent(request.Content);
 
@@ -72,6 +80,59 @@ public sealed class TextChannelService
     /// order; following <see cref="MessageHistoryResponse.NextCursor"/> walks further into the past
     /// until it comes back null.
     /// </summary>
+    /// <summary>
+    /// Posts an end-to-end encrypted message. The server checks what it can see without reading it:
+    /// that it is an MLS application message for this channel's group, sent in the group's current
+    /// epoch or one of the last few, from a session bound to one of the author's devices. It stores
+    /// and relays the ciphertext as it is.
+    /// </summary>
+    public async Task<ChannelMessage> SendEncryptedAsync(
+        UserSession session, SendEncryptedMessageRequest request, CancellationToken cancellationToken)
+    {
+        var access = await _channels.ResolveAsync(session.UserId, request.ChannelId, ChannelType.Text, cancellationToken);
+        access.Permissions.Require(Permission.SendMessages, "post in this channel");
+
+        if (session.DeviceId is not { } deviceId)
+            throw ApiException.Forbidden("device_required",
+                "Encrypted messages are sent from a session bound to one of your devices.");
+
+        if (request.Message is not { Length: > 0 } || request.Message.Length > _options.MaximumEncryptedMessageBytes)
+            throw ApiException.BadRequest("message_too_long",
+                $"An encrypted message may be at most {_options.MaximumEncryptedMessageBytes} bytes.");
+
+        var envelope = MlsFraming.Parse(request.Message);
+        if (envelope.WireFormat != MlsWireFormat.PrivateMessage || envelope.ContentType != MlsContentType.Application)
+            throw ApiException.BadRequest("invalid_mls_message", "That is not an encrypted MLS application message.");
+        if (envelope.GroupId is null
+            || !envelope.GroupId.AsSpan().SequenceEqual(MlsFraming.GroupIdFor(access.Channel.ChannelId)))
+            throw ApiException.BadRequest("wrong_group", "That message is for a different channel's group.");
+
+        var group = await _groups.FindAsync(access.Channel.ChannelId, cancellationToken)
+                    ?? throw ApiException.NotFound("group_not_found", "This channel has no encryption group yet.");
+        var epoch = (long)envelope.Epoch;
+        if (epoch > group.Epoch || epoch < group.Epoch - _options.MaximumPastEpochs)
+            throw ApiException.Conflict("stale_epoch",
+                $"The channel's group is at epoch {group.Epoch}; catch up and encrypt again.");
+
+        var message = new TextMessageRecord
+        {
+            MessageId = Guid.NewGuid(),
+            ChannelId = access.Channel.ChannelId,
+            AuthorId = session.UserId,
+            Ciphertext = request.Message,
+            Epoch = epoch,
+            SenderDeviceId = deviceId,
+            SentAtUtc = UtcNow
+        };
+
+        await _messages.InsertAsync(message, cancellationToken);
+
+        var sent = ToContract(message);
+        await _events.PublishAsync(ServerEventTypes.MessageCreated, sent, _channels.AudienceFor(access.Channel));
+
+        return sent;
+    }
+
     public async Task<MessageHistoryResponse> ReadHistoryAsync(
         UserSession session, MessageHistoryRequest request, CancellationToken cancellationToken)
     {
@@ -177,5 +238,8 @@ public sealed class TextChannelService
         message.SentAtUtc,
         message.IsDeleted,
         message.DeletedAtUtc,
-        message.DeletedBy);
+        message.DeletedBy,
+        message.Ciphertext,
+        message.Epoch,
+        message.SenderDeviceId);
 }

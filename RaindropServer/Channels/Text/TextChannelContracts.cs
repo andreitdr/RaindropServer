@@ -15,6 +15,11 @@ namespace RaindropServer.Channels.Text;
 /// <param name="Deleted">Whether this is a tombstone the client should render as a removed message.</param>
 /// <param name="DeletedAtUtc">When it was deleted, if it was.</param>
 /// <param name="DeletedBy">The UUID of whoever deleted it: the author, or a moderator of the channel.</param>
+/// <remarks>
+/// An end-to-end encrypted message has no <c>Content</c>: it carries <c>Ciphertext</c> (the MLS
+/// application message, which only the channel group's members can decrypt), the <c>Epoch</c> it was
+/// sent in and the <c>SenderDeviceId</c>. A plaintext message leaves those three null.
+/// </remarks>
 public record ChannelMessage(
     Guid MessageId,
     Guid ChannelId,
@@ -23,13 +28,23 @@ public record ChannelMessage(
     DateTime SentAtUtc,
     bool Deleted,
     DateTime? DeletedAtUtc,
-    Guid? DeletedBy);
+    Guid? DeletedBy,
+    byte[]? Ciphertext = null,
+    long? Epoch = null,
+    Guid? SenderDeviceId = null);
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
 /// <param name="ChannelId">The text channel to post in.</param>
 /// <param name="Content">The message text.</param>
 public record SendMessageRequest(Guid ChannelId, string Content);
+
+/// <param name="ChannelId">The text channel to post in.</param>
+/// <param name="Message">
+/// The MLS application message (<c>PrivateMessage</c>) the sender's device encrypted for the
+/// channel's group, in its current epoch.
+/// </param>
+public record SendEncryptedMessageRequest(Guid ChannelId, byte[] Message);
 
 /// <param name="ChannelId">The text channel to read.</param>
 /// <param name="Before">

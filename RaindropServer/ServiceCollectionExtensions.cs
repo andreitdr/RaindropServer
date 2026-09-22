@@ -5,6 +5,7 @@ using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Data;
+using RaindropServer.E2ee;
 using RaindropServer.Events;
 using RaindropServer.Events.WebSockets;
 using RaindropServer.Members;
@@ -50,6 +51,7 @@ public static class ServiceCollectionExtensions
         services.AddRaindropMembers();
         services.AddRaindropChannels(configureChannels);
         services.AddRaindropVoice(configureVoice);
+        services.AddRaindropE2ee();
         services.AddDiscoveredEndpoints();
 
         return services;
@@ -223,6 +225,7 @@ public static class ServiceCollectionExtensions
         // Text channels.
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IChannelModule, TextChannelModule>());
         services.TryAddSingleton<TextChannelService>();
+        services.TryAddSingleton<MessageReportService>();
 
         // Deleted messages are copied into the database before their text is destroyed. A plugin adds
         // its own IMessageDeletionListener beside this one; it does not replace it.
@@ -273,6 +276,45 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
+    /// Registers end-to-end encryption identities: devices and identity keys, session binding, key
+    /// backups and the device-link relay. Called for you by <see cref="AddRaindropServer"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IDeviceLinkRelay"/> and <see cref="IE2eeMembershipPolicy"/> are <c>TryAdd</c>, so a
+    /// plugin can hold links somewhere shared or decide differently who belongs in a group.
+    /// <see cref="IDeviceListener"/> implementations are added beside each other with
+    /// <c>TryAddEnumerable</c>.
+    /// </remarks>
+    public static IServiceCollection AddRaindropE2ee(
+        this IServiceCollection services, Action<E2eeOptions>? configure = null)
+    {
+        var options = services.FindInstance<E2eeOptions>() ?? new E2eeOptions();
+        configure?.Invoke(options);
+
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton(options);
+        services.AddRaindropUsers();
+        services.TryAddSingleton<IDeviceLinkRelay, InMemoryDeviceLinkRelay>();
+        services.TryAddSingleton<DeviceService>();
+        services.AddServerEventHandler<MemberEvent, ErasedMemberCleanup>();
+
+        // The MLS delivery service, and keeping its groups in step with who may be in them.
+        services.AddRaindropRoles();
+        services.TryAddSingleton<IE2eeMembershipPolicy, ChannelPermissionMembershipPolicy>();
+        services.TryAddSingleton<MlsDeliveryService>();
+        services.TryAddSingleton<GroupMembershipReconciler>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IDeviceListener, GroupMembershipReconciler>(
+            sp => sp.GetRequiredService<GroupMembershipReconciler>()));
+        services.AddServerEventHandler<RoleSummary, GroupMembershipReconciler>();
+        services.AddServerEventHandler<RoleDeletedEvent, GroupMembershipReconciler>();
+        services.AddServerEventHandler<MemberRolesEvent, GroupMembershipReconciler>();
+        services.AddServerEventHandler<MemberEvent, GroupMembershipReconciler>();
+        services.AddServerEventHandler<ChannelDeletedEvent, GroupMembershipReconciler>();
+
+        return services;
+    }
+
+    /// <summary>
     /// Enables one of the installed database modules. Nothing is persisted until this is called, and
     /// the server owner chooses the driver purely by name — "sqlite", "postgres", "sqlserver", or
     /// anything else they have dropped into the <c>drivers/</c> folder.
@@ -302,6 +344,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(driver.CreateTextMessageStore(options));
         services.AddSingleton(driver.CreateDeletedMessageStore(options));
         services.AddSingleton(driver.CreateVoiceMuteStore(options));
+        services.AddSingleton(driver.CreateDeviceStore(options));
+        services.AddSingleton(driver.CreateKeyBackupStore(options));
+        services.AddSingleton(driver.CreateMlsGroupStore(options));
+        services.AddSingleton(driver.CreateKeyPackageStore(options));
+        services.AddSingleton(driver.CreateWelcomeStore(options));
+        services.AddSingleton(driver.CreateMessageReportStore(options));
 
         return services;
     }

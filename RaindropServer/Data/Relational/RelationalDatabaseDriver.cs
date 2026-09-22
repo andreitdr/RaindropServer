@@ -3,6 +3,7 @@ using System.Data.Common;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
+using RaindropServer.E2ee;
 using RaindropServer.Roles;
 using RaindropServer.Users;
 
@@ -78,6 +79,30 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
     /// <inheritdoc />
     public IVoiceMuteStore CreateVoiceMuteStore(DatabaseOptions options) =>
         new RelationalVoiceMuteStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IDeviceStore CreateDeviceStore(DatabaseOptions options) =>
+        new RelationalDeviceStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IKeyBackupStore CreateKeyBackupStore(DatabaseOptions options) =>
+        new RelationalKeyBackupStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IMlsGroupStore CreateMlsGroupStore(DatabaseOptions options) =>
+        new RelationalMlsGroupStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IKeyPackageStore CreateKeyPackageStore(DatabaseOptions options) =>
+        new RelationalKeyPackageStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IWelcomeStore CreateWelcomeStore(DatabaseOptions options) =>
+        new RelationalWelcomeStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
+    public IMessageReportStore CreateMessageReportStore(DatabaseOptions options) =>
+        new RelationalMessageReportStore(this, options.ConnectionString);
 
     /// <inheritdoc />
     public async Task EnsureSchemaAsync(DatabaseOptions options, CancellationToken cancellationToken)

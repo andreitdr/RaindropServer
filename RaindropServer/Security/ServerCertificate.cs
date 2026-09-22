@@ -18,7 +18,6 @@ namespace RaindropServer.Security;
 /// </remarks>
 public static class ServerCertificate
 {
-    private const int KeySizeBits = 2048;
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(3650);
 
     /// <summary>
@@ -44,7 +43,7 @@ public static class ServerCertificate
             Directory.CreateDirectory(directory);
 
         File.WriteAllBytes(path, pfx);
-        RestrictToOwner(path);
+        FilePermissions.RestrictToOwner(path);
 
         // Round-tripping through the exported bytes is what gives the loaded certificate a private
         // key usable for TLS; the freshly created object's key is not in the right form everywhere.
@@ -56,17 +55,23 @@ public static class ServerCertificate
     /// owner reads out to confirm their users are talking to the right machine.
     /// </summary>
     public static string Fingerprint(X509Certificate2 certificate) =>
-        Convert.ToHexString(SHA256.HashData(certificate.RawData))
+        FormatFingerprint(SHA256.HashData(certificate.RawData));
+
+    /// <summary>A digest as colon-separated upper-case hex, the form owners read out to users.</summary>
+    public static string FormatFingerprint(byte[] digest) =>
+        Convert.ToHexString(digest)
             .Chunk(2)
             .Select(pair => new string(pair))
             .Aggregate((left, right) => $"{left}:{right}");
 
     private static X509Certificate2 Create(IReadOnlyCollection<string> hostNames)
     {
-        using var key = RSA.Create(KeySizeBits);
+        // ECDSA P-256: smaller and faster to handshake with than RSA, and what TLS 1.3 prefers. A
+        // server that already has an RSA certificate on disk keeps loading it unchanged.
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
         var request = new CertificateRequest(
-            new X500DistinguishedName("CN=Raindrop Server"), key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            new X500DistinguishedName("CN=Raindrop Server"), key, HashAlgorithmName.SHA256);
 
         var alternativeNames = new SubjectAlternativeNameBuilder();
         var named = false;
@@ -90,7 +95,7 @@ public static class ServerCertificate
         request.CertificateExtensions.Add(alternativeNames.Build());
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, critical: true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(
-            X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, critical: true));
+            X509KeyUsageFlags.DigitalSignature, critical: true));
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             [new Oid("1.3.6.1.5.5.7.3.1")], critical: false)); // TLS server authentication
 
@@ -98,17 +103,5 @@ public static class ServerCertificate
 
         // Backdated slightly so a client whose clock runs behind the server's still accepts it.
         return request.CreateSelfSigned(now.AddDays(-1), now.Add(Lifetime));
-    }
-
-    /// <summary>
-    /// Takes the private key file down to owner-only. It holds the server's identity, and on a shared
-    /// host the default permissions would let any local account read it.
-    /// </summary>
-    private static void RestrictToOwner(string path)
-    {
-        if (OperatingSystem.IsWindows())
-            return;
-
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 }

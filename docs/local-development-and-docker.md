@@ -9,7 +9,25 @@ dotnet build
 dotnet run --project ServerCli
 ```
 
-There is no test project in this repository yet.
+Tests are in `RaindropServer.Tests` (xUnit):
+
+```bash
+dotnet test
+```
+
+They cover:
+- the MLS envelope parser and device certificates, against real fixtures from the Rust core
+  (`RaindropServer.Tests/Fixtures/*.hex`)
+- Ed25519 (RFC 8032 vectors) and the server identity key
+- the stores under real concurrency: racing commits for one epoch, racing key-package claims, history
+  paging across plaintext and encrypted messages
+- the delivery-service and device-service rules
+- LiveKit option validation
+
+Store tests run on SQLite, and also on PostgreSQL and SQL Server when `RAINDROP_TEST_POSTGRES` or
+`RAINDROP_TEST_SQLSERVER` holds a connection string (the docker-compose services will do). End-to-end
+tests against a running server, with the real Rust core, are in the client:
+`RaindropClient/test/integration/`.
 
 The server presents a self-signed certificate by default (see
 [Transport security](transport-security.md)), so `curl` needs `-k` until you trust it:

@@ -12,6 +12,9 @@
 
   <ItemGroup>
     <!-- The binary wire format. JSON stays available for humans and debugging. -->
+    <!-- Ed25519 verification only: .NET has no built-in Ed25519, and end-to-end encryption uses it
+         for device certificates and session binding. Wrapped by Security/Ed25519Signatures. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageReference Include="MessagePack" Version="3.1.8" />
   </ItemGroup>
 

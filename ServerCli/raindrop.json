@@ -5,7 +5,11 @@
     "enabled": true,
     "certificatePath": "raindrop.pfx",
     "certificatePassword": null,
-    "hostNames": null
+    "hostNames": null,
+    // Signs the certificate's fingerprint so clients can follow a certificate
+    // change. Generated on first start; back it up with raindrop.pfx.
+    "identityKeyPath": "server-identity.key",
+    "allowTls12": false
   },
 
   "database": {
@@ -20,10 +24,13 @@
     "minimumPasswordLength": 8
   },
 
+  // Messages are end-to-end encrypted; the server stores ciphertext it cannot
+  // read. Allow plaintext posts only for clients that cannot encrypt yet.
   "channels": {
     "maximumMessageLength": 4000,
     "defaultHistoryPageSize": 50,
-    "maximumHistoryPageSize": 200
+    "maximumHistoryPageSize": 200,
+    "allowPlaintextMessages": false
   },
 
   // What a fresh server starts with. The everyone role is seeded from
@@ -40,14 +47,17 @@
   // channels can be created but nobody can join them. Clients never reach
   // LiveKit's apiUrl themselves — they connect through this server — so only
   // LiveKit's media ports (UDP 7882, TCP 7881) need to be reachable from outside.
-  // Prefer RAINDROP_LIVEKIT_API_SECRET to writing the secret here.
+  // Set the key and secret through RAINDROP_LIVEKIT_API_KEY and
+  // RAINDROP_LIVEKIT_API_SECRET, with the same values LiveKit has (.env). The
+  // secret must be 32+ random characters; LiveKit's --dev "secret" is refused.
   "voice": {
     "provider": null,
     "maximumParticipants": 25,
     "livekit": {
       "apiUrl": "http://localhost:7880",
-      "apiKey": "devkey",
-      "apiSecret": "secret"
+      "apiKey": null,
+      "apiSecret": null,
+      "allowWeakSecret": false
     }
   }
 }

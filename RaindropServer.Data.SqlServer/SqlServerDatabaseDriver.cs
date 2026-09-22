@@ -198,6 +198,152 @@ public sealed class SqlServerDatabaseDriver : RelationalDatabaseDriver
             muted_by varchar(36) NOT NULL,
             muted_at datetime2   NOT NULL
         )
+        """,
+
+        // End-to-end encryption: users' public identity keys, their devices, and sealed key backups.
+        """
+        IF OBJECT_ID(N'raindrop_user_identities', N'U') IS NULL
+        CREATE TABLE raindrop_user_identities (
+            user_id      varchar(36)    NOT NULL PRIMARY KEY,
+            identity_key varbinary(64)  NOT NULL,
+            updated_at   datetime2      NOT NULL
+        )
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_devices', N'U') IS NULL
+        CREATE TABLE raindrop_devices (
+            user_id       varchar(36)    NOT NULL,
+            device_id     varchar(36)    NOT NULL,
+            signature_key varbinary(64)  NOT NULL,
+            certificate   varbinary(1024) NOT NULL,
+            created_at    datetime2      NOT NULL,
+            revoked_at    datetime2      NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_key_backups', N'U') IS NULL
+        CREATE TABLE raindrop_key_backups (
+            user_id    varchar(36)    NOT NULL PRIMARY KEY,
+            blob_data  varbinary(max) NOT NULL,
+            updated_at datetime2      NOT NULL
+        )
+        """,
+
+        // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
+        """
+        IF OBJECT_ID(N'raindrop_mls_groups', N'U') IS NULL
+        CREATE TABLE raindrop_mls_groups (
+            channel_id       varchar(36)    NOT NULL PRIMARY KEY,
+            epoch            bigint         NOT NULL,
+            group_info       varbinary(max) NULL,
+            group_info_epoch bigint         NOT NULL,
+            updated_at       datetime2      NOT NULL
+        )
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_mls_commits', N'U') IS NULL
+        CREATE TABLE raindrop_mls_commits (
+            channel_id     varchar(36)    NOT NULL,
+            epoch          bigint         NOT NULL,
+            message        varbinary(max) NOT NULL,
+            sender_user_id varchar(36)    NOT NULL,
+            created_at     datetime2      NOT NULL,
+            PRIMARY KEY (channel_id, epoch)
+        )
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_mls_key_packages', N'U') IS NULL
+        CREATE TABLE raindrop_mls_key_packages (
+            package_id  varchar(36)    NOT NULL PRIMARY KEY,
+            user_id     varchar(36)    NOT NULL,
+            device_id   varchar(36)    NOT NULL,
+            key_package varbinary(max) NOT NULL,
+            last_resort int            NOT NULL,
+            created_at  datetime2      NOT NULL
+        )
+        """,
+
+        """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ix_raindrop_mls_key_packages_device' AND object_id = OBJECT_ID(N'raindrop_mls_key_packages'))
+        CREATE INDEX ix_raindrop_mls_key_packages_device
+            ON raindrop_mls_key_packages (user_id, device_id, last_resort, created_at)
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_mls_welcomes', N'U') IS NULL
+        CREATE TABLE raindrop_mls_welcomes (
+            welcome_id varchar(36)    NOT NULL PRIMARY KEY,
+            user_id    varchar(36)    NOT NULL,
+            device_id  varchar(36)    NOT NULL,
+            channel_id varchar(36)    NOT NULL,
+            epoch      bigint         NOT NULL,
+            welcome    varbinary(max) NOT NULL,
+            created_at datetime2      NOT NULL
+        )
+        """,
+
+        """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ix_raindrop_mls_welcomes_device' AND object_id = OBJECT_ID(N'raindrop_mls_welcomes'))
+        CREATE INDEX ix_raindrop_mls_welcomes_device
+            ON raindrop_mls_welcomes (user_id, device_id)
+        """,
+
+        // End-to-end encrypted messages: MLS ciphertext the server cannot read.
+        """
+        IF OBJECT_ID(N'raindrop_encrypted_messages', N'U') IS NULL
+        CREATE TABLE raindrop_encrypted_messages (
+            message_id varchar(36)    NOT NULL PRIMARY KEY,
+            channel_id varchar(36)    NOT NULL,
+            author_id  varchar(36)    NOT NULL,
+            device_id  varchar(36)    NULL,
+            epoch      bigint         NOT NULL,
+            ciphertext varbinary(max) NULL,
+            sent_at    datetime2      NOT NULL,
+            deleted_at datetime2      NULL,
+            deleted_by varchar(36)    NULL
+        )
+        """,
+
+        """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ix_raindrop_encrypted_messages_history' AND object_id = OBJECT_ID(N'raindrop_encrypted_messages'))
+        CREATE INDEX ix_raindrop_encrypted_messages_history
+            ON raindrop_encrypted_messages (channel_id, sent_at, message_id)
+        """,
+
+        // Reported messages: the text of an encrypted message a member chose to reveal.
+        """
+        IF OBJECT_ID(N'raindrop_message_reports', N'U') IS NULL
+        CREATE TABLE raindrop_message_reports (
+            report_id   varchar(36)   NOT NULL PRIMARY KEY,
+            message_id  varchar(36)   NOT NULL,
+            channel_id  varchar(36)   NOT NULL,
+            author_id   varchar(36)   NOT NULL,
+            device_id   varchar(36)   NOT NULL,
+            reporter_id varchar(36)   NOT NULL,
+            body        nvarchar(max) NOT NULL,
+            reason      nvarchar(500) NULL,
+            sent_at     datetime2     NOT NULL,
+            reported_at datetime2     NOT NULL
+        )
+        """,
+
+        """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ix_raindrop_message_reports_channel' AND object_id = OBJECT_ID(N'raindrop_message_reports'))
+        CREATE INDEX ix_raindrop_message_reports_channel
+            ON raindrop_message_reports (channel_id, reported_at)
         """
     ];
 }

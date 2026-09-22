@@ -24,7 +24,13 @@ public sealed class ServerInfoEndpoint : IEndpoint
 
     public Task HandleAsync(HttpContext context, CancellationToken cancellationToken) =>
         EndpointResponse.WriteAsync(context, cancellationToken, _ => Task.FromResult(
-            new ServerInfoResponse(_identity.ProtocolVersion, _identity.TlsFingerprint, _codecs.ContentTypes)));
+            new ServerInfoResponse(
+                _identity.ProtocolVersion,
+                _identity.TlsFingerprint,
+                _codecs.ContentTypes,
+                _identity.IdentityKey,
+                _identity.TlsBindingSignature,
+                _identity.Capabilities)));
 }
 
 /// <param name="ProtocolVersion">The Raindrop protocol this server speaks.</param>
@@ -33,7 +39,20 @@ public sealed class ServerInfoEndpoint : IEndpoint
 /// The media types this server reads and writes, in preference order. Send one as both
 /// <c>Content-Type</c> and <c>Accept</c>.
 /// </param>
+/// <param name="IdentityKey">
+/// The server's long-lived P-256 public key (uncompressed point). Pin it with the fingerprint.
+/// </param>
+/// <param name="TlsBindingSignature">
+/// <paramref name="IdentityKey"/>'s ECDSA-SHA256 signature (<c>r‖s</c>) over
+/// <c>"raindrop/tls-binding/v1\n" + fingerprint</c>, the fingerprint in lower-case hex without
+/// separators. A client whose pinned fingerprint no longer matches accepts the new certificate only
+/// when the pinned identity key signed the one it was actually presented.
+/// </param>
+/// <param name="Capabilities">Optional features this server offers.</param>
 public record ServerInfoResponse(
     string ProtocolVersion,
     string? TlsFingerprint,
-    IReadOnlyList<string> PayloadFormats);
+    IReadOnlyList<string> PayloadFormats,
+    byte[]? IdentityKey,
+    byte[]? TlsBindingSignature,
+    IReadOnlyList<string> Capabilities);

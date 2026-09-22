@@ -65,6 +65,7 @@ Types are **names**, like permissions and presence: a client too old to know one
 | `ready` | `ReadyEvent(UserId, ProtocolVersion)` | the new connection, first, once |
 | `message.created` | `ChannelMessage` — as in history | members who can see the channel |
 | `message.deleted` | `ChannelMessage` — the tombstone, `content: null`, `deleted: true` | members who can see the channel |
+| `message.reported` | `MessageReportSummary` — an encrypted message a member reported, its text proven by the author's attestation, see [Messages](messages.md#reporting-an-encrypted-message) | members with `manage_messages` in the channel |
 | `channel.created` | `ChannelSummary` — with the **recipient's own** `yourPermissions` | members who can see it |
 | `channel.renamed` | `ChannelSummary` — with the recipient's own `yourPermissions` | members who can see it |
 | `channel.deleted` | `ChannelDeletedEvent(ChannelId)` | members who could see it |
@@ -78,6 +79,12 @@ Types are **names**, like permissions and presence: a client too old to know one
 | `role.deleted` | `RoleDeletedEvent(RoleId)` | everyone |
 | `voice.state` | `VoiceParticipant` — somebody joined a call, or their state in it changed; merge on `(channelId, userId)` | members who can see the channel, and the member themselves |
 | `voice.left` | `VoiceLeftEvent(ChannelId, UserId, Reason)` — `Reason` is an open string, see [Voice](voice.md#voice-api) | members who can see the channel, and the member themselves |
+| `e2ee.device.added` / `e2ee.device.revoked` | `DeviceEvent(UserId, DeviceId, Certificate)` — see [E2EE](e2ee.md#events) | everyone |
+| `e2ee.identity.reset` | `IdentityResetEvent(UserId)` — that member's safety number changed | everyone |
+| `e2ee.handshake` | `HandshakeEvent(ChannelId, Epoch, Message)` — an accepted MLS commit, see [E2EE](e2ee.md#the-delivery-service) | members allowed in the channel's group |
+| `e2ee.welcome` | `WelcomeEvent(ChannelId, DeviceId)` — a Welcome waits at `/api/e2ee/welcomes` | the recipient |
+| `e2ee.group.reconcile` | `GroupReconcileEvent(ChannelId)` — compare the group with its roster | members allowed in the channel's group |
+| `e2ee.keypackages.low` | `KeyPackagesLowEvent(DeviceId, Remaining)` | the device's owner |
 
 Payloads with no REST counterpart are in
 [`ServerEvent.cs`](../RaindropServer/Events/ServerEvent.cs); the rest are the same records the REST API

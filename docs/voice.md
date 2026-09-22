@@ -138,8 +138,42 @@ pins>/api/channels/voice/signal`. LiveKit's SDK then opens `…/rtc` and, after 
   `/api/channels/voice/signal/{**path}`), because the caller authenticates with LiveKit's token, not a
   Raindrop session. GET routes also answer CONNECT, so it works over HTTP/2 too.
 
-Media is encrypted with DTLS-SRTP **as far as LiveKit**, which decrypts it to forward it. So the
-server owner can, in principle, hear calls. See [Transport security](transport-security.md).
+## End-to-end encrypted calls
+
+Media is encrypted twice:
+
+- **DTLS-SRTP**, as far as LiveKit.
+- **End to end, inside that.** Each client's LiveKit frame cryptor encrypts every audio frame
+  (AES-GCM) before it leaves the device. LiveKit forwards frames it cannot decrypt, so neither the
+  media server nor whoever runs it can hear a call.
+
+**Where the key comes from.** The key comes from the voice channel's MLS group, which is the same
+[delivery service](e2ee.md#the-delivery-service) as text channels. Its members are the devices of
+everyone with `view_channel` and `connect`. A client exports it as
+`MLS-Exporter("raindrop/voice/v1", group id, 32)` for the group's current epoch, and puts it in key
+slot `epoch mod 16`, so the previous keys still decrypt frames in flight. Keys are never ratcheted, and
+a decryption failure never turns encryption off.
+
+**Key changes.** The key changes whenever the group's epoch does:
+- somebody gains or loses access to the channel
+- a device is revoked, and members reconcile it out
+- every 10 minutes during a call, when the participant with the lowest member id rotates it
+
+**The server's part** is small, and it holds no key:
+- It advertises `e2ee.voice.v1`, which tells clients every call here is encrypted, so a client that
+  cannot get the key refuses to join rather than joining in the clear.
+- Its LiveKit tokens grant **no data channel** (`canPublishData = false`), so nothing that could carry
+  key material passes through LiveKit.
+
+**Clients fail closed.** Audio published without encryption, or not decrypting with the group's key,
+is kept silent, and the call bar shows the state as a lock.
+
+**What the server can still see** is the call's metadata: who is in which call, when, speaking
+indicators, mute state.
+
+**A participant who leaves a call keeps the key** only as long as they stay in the channel's group,
+which means they could still join the call anyway. Removing their access removes them from the group
+and moves the key on.
 
 ## Voice API
 

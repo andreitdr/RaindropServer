@@ -1,9 +1,11 @@
 using System.Data.Common;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using RaindropServer;
 using RaindropServer.Channels;
+using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Data;
 using RaindropServer.Events;
@@ -76,7 +78,35 @@ catch (Exception ex) when (ex is CryptographicException or IOException or Unauth
 }
 
 var fingerprint = hostOptions.Certificate is { } certificate ? ServerCertificate.Fingerprint(certificate) : null;
-services.AddSingleton(new ServerIdentity(ServerIdentity.CurrentProtocolVersion, fingerprint));
+
+// The long-lived key that vouches for the certificate. Signing the fingerprint on every start is what
+// lets the owner swap raindrop.pfx: clients that pinned this key follow the change instead of refusing.
+ServerIdentityKey identityKey;
+try
+{
+    identityKey = config.LoadIdentityKey();
+}
+catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException
+                               or ArgumentException)
+{
+    Console.Error.WriteLine($"Cannot start Raindrop: the server identity key could not be loaded: {ex.Message}");
+    Console.Error.WriteLine("Check 'tls.identityKeyPath' in raindrop.json.");
+    return 1;
+}
+
+services.AddSingleton(identityKey);
+services.AddSingleton(new ServerIdentity(
+    ServerIdentity.CurrentProtocolVersion,
+    fingerprint,
+    identityKey.PublicKey,
+    fingerprint is null ? null : identityKey.SignTlsBinding(fingerprint))
+{
+    Capabilities = fingerprint is null
+        ? [ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability]
+        : [ServerIdentity.TlsIdentityBindingCapability, ServerIdentity.E2eeDevicesCapability,
+            ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability]
+});
+var identityFingerprint = ServerCertificate.FormatFingerprint(SHA256.HashData(identityKey.PublicKey));
 
 // ── 5. Start the HTTP server on a background thread ──────────────────────────
 // ServerHost.Start() launches ASP.NET Core in a Task.Run so this thread is free.
@@ -100,7 +130,16 @@ Console.WriteLine($"Database: {config.Database.Provider}");
 if (fingerprint is null)
     Console.WriteLine("TLS: off — only do this behind a proxy that terminates it for you.");
 else
+{
     Console.WriteLine($"TLS fingerprint (SHA-256): {fingerprint}");
+
+    if (hostOptions.SslProtocols.HasFlag(SslProtocols.Tls12))
+        Console.WriteLine(ServerHostOptions.PlatformServesTls13
+            ? "TLS: 1.2 and 1.3 (tls.allowTls12 is on)."
+            : "TLS: 1.2 and 1.3 — this platform cannot serve TLS 1.3 alone; run in Docker or on Linux for 1.3-only.");
+}
+
+Console.WriteLine($"Server identity (SHA-256): {identityFingerprint}");
 
 Console.WriteLine(config.VoiceProvider is null
     ? "Voice: off — set voice.provider in raindrop.json to let members join calls."
@@ -145,12 +184,14 @@ while (true)
         case "help":
             Console.WriteLine("  drivers                  list the installed database modules");
             Console.WriteLine("  db                       show which database this server is using");
-            Console.WriteLine("  fingerprint              show the TLS fingerprint for clients to pin");
+            Console.WriteLine("  fingerprint              show the TLS and identity fingerprints clients pin");
             Console.WriteLine("  roles                    list this server's roles and what they grant");
             Console.WriteLine("  grant <user> <role>      give a member a role");
             Console.WriteLine("  revoke <user> <role>     take a role away from a member");
             Console.WriteLine("  events                   show how many clients are listening for events");
             Console.WriteLine("  voice                    list who is in which voice call");
+            Console.WriteLine("  purge-plaintext          delete every message stored before end-to-end encryption");
+            Console.WriteLine("  reports                  show the most recently reported messages");
             Console.WriteLine("  quit                     stop the server");
             break;
 
@@ -171,10 +212,19 @@ while (true)
             await PrintVoiceCallsAsync();
             break;
 
+        case "reports":
+            await PrintReportsAsync();
+            break;
+
+        case "purge-plaintext":
+            await PurgePlaintextAsync();
+            break;
+
         case "fingerprint":
             Console.WriteLine(fingerprint is null
                 ? "  TLS is off, so this server has no fingerprint of its own."
-                : $"  {fingerprint}");
+                : $"  TLS:      {fingerprint}");
+            Console.WriteLine($"  identity: {identityFingerprint}");
             break;
 
         case "drivers":
@@ -237,6 +287,51 @@ async Task PrintVoiceCallsAsync()
             Console.WriteLine($"      {user?.Username ?? participant.UserId.ToString()}" +
                               (flags.Count == 0 ? "" : $"  ({string.Join(", ", flags)})"));
         }
+    }
+}
+
+// The latest reports: encrypted messages members revealed to moderators, each proven by its author's
+// device signature.
+async Task PrintReportsAsync()
+{
+    var reports = await server.Services.GetRequiredService<IMessageReportStore>().ListRecentAsync(20, CancellationToken.None);
+    if (reports.Count == 0)
+    {
+        Console.WriteLine("  no messages have been reported");
+        return;
+    }
+
+    foreach (var report in reports)
+    {
+        var channel = await channelStore.FindByIdAsync(report.ChannelId, CancellationToken.None);
+        var author = await userStore.FindByIdAsync(report.AuthorId, CancellationToken.None);
+        var reporter = await userStore.FindByIdAsync(report.ReporterId, CancellationToken.None);
+        Console.WriteLine($"  {report.ReportedAtUtc:u}  #{channel?.Name ?? report.ChannelId.ToString()}  " +
+                          $"{author?.Username ?? report.AuthorId.ToString()} (reported by {reporter?.Username ?? report.ReporterId.ToString()})");
+        Console.WriteLine($"      \"{report.Body}\"" + (report.Reason is null ? "" : $"  — {report.Reason}"));
+    }
+}
+
+// Deletes every plaintext message and the archive of deleted messages' text: everything the server
+// could read. Encrypted messages stay. Asks first, since it cannot be undone.
+async Task PurgePlaintextAsync()
+{
+    Console.Write("  Delete every plaintext message and the deleted-message archive? This cannot be undone. Type 'yes': ");
+    if (!string.Equals(Console.ReadLine()?.Trim(), "yes", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("  Nothing was deleted.");
+        return;
+    }
+
+    try
+    {
+        var messages = await server.Services.GetRequiredService<ITextMessageStore>().PurgePlaintextAsync(CancellationToken.None);
+        var archived = await server.Services.GetRequiredService<IDeletedMessageStore>().PurgeAsync(CancellationToken.None);
+        Console.WriteLine($"  Deleted {messages} plaintext message(s) and {archived} archived message(s).");
+    }
+    catch (Exception ex) when (ex is DbException or NotSupportedException)
+    {
+        Console.WriteLine($"  {ex.Message}");
     }
 }
 
