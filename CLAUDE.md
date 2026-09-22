@@ -567,6 +567,9 @@ ADO.NET plumbing they share), whose SQL stays inside the common subset of the th
 `@parameters`, no dialect functions. Note that UUIDs are stored as 36-character text, not native GUID
 columns, because the three databases disagree on GUID typing and byte order.
 
+Byte-array parameters go through `RelationalStore.AddBytes`, which types them as binary even when null:
+SQL Server rejects an untyped null for a `varbinary` column, where SQLite and PostgreSQL shrug.
+
 The one statement that could not stay in that common subset is the row limit message history needs:
 SQLite and PostgreSQL take `LIMIT`, SQL Server wants `OFFSET … FETCH`. So it is asked of the driver
 through `ApplyRowLimit`, which SQL Server overrides and the others inherit.

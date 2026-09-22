@@ -90,6 +90,11 @@ from it needs only their `CREATE TABLE` statements added to its DDL. The commit 
 `(channel_id, epoch)` is load-bearing: it is what refuses a second commit for an epoch.
 `RelationalStore.InTransactionAsync` runs the commit's epoch bump and log insert in one transaction.
 
+**Bind byte arrays with `AddBytes`, never `AddValue`.** A null passed untyped is sent by SqlClient as
+`nvarchar`, which SQL Server refuses to store in a `varbinary` column. SQLite and PostgreSQL accept it,
+so only SQL Server catches the mistake. `AddBytes` types the parameter as binary even when it is null.
+Every E2EE store uses it; the store tests run on SQL Server to keep it that way.
+
 `raindrop_permission_rollouts(rollout_id PK, applied_at)` records which one-time
 [permission rollouts](roles-and-permissions.md#permission-rollouts) this database has had.
 `raindrop_voice_mutes(user_id PK, muted_by, muted_at)` holds members muted in every voice call by a
