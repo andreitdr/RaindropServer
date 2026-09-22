@@ -51,7 +51,7 @@ internal sealed class RelationalMlsGroupStore : RelationalStore, IMlsGroupStore
                 {
                     AddValue(command, "@channel_id", group.ChannelId.ToString());
                     AddValue(command, "@epoch", group.Epoch);
-                    AddValue(command, "@group_info", group.GroupInfo);
+                    AddBytes(command, "@group_info", group.GroupInfo);
                     AddValue(command, "@group_info_epoch", group.GroupInfoEpoch);
                     AddTimestamp(command, "@updated_at", group.UpdatedAtUtc);
                 },
@@ -98,7 +98,7 @@ internal sealed class RelationalMlsGroupStore : RelationalStore, IMlsGroupStore
                      """;
                 AddValue(insert, "@channel_id", commit.ChannelId.ToString());
                 AddValue(insert, "@epoch", commit.Epoch);
-                AddValue(insert, "@message", commit.Message);
+                AddBytes(insert, "@message", commit.Message);
                 AddValue(insert, "@sender", commit.SenderUserId.ToString());
                 AddTimestamp(insert, "@created_at", commit.CreatedAtUtc);
                 await insert.ExecuteNonQueryAsync(cancellationToken);
@@ -125,7 +125,7 @@ internal sealed class RelationalMlsGroupStore : RelationalStore, IMlsGroupStore
              """,
             command =>
             {
-                AddValue(command, "@group_info", groupInfo);
+                AddBytes(command, "@group_info", groupInfo);
                 AddValue(command, "@epoch", epoch);
                 AddTimestamp(command, "@at", atUtc);
                 AddValue(command, "@channel_id", channelId.ToString());
@@ -278,7 +278,7 @@ internal sealed class RelationalKeyPackageStore : RelationalStore, IKeyPackageSt
     {
         AddValue(command, "@package_id", package.PackageId.ToString());
         BindDevice(command, package.UserId, package.DeviceId);
-        AddValue(command, "@key_package", package.KeyPackage);
+        AddBytes(command, "@key_package", package.KeyPackage);
         AddValue(command, "@last_resort", package.LastResort ? 1 : 0);
         AddTimestamp(command, "@created_at", package.CreatedAtUtc);
     }
@@ -315,7 +315,7 @@ internal sealed class RelationalWelcomeStore : RelationalStore, IWelcomeStore
                     AddValue(command, "@device_id", welcome.DeviceId.ToString());
                     AddValue(command, "@channel_id", welcome.ChannelId.ToString());
                     AddValue(command, "@epoch", welcome.Epoch);
-                    AddValue(command, "@welcome", welcome.Welcome);
+                    AddBytes(command, "@welcome", welcome.Welcome);
                     AddTimestamp(command, "@created_at", welcome.CreatedAtUtc);
                 },
                 cancellationToken);

@@ -119,6 +119,20 @@ internal abstract class RelationalStore
         command.Parameters.Add(parameter);
     }
 
+    /// <summary>
+    /// Adds a byte-array parameter, typed as binary even when it is null. Without the type, a null
+    /// is sent untyped and SQL Server assumes text, which it will not store in a <c>varbinary</c>
+    /// column; SQLite and PostgreSQL do not mind either way.
+    /// </summary>
+    protected static void AddBytes(DbCommand command, string name, byte[]? value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.DbType = System.Data.DbType.Binary;
+        parameter.Value = (object?)value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
+    }
+
     /// <summary>Adds a UTC timestamp parameter, bound the way this database expects one.</summary>
     protected void AddTimestamp(DbCommand command, string name, DateTime? utc)
     {

@@ -118,8 +118,8 @@ internal sealed class RelationalDeviceStore : RelationalStore, IDeviceStore
                 {
                     AddValue(command, "@user_id", device.UserId.ToString());
                     AddValue(command, "@device_id", device.DeviceId.ToString());
-                    AddValue(command, "@signature_key", device.SignatureKey);
-                    AddValue(command, "@certificate", device.Certificate);
+                    AddBytes(command, "@signature_key", device.SignatureKey);
+                    AddBytes(command, "@certificate", device.Certificate);
                     AddTimestamp(command, "@created_at", device.CreatedAtUtc);
                     AddTimestamp(command, "@revoked_at", device.RevokedAtUtc);
                 },
@@ -173,7 +173,7 @@ internal sealed class RelationalDeviceStore : RelationalStore, IDeviceStore
     private void BindIdentity(DbCommand command, UserIdentityRecord identity)
     {
         AddValue(command, "@user_id", identity.UserId.ToString());
-        AddValue(command, "@key", identity.IdentityKey);
+        AddBytes(command, "@key", identity.IdentityKey);
         AddTimestamp(command, "@updated_at", identity.UpdatedAtUtc);
     }
 
@@ -211,7 +211,7 @@ internal sealed class RelationalKeyBackupStore : RelationalStore, IKeyBackupStor
         void Bind(DbCommand command)
         {
             AddValue(command, "@user_id", backup.UserId.ToString());
-            AddValue(command, "@blob", backup.Blob);
+            AddBytes(command, "@blob", backup.Blob);
             AddTimestamp(command, "@updated_at", backup.UpdatedAtUtc);
         }
 

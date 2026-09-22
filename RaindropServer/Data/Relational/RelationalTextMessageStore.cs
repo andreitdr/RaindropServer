@@ -89,7 +89,7 @@ internal sealed class RelationalTextMessageStore : RelationalStore, ITextMessage
                 AddValue(command, "@author_id", message.AuthorId.ToString());
                 AddValue(command, "@device_id", message.SenderDeviceId?.ToString());
                 AddValue(command, "@epoch", message.Epoch);
-                AddValue(command, "@ciphertext", message.Ciphertext);
+                AddBytes(command, "@ciphertext", message.Ciphertext);
                 AddTimestamp(command, "@sent_at", message.SentAtUtc);
                 AddTimestamp(command, "@deleted_at", message.DeletedAtUtc);
                 AddValue(command, "@deleted_by", message.DeletedBy?.ToString());
@@ -116,7 +116,7 @@ internal sealed class RelationalTextMessageStore : RelationalStore, ITextMessage
                 command =>
                 {
                     AddValue(command, "@message_id", message.MessageId.ToString());
-                    AddValue(command, "@ciphertext", message.Ciphertext);
+                    AddBytes(command, "@ciphertext", message.Ciphertext);
                     AddTimestamp(command, "@deleted_at", message.DeletedAtUtc);
                     AddValue(command, "@deleted_by", message.DeletedBy?.ToString());
                 },
