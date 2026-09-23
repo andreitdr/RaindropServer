@@ -1,0 +1,63 @@
+name: Release
+
+# Starts when release.sh pushes a version tag (vX.Y.Z). Builds and tests the tagged commit (ci.yml),
+# packages the artefact, and only if all of that succeeded publishes a GitHub release for the tag
+# with the artefact attached. GitHub adds the source-code zip itself.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build and test
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    name: Package
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish server
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          dotnet publish ServerCli/ServerCli.csproj -c Release -p:Version="$VERSION" -o publish/RaindropServer
+          rm -f publish/RaindropServer/raindrop.db
+          mkdir -p dist
+          (cd publish && zip -qr "../dist/RaindropServer-$VERSION-portable.zip" RaindropServer)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-server
+          path: dist/*
+
+  release:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release for the existing tag
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

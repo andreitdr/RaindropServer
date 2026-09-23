@@ -1,11 +1,12 @@
 name: CI/CD
 
 # On every push to main: build, then test. Releases are not made here; tag them
-# with release.sh in the Raindrop root folder.
+# with release.sh in the Raindrop root folder, which triggers release.yml.
 
 on:
   push:
     branches: [main]
+  workflow_call: # also run as the first stage of release.yml
 
 # A newer push supersedes a run that is still going.
 concurrency:
