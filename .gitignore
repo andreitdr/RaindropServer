@@ -17,3 +17,4 @@ server-identity.key
 # Local database data for docker-compose (postgres/, sqlserver/) and secrets
 /data/
 .env
+*.DS_Store
