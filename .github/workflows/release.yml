@@ -17,26 +17,44 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   package:
-    name: Package
+    name: Package (${{ matrix.name }})
     needs: ci
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { name: linux, os: ubuntu-latest, rid: linux-x64 }
+          - { name: macos, os: macos-latest, rid: osx-arm64 }
+          - { name: windows, os: windows-latest, rid: win-x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # Windows defaults to PowerShell
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
 
+      # Self-contained: the .NET runtime is included, so nothing needs installing to run the server.
+      # Built on each target OS so the launcher and native libraries (SQLite) are the right ones.
       - name: Publish server
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          dotnet publish ServerCli/ServerCli.csproj -c Release -p:Version="$VERSION" -o publish/RaindropServer
+          dotnet publish ServerCli/ServerCli.csproj -c Release -r "${{ matrix.rid }}" --self-contained true \
+            -p:Version="$VERSION" -o publish/RaindropServer
           rm -f publish/RaindropServer/raindrop.db
           mkdir -p dist
-          (cd publish && zip -qr "../dist/RaindropServer-$VERSION-portable.zip" RaindropServer)
+          name="RaindropServer-$VERSION-${{ matrix.rid }}"
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            (cd publish && 7z a -tzip "$GITHUB_WORKSPACE/dist/$name.zip" RaindropServer)
+          else
+            # tar keeps the executable bit on the server launcher.
+            tar -czf "dist/$name.tar.gz" -C publish RaindropServer
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: package-server
+          name: package-${{ matrix.name }}
           path: dist/*
 
   release:
