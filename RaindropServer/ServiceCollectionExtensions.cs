@@ -1,9 +1,11 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using RaindropServer.Attachments;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
+using RaindropServer.Configuration;
 using RaindropServer.Data;
 using RaindropServer.E2ee;
 using RaindropServer.Events;
@@ -31,6 +33,7 @@ public static class ServiceCollectionExtensions
     /// <param name="configureRoles">Optionally adjusts what roles a fresh server starts with.</param>
     /// <param name="configureEvents">Optionally adjusts how the event stream treats its connections.</param>
     /// <param name="configureVoice">Optionally adjusts voice call rules. The media server itself is registered separately — see <see cref="AddRaindropVoice"/>.</param>
+    /// <param name="configureAttachments">Optionally adjusts which files members may add to messages.</param>
     /// <remarks>
     /// A database module still has to be enabled with <see cref="AddRaindropDatabase(IServiceCollection, Action{DatabaseOptions})"/>
     /// before the server can do anything with users.
@@ -41,7 +44,8 @@ public static class ServiceCollectionExtensions
         Action<ChannelOptions>? configureChannels = null,
         Action<RoleOptions>? configureRoles = null,
         Action<EventOptions>? configureEvents = null,
-        Action<VoiceOptions>? configureVoice = null)
+        Action<VoiceOptions>? configureVoice = null,
+        Action<AttachmentOptions>? configureAttachments = null)
     {
         services.AddRouting();
         services.AddRaindropPayloads();
@@ -49,6 +53,10 @@ public static class ServiceCollectionExtensions
         services.AddRaindropUsers(configureUsers);
         services.AddRaindropRoles(configureRoles);
         services.AddRaindropMembers();
+
+        // Before channels: text channels fall back to refusing every file unless something that stores
+        // them has registered first.
+        services.AddRaindropAttachments(configureAttachments);
         services.AddRaindropChannels(configureChannels);
         services.AddRaindropVoice(configureVoice);
         services.AddRaindropE2ee();
@@ -172,6 +180,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IPermissionResolver, RolePermissionResolver>();
         services.TryAddSingleton<RoleService>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IRegistrationListener, OwnerClaim>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILeaveGuard, OwnerLeaveGuard>());
 
         return services;
     }
@@ -230,6 +239,45 @@ public static class ServiceCollectionExtensions
         // Deleted messages are copied into the database before their text is destroyed. A plugin adds
         // its own IMessageDeletionListener beside this one; it does not replace it.
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IMessageDeletionListener, ArchivingMessageDeletionListener>());
+
+        // Files in messages: refused unless AddRaindropAttachments, or a plugin, registered a store first.
+        services.TryAddSingleton<IMessageAttachments, NoMessageAttachments>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers files in messages: the service that receives uploads and hands them back, the folder
+    /// they are kept in, the owner's rules, and the sweep that clears away what nobody can reach. Called
+    /// for you by <see cref="AddRaindropServer"/>, before the channels whose messages carry the files.
+    /// </summary>
+    /// <remarks>
+    /// Files are end-to-end encrypted by clients; everything here handles ciphertext. Each seam is
+    /// <c>TryAdd</c>, so a plugin registers its own first to replace it: an <see cref="IAttachmentStorage"/>
+    /// to keep files somewhere other than a local folder, or an <see cref="IMessageAttachments"/> to take
+    /// files over entirely. <see cref="IAttachmentPolicy"/> and <see cref="IAttachmentListener"/>
+    /// implementations are added beside the defaults with <c>TryAddEnumerable</c>.
+    /// </remarks>
+    public static IServiceCollection AddRaindropAttachments(
+        this IServiceCollection services, Action<AttachmentOptions>? configure = null)
+    {
+        var options = services.FindInstance<AttachmentOptions>() ?? new AttachmentOptions();
+        configure?.Invoke(options);
+
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton(options);
+        services.TryAddSingleton<IAttachmentStorage>(sp =>
+            new LocalFolderAttachmentStorage(sp.GetRequiredService<AttachmentOptions>()));
+        services.TryAddSingleton<AttachmentService>();
+        services.TryAddSingleton<IMessageAttachments>(sp => sp.GetRequiredService<AttachmentService>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IAttachmentPolicy, ConfiguredAttachmentPolicy>());
+
+        // A message's files go when it does; the maintenance pass removes them from storage afterwards.
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IMessageDeletionListener, AttachmentDeletionListener>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, AttachmentMaintenanceService>());
+        services.AddStartupCheck<AttachmentStorageStartupCheck>();
+
+        services.AddRaindropChannels();
 
         return services;
     }
@@ -350,6 +398,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(driver.CreateKeyPackageStore(options));
         services.AddSingleton(driver.CreateWelcomeStore(options));
         services.AddSingleton(driver.CreateMessageReportStore(options));
+        services.AddSingleton(driver.CreateAttachmentStore(options));
 
         return services;
     }
@@ -371,6 +420,13 @@ public static class ServiceCollectionExtensions
             throw new InvalidOperationException(
                 "No database module is enabled. Call AddRaindropDatabase(...) before starting the server. " +
                 $"Installed drivers: {DatabaseDriverRegistry.DescribeAvailable()}.");
+
+        if (options.WipeOnStartup)
+        {
+            Console.WriteLine("[raindrop] database.wipeOnStartup is set — dropping every table before it starts. " +
+                               "Development only; never leave this on where the database holds anything worth keeping.");
+            await driver.ResetSchemaAsync(options, cancellationToken);
+        }
 
         if (options.AutoCreateSchema)
             await driver.EnsureSchemaAsync(options, cancellationToken);
@@ -484,6 +540,53 @@ public static class ServiceCollectionExtensions
     {
         services.TryAddTransient(endpointType);
         services.AddTransient(typeof(IEndpoint), adapter);
+    }
+
+    /// <summary>
+    /// Registers a check to be run once at startup, before the server listens — the seam a module
+    /// uses to confirm that what its settings describe is really there. Run them all with
+    /// <see cref="RunRaindropStartupChecksAsync"/>.
+    /// </summary>
+    public static IServiceCollection AddStartupCheck<T>(this IServiceCollection services)
+        where T : class, IStartupCheck
+    {
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IStartupCheck, T>());
+        return services;
+    }
+
+    /// <summary>
+    /// Runs every registered <see cref="IStartupCheck"/> and reports what they found, so a server
+    /// owner hears about an unreachable media server or a refused credential while the server is
+    /// starting rather than from the first member it fails.
+    /// </summary>
+    /// <remarks>
+    /// The checks run against a container of their own, built from these registrations and thrown
+    /// away afterwards: nothing a check touches outlives it, and the running server starts with its
+    /// own clean instances. A check that throws anyway is recorded as an error rather than being
+    /// allowed to take the process down.
+    /// </remarks>
+    public static async Task<ConfigurationReport> RunRaindropStartupChecksAsync(
+        this IServiceCollection services,
+        ConfigurationReport? report = null,
+        CancellationToken cancellationToken = default)
+    {
+        report ??= new ConfigurationReport();
+
+        await using var provider = services.BuildServiceProvider();
+
+        foreach (var check in provider.GetServices<IStartupCheck>())
+        {
+            try
+            {
+                await check.CheckAsync(report, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                report.Error(check.Name, $"could not be checked: {ex.Message}");
+            }
+        }
+
+        return report;
     }
 
     /// <summary>Finds an instance already registered as a singleton, so a later call can reuse or adjust it.</summary>

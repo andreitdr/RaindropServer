@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using RaindropServer;
 using RaindropServer.Channels.Voice;
 
 namespace RaindropServer.Voice.LiveKit;
@@ -25,6 +26,11 @@ public static class LiveKitServiceCollectionExtensions
         services.TryAddSingleton<LiveKitRoomClient>();
         services.TryAddSingleton<IVoiceTransport, LiveKitVoiceTransport>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IVoiceSignalRelay, LiveKitSignalRelay>());
+
+        // Settings can only say so much on their own; this is what goes and looks before the server
+        // starts listening, so a refused secret or an absent sidecar is reported then rather than by
+        // the first member who cannot join a call.
+        services.AddStartupCheck<LiveKitStartupCheck>();
 
         return services;
     }

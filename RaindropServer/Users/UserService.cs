@@ -16,6 +16,7 @@ public sealed class UserService
     private readonly IEventPublisher _events;
     private readonly IReadOnlyList<IRegistrationListener> _listeners;
     private readonly IReadOnlyList<ISessionListener> _sessionListeners;
+    private readonly IReadOnlyList<ILeaveGuard> _leaveGuards;
     private readonly TimeProvider _time;
 
     public UserService(
@@ -26,7 +27,8 @@ public sealed class UserService
         IEventPublisher events,
         IEnumerable<IRegistrationListener>? listeners = null,
         IEnumerable<ISessionListener>? sessionListeners = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        IEnumerable<ILeaveGuard>? leaveGuards = null)
     {
         _store = store;
         _hasher = hasher;
@@ -35,6 +37,7 @@ public sealed class UserService
         _events = events;
         _listeners = listeners?.ToList() ?? [];
         _sessionListeners = sessionListeners?.ToList() ?? [];
+        _leaveGuards = leaveGuards?.ToList() ?? [];
         _time = time ?? TimeProvider.System;
     }
 
@@ -176,13 +179,20 @@ public sealed class UserService
 
     /// <summary>
     /// Restores an account that left with its data preserved, provided the retention window has not
-    /// closed. The username was held in reserve for exactly this, so it comes back with the account.
+    /// closed. The username was held in reserve for exactly this, so it comes back with the account —
+    /// and it can be used to find the account, for a client that no longer has the UUID.
     /// </summary>
     public async Task<SessionResponse> RejoinAsync(RejoinRequest request, CancellationToken cancellationToken)
     {
-        RequireUserId(request.UserId);
+        if (request.UserId is null && string.IsNullOrWhiteSpace(request.Username))
+            throw ApiException.BadRequest("missing_identifier", "Provide either a userId or a username to rejoin.");
 
-        var user = await _store.FindByIdAsync(request.UserId, cancellationToken);
+        if (request.UserId is { } requestedId)
+            RequireUserId(requestedId);
+
+        var user = request.UserId is { } id
+            ? await _store.FindByIdAsync(id, cancellationToken)
+            : await _store.FindByUsernameAsync(UsernamePolicy.Normalize(request.Username!), cancellationToken);
 
         if (user is null || user.Status == UserStatus.Erased)
             throw ApiException.NotFound("no_preserved_account",
@@ -284,6 +294,10 @@ public sealed class UserService
         if (user.PasswordHash is null || !_hasher.Verify(request.Password ?? string.Empty, user.PasswordHash))
             throw ApiException.Unauthorized("invalid_credentials",
                 "The password is incorrect. Leaving the server has to be confirmed with your password.");
+
+        // Asked before anything is written: a guard that refuses leaves the account exactly as it was.
+        foreach (var guard in _leaveGuards)
+            await guard.CheckLeaveAsync(user, request.PreserveData, cancellationToken);
 
         var now = UtcNow;
         UserRecord left;

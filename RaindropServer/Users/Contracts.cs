@@ -51,9 +51,13 @@ public record RegisterRequest(Guid UserId, string Username, string Password);
 /// <param name="Password">The account password.</param>
 public record LoginRequest(Guid? UserId, string? Username, string Password);
 
-/// <param name="UserId">The UUID of the preserved account to restore.</param>
+/// <param name="UserId">The UUID of the preserved account to restore. Optional if <paramref name="Username"/> is given.</param>
+/// <param name="Username">
+/// An alternative to <paramref name="UserId"/> for clients that lost their UUID — the username stays
+/// reserved for as long as the account is preserved, so it still finds the account.
+/// </param>
 /// <param name="Password">The password the account had when it left.</param>
-public record RejoinRequest(Guid UserId, string Password);
+public record RejoinRequest(Guid? UserId, string? Username, string Password);
 
 /// <param name="CurrentPassword">The password in use today, as a confirmation of identity.</param>
 /// <param name="NewPassword">The replacement password.</param>

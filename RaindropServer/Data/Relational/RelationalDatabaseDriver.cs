@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using RaindropServer.Attachments;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
@@ -105,6 +106,10 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         new RelationalMessageReportStore(this, options.ConnectionString);
 
     /// <inheritdoc />
+    public IAttachmentStore CreateAttachmentStore(DatabaseOptions options) =>
+        new RelationalAttachmentStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
     public async Task EnsureSchemaAsync(DatabaseOptions options, CancellationToken cancellationToken)
     {
         await using var connection = CreateConnection(options.ConnectionString);
@@ -114,6 +119,53 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         {
             await using var command = connection.CreateCommand();
             command.CommandText = statement;
+            command.CommandType = CommandType.Text;
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Every table the schema owns, across all three drivers — kept in sync with each driver's
+    /// <see cref="SchemaStatements"/> by hand, same as everywhere else in this schema: there is no
+    /// migration mechanism, so nothing here is derived automatically (see docs/database-modules.md).
+    /// </summary>
+    private static readonly IReadOnlyList<string> TableNames =
+    [
+        "raindrop_users",
+        "raindrop_channels",
+        "raindrop_roles",
+        "raindrop_member_roles",
+        "raindrop_text_messages",
+        "raindrop_deleted_messages",
+        "raindrop_permission_rollouts",
+        "raindrop_voice_mutes",
+        "raindrop_user_identities",
+        "raindrop_devices",
+        "raindrop_key_backups",
+        "raindrop_mls_groups",
+        "raindrop_mls_commits",
+        "raindrop_mls_key_packages",
+        "raindrop_mls_welcomes",
+        "raindrop_encrypted_messages",
+        "raindrop_message_reports",
+        "raindrop_attachments"
+    ];
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <c>DROP TABLE IF EXISTS</c> is standard SQL that all three engines accept (SQL Server since
+    /// 2016 SP1), so this needs no per-dialect override the way <see cref="SchemaStatements"/> does.
+    /// There are no foreign keys anywhere in the schema, so the drop order does not matter.
+    /// </remarks>
+    public async Task ResetSchemaAsync(DatabaseOptions options, CancellationToken cancellationToken)
+    {
+        await using var connection = CreateConnection(options.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        foreach (var table in TableNames)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP TABLE IF EXISTS {table}";
             command.CommandType = CommandType.Text;
             await command.ExecuteNonQueryAsync(cancellationToken);
         }

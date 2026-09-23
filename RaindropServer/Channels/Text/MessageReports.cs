@@ -44,6 +44,11 @@ public interface IMessageReportStore
 /// <param name="Type">The payload type, as the sender signed it (<c>text</c>).</param>
 /// <param name="Attestation">The sender device's Ed25519 signature over the above.</param>
 /// <param name="Reason">Why it is being reported; optional, at most 500 characters.</param>
+/// <param name="Attachments">
+/// For a message that carries files: each file's id and ciphertext hash, in the order the message lists
+/// them, as the sender signed them. Present means the attestation is a v2 one
+/// (<c>raindrop/message-attestation/v2</c>), which covers these too.
+/// </param>
 public record ReportMessageRequest(
     Guid MessageId,
     string Body,
@@ -51,7 +56,13 @@ public record ReportMessageRequest(
     long ClientSentAtUnixMs,
     string Type,
     byte[] Attestation,
-    string? Reason);
+    string? Reason,
+    IReadOnlyList<AttestedAttachment>? Attachments = null);
+
+/// <summary>A file named in a message's attestation.</summary>
+/// <param name="AttachmentId">The file's id on this server.</param>
+/// <param name="CiphertextSha256">SHA-256 of its encrypted bytes, as the sender computed it.</param>
+public record AttestedAttachment(Guid AttachmentId, byte[] CiphertextSha256);
 
 public record MessageReportSummary(
     Guid ReportId,
@@ -82,10 +93,16 @@ public record ListReportsResponse(IReadOnlyList<MessageReportSummary> Reports);
 /// What an attestation proves is authorship: that device wrote those words in that channel. It
 /// does not tie them to the exact stored ciphertext, which only group members can decrypt; a
 /// reporter could present a different message the same device genuinely sent in the same channel.
+/// <para>
+/// A message that carries files is attested under a second version, which also signs each file's id
+/// and ciphertext hash. Those the server can check against what it stored for the message, so the
+/// files a report names are the ones that message really carried.
+/// </para>
 /// </remarks>
 public sealed class MessageReportService
 {
     private static readonly byte[] Context = "raindrop/message-attestation/v1\n"u8.ToArray();
+    private static readonly byte[] ContextWithFiles = "raindrop/message-attestation/v2\n"u8.ToArray();
     private const int MaximumReasonLength = 500;
 
     /// <summary>Sent to members with <c>manage_messages</c> in the channel when a message is reported.</summary>
@@ -98,6 +115,7 @@ public sealed class MessageReportService
     private readonly IPermissionResolver _permissions;
     private readonly IEventPublisher _events;
     private readonly ChannelOptions _options;
+    private readonly IMessageAttachments _attachments;
     private readonly TimeProvider _time;
 
     public MessageReportService(
@@ -108,6 +126,7 @@ public sealed class MessageReportService
         IPermissionResolver permissions,
         IEventPublisher events,
         ChannelOptions options,
+        IMessageAttachments? attachments = null,
         TimeProvider? time = null)
     {
         _channels = channels;
@@ -117,6 +136,7 @@ public sealed class MessageReportService
         _permissions = permissions;
         _events = events;
         _options = options;
+        _attachments = attachments ?? new NoMessageAttachments();
         _time = time ?? TimeProvider.System;
     }
 
@@ -144,11 +164,17 @@ public sealed class MessageReportService
         // The device the message came from, even if it has since been revoked: it held that key
         // when it wrote the message.
         var device = await _devices.FindDeviceAsync(message.AuthorId, deviceId, cancellationToken);
-        var signed = Canonical(message.ChannelId, request.ClientMessageId ?? "", request.ClientSentAtUnixMs,
-            request.Type ?? "", request.Body);
+        var signed = request.Attachments is { } attested
+            ? CanonicalWithFiles(message.ChannelId, request.ClientMessageId ?? "", request.ClientSentAtUnixMs,
+                request.Type ?? "", request.Body, attested)
+            : Canonical(message.ChannelId, request.ClientMessageId ?? "", request.ClientSentAtUnixMs,
+                request.Type ?? "", request.Body);
         if (device is null || !Ed25519Signatures.Verify(device.SignatureKey, signed, request.Attestation ?? []))
             throw ApiException.BadRequest("invalid_attestation",
                 "That text is not proven to be what the author's device wrote.");
+
+        if (request.Attachments is { Count: > 0 } files)
+            await RequireFilesOfAsync(message.MessageId, files, cancellationToken);
 
         var report = new MessageReportRecord(
             Guid.NewGuid(), message.MessageId, message.ChannelId, message.AuthorId, deviceId, session.UserId,
@@ -177,9 +203,40 @@ public sealed class MessageReportService
     /// message id, the send time in ms, the type and the body — each text field a 4-byte big-endian
     /// length followed by its UTF-8. Must match <c>MessagePayload.attestationBytes</c> on clients.
     /// </summary>
-    public static byte[] Canonical(Guid channelId, string clientMessageId, long sentAtUnixMs, string type, string body)
+    public static byte[] Canonical(Guid channelId, string clientMessageId, long sentAtUnixMs, string type, string body) =>
+        Canonical(Context, channelId, clientMessageId, sentAtUnixMs, type, body).ToArray();
+
+    /// <summary>
+    /// The bytes a v2 attestation signs, for a message carrying files: the v2 context and every field
+    /// <see cref="Canonical(Guid, string, long, string, string)"/> has, then a 4-byte big-endian count of
+    /// files and, for each in the message's order, its id (lower case, as a length-prefixed field)
+    /// followed by the 32 bytes of its ciphertext's SHA-256.
+    /// </summary>
+    public static byte[] CanonicalWithFiles(
+        Guid channelId, string clientMessageId, long sentAtUnixMs, string type, string body,
+        IReadOnlyList<AttestedAttachment> attachments)
     {
-        var output = new List<byte>(Context);
+        var output = Canonical(ContextWithFiles, channelId, clientMessageId, sentAtUnixMs, type, body);
+        var count = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(count, (uint)attachments.Count);
+        output.AddRange(count);
+
+        foreach (var attachment in attachments)
+        {
+            if (attachment.CiphertextSha256 is not { Length: 32 })
+                throw ApiException.BadRequest("invalid_attestation", "Every attested file needs its 32-byte SHA-256.");
+
+            Field(output, attachment.AttachmentId.ToString("D"));
+            output.AddRange(attachment.CiphertextSha256);
+        }
+
+        return output.ToArray();
+    }
+
+    private static List<byte> Canonical(
+        byte[] context, Guid channelId, string clientMessageId, long sentAtUnixMs, string type, string body)
+    {
+        var output = new List<byte>(context);
         Field(output, channelId.ToString("D"));
         Field(output, clientMessageId);
         var time = new byte[8];
@@ -187,7 +244,27 @@ public sealed class MessageReportService
         output.AddRange(time);
         Field(output, type);
         Field(output, body);
-        return output.ToArray();
+        return output;
+    }
+
+    /// <summary>
+    /// Refuses a report whose attested files are not the ones stored with the message — a genuine
+    /// attestation of a different message, presented against this one.
+    /// </summary>
+    private async Task RequireFilesOfAsync(
+        Guid messageId, IReadOnlyList<AttestedAttachment> attested, CancellationToken cancellationToken)
+    {
+        var stored = await _attachments.ListAsync([messageId], cancellationToken);
+        var files = stored.TryGetValue(messageId, out var list) ? list : [];
+
+        foreach (var file in attested)
+        {
+            var match = files.FirstOrDefault(candidate => candidate.AttachmentId == file.AttachmentId);
+
+            if (match?.CiphertextSha256 is not { } hash || !hash.AsSpan().SequenceEqual(file.CiphertextSha256))
+                throw ApiException.BadRequest("invalid_attestation",
+                    "The files that attestation names are not the ones this message carries.");
+        }
     }
 
     private static void Field(List<byte> output, string value)

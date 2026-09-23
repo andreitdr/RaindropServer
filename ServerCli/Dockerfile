@@ -31,7 +31,8 @@ COPY --from=publish /app/publish .
 # volume mounted at /app/data.
 ENV RAINDROP_URLS=https://0.0.0.0:5001 \
     RAINDROP_TLS_CERTIFICATE_PATH=/app/data/raindrop.pfx \
-    RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db"
+    RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \
+    RAINDROP_ATTACHMENTS_PATH=/app/data/attachments
 VOLUME /app/data
 EXPOSE 5001
 

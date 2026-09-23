@@ -55,4 +55,11 @@ public sealed record ServerIdentity(
     /// A client refuses to join a call it cannot encrypt on a server that says this.
     /// </summary>
     public const string E2eeVoiceCapability = "e2ee.voice.v1";
+
+    /// <summary>
+    /// Advertised when members may add end-to-end encrypted files to messages
+    /// (<c>/api/attachments/*</c>, and <c>attachmentIds</c> on <c>send-encrypted</c>). Left out when the
+    /// owner has switched attachments off.
+    /// </summary>
+    public const string AttachmentsCapability = "attachments.v1";
 }

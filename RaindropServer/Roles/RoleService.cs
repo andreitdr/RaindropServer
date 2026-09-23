@@ -513,12 +513,28 @@ public sealed class RoleService
         return (member, role);
     }
 
+    /// <summary>
+    /// Whether <paramref name="userId"/> is the only member holding the owner role — the one whose
+    /// departure would leave the server with nobody able to administer it.
+    /// </summary>
+    public async Task<bool> IsSoleOwnerAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var owner = await _store.FindByKindAsync(RoleKind.Owner, cancellationToken);
+
+        return owner is not null && await IsSoleHolderAsync(owner, userId, cancellationToken);
+    }
+
+    private async Task<bool> IsSoleHolderAsync(RoleRecord role, Guid userId, CancellationToken cancellationToken)
+    {
+        var holders = await _store.ListMembersAsync(role.RoleId, cancellationToken);
+
+        return holders.Count <= 1 && holders.Contains(userId);
+    }
+
     /// <summary>Refuses to remove the only owner, which would leave the server with nobody able to administer it.</summary>
     private async Task RequireAnotherOwnerAsync(RoleRecord owner, Guid leaving, CancellationToken cancellationToken)
     {
-        var owners = await _store.ListMembersAsync(owner.RoleId, cancellationToken);
-
-        if (owners.Count <= 1 && owners.Contains(leaving))
+        if (await IsSoleHolderAsync(owner, leaving, cancellationToken))
             throw ApiException.Conflict("last_owner",
                 "This is the only member with the owner role. Give it to somebody else first.");
     }

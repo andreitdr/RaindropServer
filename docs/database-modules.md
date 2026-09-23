@@ -4,9 +4,19 @@
 
 [`IDatabaseDriver`](../RaindropServer/Data/IDatabaseDriver.cs) is the whole contract a database module
 implements: a `Name`, a store per kind of data (`IUserStore`, `IChannelStore`, `IRoleStore`,
-`ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`, and for end-to-end encryption
-`IDeviceStore` and `IKeyBackupStore`), and idempotent schema DDL (`EnsureSchemaAsync` — must be safe to run on every
+`ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`, `IAttachmentStore`, and for end-to-end
+encryption `IDeviceStore` and `IKeyBackupStore`), and idempotent schema DDL (`EnsureSchemaAsync` — must be safe to run on every
 startup, since it runs unless `DatabaseOptions.AutoCreateSchema` is turned off).
+
+`ResetSchemaAsync` is the dev-only counterpart: drops every table the driver owns, if present, so a
+fresh `EnsureSchemaAsync` right after starts the server from an empty database. It runs before
+`EnsureSchemaAsync` when `DatabaseOptions.WipeOnStartup` (`database.wipeOnStartup` /
+`RAINDROP_DEV_WIPE_DATABASE`) is set — see
+[Local development & Docker](local-development-and-docker.md#wiping-the-database-on-every-start). The
+default implementation refuses, so a driver written before this existed still loads and only fails if
+a server owner actually asks it to wipe; `RelationalDatabaseDriver` implements it once, generically,
+for all three shipped drivers — `DROP TABLE IF EXISTS` is standard SQL every engine here accepts (SQL
+Server since 2016 SP1), so unlike `SchemaStatements` it needs no per-dialect override.
 
 ## Discovery
 
@@ -80,7 +90,8 @@ Tables: `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`, `raindr
 `raindrop_devices`, `raindrop_key_backups` and the delivery service's `raindrop_mls_groups`,
 `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`, and
 `raindrop_encrypted_messages` (encrypted messages, merged with `raindrop_text_messages` when history is
-read), `raindrop_message_reports` (reported encrypted messages, with the text the reporter revealed) — public keys and opaque blobs in byte columns (`BLOB`, `bytea`, `varbinary`), epochs as `bigint`.
+read), `raindrop_message_reports` (reported encrypted messages, with the text the reporter revealed) — public keys and opaque blobs in byte columns (`BLOB`, `bytea`, `varbinary`), epochs as `bigint` — and
+`raindrop_attachments` ([attachments](attachments.md)).
 
 `CreateDeviceStore`, `CreateKeyBackupStore`, `CreateMlsGroupStore`, `CreateKeyPackageStore`,
 `CreateWelcomeStore` and `CreateMessageReportStore` have **default interface implementations** that throw
@@ -102,6 +113,18 @@ moderator — the one piece of [voice](voice.md) state that survives a restart (
 in memory). Both were added as new tables, so existing databases gain them without an `ALTER`. A
 third-party driver deriving from `RelationalDatabaseDriver` gets the stores for free but has to add the
 two `CREATE TABLE` statements to its own DDL.
+
+`raindrop_attachments` records the encrypted files added to messages — **only the records**: the bytes
+live in an `IAttachmentStorage` (a folder by default). Columns `attachment_id` (PK), `channel_id`,
+`uploader_id`, `uploader_device_id`, `kind`, `extension`, `ciphertext_size` and `received_size`
+(`bigint`), `ciphertext_sha256` (bytes, bound with `AddBytes`), `state` (`uploading`, `uploaded`,
+`attached`, `deleted` — text, so a later state needs no migration), `message_id`, `created_at`,
+`completed_at`, `deleted_at`; indexes on `message_id`, `channel_id`, `(state, created_at)` and
+`(uploader_id, state)`. Every transition is a conditional `UPDATE`, and claiming files for a message is
+one per file inside `InTransactionAsync`, so a race between two messages settles in the database.
+`CreateAttachmentStore` has the same refusing default as the E2EE factories. A new table, so existing
+databases gain it without an `ALTER`; a third-party driver deriving from `RelationalDatabaseDriver` adds
+its `CREATE TABLE`.
 
 `raindrop_deleted_messages` holds the original text of every deleted message (see
 [the deleted-message archive](messages.md#the-deleted-message-archive)): `message_id` is its primary key —

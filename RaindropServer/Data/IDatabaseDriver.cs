@@ -1,3 +1,4 @@
+using RaindropServer.Attachments;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
@@ -86,8 +87,26 @@ public interface IDatabaseDriver
         throw new NotSupportedException($"The '{Name}' database driver does not support message reports.");
 
     /// <summary>
+    /// Creates the persistence for attachment records — the encrypted files added to messages. Only the
+    /// records: the bytes are kept by an <see cref="IAttachmentStorage"/>. Same default as
+    /// <see cref="CreateDeviceStore"/>.
+    /// </summary>
+    IAttachmentStore CreateAttachmentStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support attachments.");
+
+    /// <summary>
     /// Creates any missing tables and indexes. Must be idempotent: it runs on every startup unless
     /// <see cref="DatabaseOptions.AutoCreateSchema"/> is turned off.
     /// </summary>
     Task EnsureSchemaAsync(DatabaseOptions options, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Drops every table this driver owns, if present — the dev-only counterpart to
+    /// <see cref="EnsureSchemaAsync"/>, run before it when <see cref="DatabaseOptions.WipeOnStartup"/>
+    /// starts the server from an empty database. Must tolerate a database that is already empty. The
+    /// default refuses, so a driver written before this existed still loads and only fails if a server
+    /// owner actually asks it to wipe.
+    /// </summary>
+    Task ResetSchemaAsync(DatabaseOptions options, CancellationToken cancellationToken) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support resetting its schema.");
 }

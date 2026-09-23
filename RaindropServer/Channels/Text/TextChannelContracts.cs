@@ -19,6 +19,10 @@ namespace RaindropServer.Channels.Text;
 /// An end-to-end encrypted message has no <c>Content</c>: it carries <c>Ciphertext</c> (the MLS
 /// application message, which only the channel group's members can decrypt), the <c>Epoch</c> it was
 /// sent in and the <c>SenderDeviceId</c>. A plaintext message leaves those three null.
+/// <para>
+/// <c>Attachments</c> lists the encrypted files the message carries, by id — their names, types and
+/// keys are inside the ciphertext. Null for a message without files, and for a deleted one.
+/// </para>
 /// </remarks>
 public record ChannelMessage(
     Guid MessageId,
@@ -31,7 +35,23 @@ public record ChannelMessage(
     Guid? DeletedBy,
     byte[]? Ciphertext = null,
     long? Epoch = null,
-    Guid? SenderDeviceId = null);
+    Guid? SenderDeviceId = null,
+    IReadOnlyList<MessageAttachment>? Attachments = null);
+
+/// <summary>An encrypted file a message carries, as far as the server can describe it.</summary>
+/// <param name="AttachmentId">What to pass to <c>POST /api/attachments/download</c>.</param>
+/// <param name="Kind"><c>file</c>, or <c>thumbnail</c> for a preview of another file in the same message.</param>
+/// <param name="Extension">
+/// The extension the sender declared, lower case without the dot; empty for none. A client compares it
+/// with the name inside the encrypted message, and refuses to preview a file whose two disagree.
+/// </param>
+/// <param name="CiphertextSize">Bytes to download.</param>
+/// <param name="CiphertextSha256">
+/// SHA-256 of the encrypted file as it was uploaded. The hash that counts is the one inside the
+/// encrypted message, which the server cannot change; this one is for checking a download early.
+/// </param>
+public record MessageAttachment(
+    Guid AttachmentId, string Kind, string Extension, long CiphertextSize, byte[]? CiphertextSha256 = null);
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
@@ -44,7 +64,11 @@ public record SendMessageRequest(Guid ChannelId, string Content);
 /// The MLS application message (<c>PrivateMessage</c>) the sender's device encrypted for the
 /// channel's group, in its current epoch.
 /// </param>
-public record SendEncryptedMessageRequest(Guid ChannelId, byte[] Message);
+/// <param name="AttachmentIds">
+/// Uploads to send with the message, finished with <c>POST /api/attachments/uploads/complete</c>, in
+/// the order the message lists them. Each must have been uploaded by the caller for this channel.
+/// </param>
+public record SendEncryptedMessageRequest(Guid ChannelId, byte[] Message, IReadOnlyList<Guid>? AttachmentIds = null);
 
 /// <param name="ChannelId">The text channel to read.</param>
 /// <param name="Before">

@@ -26,6 +26,14 @@ The state machine to keep straight is [`UserStatus`](../RaindropServer/Users/Use
     [`RetentionCleanupService`](../RaindropServer/Users/RetentionCleanupService.cs) sweeps expired
     preserved accounts on a timer and at startup.
   - `Erased` nulls the username and password hash immediately.
+  - Before either is written, every registered [`ILeaveGuard`](../RaindropServer/Users/ILeaveGuard.cs)
+    may refuse the leave by throwing. The roles subsystem's `OwnerLeaveGuard` refuses an *erasing*
+    leave by the only owner (`last_owner`): nobody could ever log in as that UUID again, so the server
+    would be left without an owner. A preserved leave is allowed, because the owner can rejoin.
+- **A client that lost its UUID can still come back.** Login and rejoin both accept the username in
+  place of the UUID, and answer with the account's real UUID for the client to adopt. This is how a
+  member who removed the server from their client (which forgets the GUID) logs back in as the same
+  member, with the same roles and messages.
 - **The UUID row always survives**, whichever path was taken. Messages are linked to the UUID, so an
   erased account leaves a tombstone row rather than a deleted one — and that same UUID may register
   again from scratch later. The same goes for the copies of their *deleted* messages in the
@@ -55,7 +63,7 @@ All routes are under `/api/users` (plus one under `/api/server`). Authenticated 
 | POST | `/api/users/username-available` | – | Uniqueness pre-check for the registration screen |
 | POST | `/api/users/register` | – | First login: claim a username and password, get a session |
 | POST | `/api/users/login` | – | UUID (or username) + password → session |
-| POST | `/api/users/rejoin` | – | Restore a preserved account |
+| POST | `/api/users/rejoin` | – | Restore a preserved account, by UUID or username |
 | POST | `/api/users/logout` | ✓ | End this session |
 | GET | `/api/users/me` | ✓ | Own profile |
 | POST | `/api/users/lookup` | ✓ | Resolve a UUID to a display name, e.g. for a message author |
@@ -79,7 +87,7 @@ Defined in [`RaindropServer/Users/Contracts.cs`](../RaindropServer/Users/Contrac
 - `SessionResponse(User, Token, ExpiresAtUtc)` — returned by register/login/rejoin.
 - `RegisterRequest(UserId, Username, Password)`
 - `LoginRequest(UserId?, Username?, Password)` — either identifier works.
-- `RejoinRequest(UserId, Password)`
+- `RejoinRequest(UserId?, Username?, Password)` — either identifier works.
 - `ChangePasswordRequest(CurrentPassword, NewPassword)`
 - `ChangeUsernameRequest(Username)`
 - `LeaveRequest(Password, PreserveData)`
@@ -91,8 +99,8 @@ Defined in [`RaindropServer/Users/Contracts.cs`](../RaindropServer/Users/Contrac
 
 `{ "error": "<code>", "message": "<text>" }`. Codes a client branches on: `username_taken`,
 `already_registered`, `account_preserved`, `account_left`, `invalid_credentials`, `invalid_session`,
-`no_preserved_account`, `weak_password`, `invalid_username`, `invalid_payload`,
-`unsupported_media_type`.
+`no_preserved_account`, `missing_identifier`, `last_owner`, `weak_password`, `invalid_username`,
+`invalid_payload`, `unsupported_media_type`.
 
 Login deliberately answers `invalid_credentials` for both an unknown UUID and a wrong password, so the
 API cannot be used to enumerate who is registered on the server.

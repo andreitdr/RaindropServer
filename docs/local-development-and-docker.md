@@ -62,11 +62,60 @@ See [Users](users.md), [Channels](channels.md) and [Messages](messages.md) for m
 [Configuration](configuration.md#the-owner-console) for the console commands available once it's
 running.
 
+## Running the whole stack with Docker Compose
+
+`docker-compose.yml`'s `server` service runs the server itself — built from
+[`ServerCli/Dockerfile`](../ServerCli/Dockerfile) — wired to Postgres and LiveKit by default:
+
+```bash
+cp .env.example .env   # then set POSTGRES_PASSWORD and LIVEKIT_API_SECRET
+docker compose up -d server
+```
+
+`depends_on` brings up `postgres` (waiting for it to report healthy) and `livekit` automatically, so
+this one command is enough for a working server with voice channels. The server's own TLS certificate
+and identity key — which must survive restarts, see
+[Transport security](transport-security.md#two-consequences) — are bind-mounted to `./data/server`.
+
+To run against SQLite instead (no database container at all), override the `server` service's
+`environment` in a `docker-compose.override.yml` or on the command line:
+
+```bash
+RAINDROP_DB_PROVIDER=sqlite RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \
+docker compose up -d server
+```
+
+(This still starts `livekit` unless you also drop `depends_on: livekit` and `RAINDROP_VOICE_PROVIDER`
+in an override file — voice channels just won't be joinable without it, per
+[Voice](voice.md).) To run against SQL Server, point `RAINDROP_DB_PROVIDER` /
+`RAINDROP_DB_CONNECTION_STRING` at the `sqlserver` service the same way Postgres is wired below, and
+start it explicitly: `docker compose up -d sqlserver server`.
+
+## Wiping the database on every start
+
+`database.wipeOnStartup` (`RAINDROP_DEV_WIPE_DATABASE`) drops every Raindrop table before the schema
+is (re)created — **development only**, no confirmation, no undo. It's useful when you're iterating on
+something and want a guaranteed-empty database each time the server starts, without hand-deleting
+rows or recreating a container.
+
+It's wired into the `server` service, off by default:
+
+```bash
+RAINDROP_DEV_WIPE_DATABASE=true   # in .env, or on the command line
+docker compose up -d server
+```
+
+The server logs `[raindrop] database.wipeOnStartup is set — dropping every table before it starts.`
+and the startup configuration report says the same, so it's never silent. Leave it `false` (the
+default) the moment the data matters — there's deliberately no second flag or confirmation prompt
+protecting it, the same way `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET` isn't gated further; the name itself
+(`RAINDROP_DEV_WIPE_DATABASE`) is the warning. See
+[Configuration](configuration.md#database) and [Database modules](database-modules.md#the-contract).
+
 ## Local databases via Docker
 
-`docker-compose.yml` runs Postgres and SQL Server locally so you can develop against a real database
-instead of the default SQLite. This is **not** part of the deployed server image, and isn't needed at
-all when running against `sqlite`.
+Postgres and SQL Server can also run on their own, for developing with `dotnet run` against a real
+database instead of the default SQLite:
 
 ```bash
 cp .env.example .env   # then set real passwords
@@ -98,18 +147,45 @@ you'd rather swap images than eat the emulation cost.
 ## LiveKit, for voice channels
 
 Voice calls need a LiveKit media server beside Raindrop ([Voice](voice.md)). The same compose file
-runs one in LiveKit's `--dev` mode, whose key and secret (`devkey` / `secret`) match the defaults in
-`raindrop.json`:
+runs one from [`livekit.yaml`](../livekit.yaml), with its key pair taken from `.env` — **not** in
+LiveKit's `--dev` mode. Raindrop refuses `--dev`'s `devkey` / `secret` pair (and any secret under 32
+characters), so there is no shared default to forget to change: generate one.
+
+```bash
+cp .env.example .env
+openssl rand -base64 48
+```
+
+Put that value in `.env` as `LIVEKIT_API_SECRET`, then start the server:
 
 ```bash
 docker compose up -d livekit
 ```
 
+Raindrop needs the *same* key and secret, since it signs the join tokens LiveKit checks:
+
 ```bash
-RAINDROP_VOICE_PROVIDER=livekit dotnet run --project ServerCli
+RAINDROP_VOICE_PROVIDER=livekit \
+RAINDROP_LIVEKIT_API_KEY=raindrop \
+RAINDROP_LIVEKIT_API_SECRET=<the same secret> \
+dotnet run --project ServerCli
 ```
 
-Without Docker, `brew install livekit` and then `livekit-server --dev --bind 0.0.0.0` does the same.
+They can also go in `raindrop.json` under `voice.livekit`; the environment variables keep the secret
+out of the file. A mismatch is caught before the server listens: `LiveKitStartupCheck` asks LiveKit
+whether it accepts this key and secret, and credentials LiveKit refuses stop startup whatever
+`voice.startupCheck` says. An unreachable LiveKit is the softer case that setting governs —
+`warn` (the default) starts anyway, `require` refuses to.
+
+Without Docker, `brew install livekit` and then run it with the same pair:
+
+```bash
+LIVEKIT_KEYS="raindrop: <the same secret>" livekit-server --bind 0.0.0.0 --node-ip 127.0.0.1
+```
+
+`livekit-server --dev` works too, but only if Raindrop is also given
+`RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET=true` alongside `devkey` / `secret` — an escape hatch for a
+throwaway local server, never for one anybody else connects to.
 
 `LIVEKIT_NODE_IP` in `.env` is the address LiveKit tells clients to send audio to — Docker cannot work
 it out from inside the container. `127.0.0.1` is right when every client runs on this machine; use this
@@ -119,11 +195,12 @@ published on loopback only: clients reach it through Raindrop's relay, never dir
 
 The LiveKit CLI (`lk`, from `brew install livekit-cli`) is handy for testing without a second client:
 `lk room list` and `lk room participants list <room>` against `--url http://localhost:7880 --api-key
-devkey --api-secret secret` show what LiveKit thinks is going on, which is what Raindrop's reconciler
-compares itself with.
+raindrop --api-secret <the same secret>` show what LiveKit thinks is going on, which is what
+Raindrop's reconciler compares itself with.
 
 ## Building the Docker image
 
+`docker compose build server` does this for you (see above). Built directly,
 [`ServerCli/Dockerfile`](../ServerCli/Dockerfile) is built from the **repository root** as context,
 since it references `../.dockerignore`:
 

@@ -1,4 +1,5 @@
 using RaindropServer.Channels.Text;
+using RaindropServer.Data.Relational;
 using RaindropServer.E2ee;
 
 namespace RaindropServer.Tests;
@@ -193,5 +194,34 @@ public class StoreTests
 
         await devices.DeleteIdentityAsync(userId, default);
         Assert.Null(await devices.FindIdentityAsync(userId, default));
+    }
+}
+
+/// <summary>
+/// The dev-only "wipe on startup" path (<c>database.wipeOnStartup</c>). SQLite only, deliberately:
+/// unlike SQLite (a fresh private file per <see cref="TestDatabases.OpenAsync"/>), the Postgres and
+/// SQL Server test databases are shared across the whole suite, so a test that drops tables would
+/// race every other test running against them in parallel. <see cref="RelationalDatabaseDriver.ResetSchemaAsync"/>
+/// runs the identical <c>DROP TABLE IF EXISTS</c> text on all three drivers, so this still covers them.
+/// </summary>
+public class DatabaseResetTests
+{
+    [Fact]
+    public async Task Resetting_drops_every_row_and_ensuring_again_leaves_a_working_empty_database()
+    {
+        var (driver, options) = await TestDatabases.OpenAsync("sqlite");
+        var users = driver.CreateUserStore(options);
+        var user = await Sessions.ActiveUserAsync(users);
+
+        await driver.ResetSchemaAsync(options, default);
+        await driver.EnsureSchemaAsync(options, default);
+
+        Assert.Null(await users.FindByIdAsync(user.UserId, default));
+
+        // Must be safe to run again on a database that is already empty — exactly what every startup
+        // after the first does while the flag stays set.
+        await driver.ResetSchemaAsync(options, default);
+        await driver.EnsureSchemaAsync(options, default);
+        await Sessions.ActiveUserAsync(users);
     }
 }

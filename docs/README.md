@@ -21,11 +21,12 @@ with [Architecture overview](architecture-overview.md) if you're new to the code
 | [Roles & permissions](roles-and-permissions.md) | The permission model, built-in roles, who may change what, Role API |
 | [Channels](channels.md) | Channel types, `IChannelModule`, names, permissions, Channel API |
 | [Messages](messages.md) | Text messages, history paging, deletion/tombstones, Message API |
+| [Attachments](attachments.md) | End-to-end encrypted files in messages: chunked uploads, what the owner's size and type rules are enforced on, storage, cleanup, previews, Attachment API |
 | [Voice](voice.md) | Voice channels: group calls on a LiveKit sidecar, mute/deafen, mute for everyone, the signalling relay, Voice API |
 | [Events (push)](events.md) | The `/api/events` WebSocket, every event type, close codes, and the publisher/transport/handler seams plugins build on |
 | [Database modules](database-modules.md) | `IDatabaseDriver`, the relational store family, schema, adding a driver |
 | [Configuration](configuration.md) | `raindrop.json`, environment variables, the owner console |
-| [Local development & Docker](local-development-and-docker.md) | Running against Postgres/SQL Server locally, the Docker image |
+| [Local development & Docker](local-development-and-docker.md) | Running the whole stack (server, database, LiveKit) with Docker Compose, developing against Postgres/SQL Server locally, the Docker image |
 
 ## Quick facts
 
@@ -36,8 +37,8 @@ with [Architecture overview](architecture-overview.md) if you're new to the code
   model as SSH host keys).
 - **Wire formats:** JSON (default) and MessagePack, negotiated per request via `Content-Type`/`Accept`.
 - **Push:** a WebSocket at `GET /api/events` delivers every change a member may see, as it happens.
-- **What's implemented:** accounts, sessions, roles/permissions, text channels and messages, voice
-  channels (audio on a LiveKit sidecar), push events.
+- **What's implemented:** accounts, sessions, roles/permissions, text channels and messages, end-to-end
+  encrypted file attachments, voice channels (audio on a LiveKit sidecar), push events.
 - **End-to-end encryption:** both the identity layer (identity keys, devices, session binding, key
   backup, device linking) and the MLS delivery service (groups, commits, key packages, Welcomes) are
   implemented server-side; see [E2EE](e2ee.md). Encrypted text messages and calls don't reach users yet

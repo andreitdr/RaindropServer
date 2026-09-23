@@ -5,7 +5,8 @@ namespace ServerCli.Endpoints.Users;
 
 /// <summary>
 /// POST /api/users/rejoin — brings back an account that left with its data preserved, using the
-/// password it had at the time. Only works while the retention window is still open.
+/// password it had at the time. The account is found by UUID, or by username for a client that lost
+/// its UUID. Only works while the retention window is still open.
 /// </summary>
 public sealed class RejoinEndpoint : ITypedEndpoint<RejoinRequest, SessionResponse>
 {

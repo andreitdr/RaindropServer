@@ -1,3 +1,5 @@
+using RaindropServer.Configuration;
+
 namespace RaindropServer.Roles;
 
 /// <summary>Server-owner-tunable rules for roles.</summary>
@@ -11,7 +13,7 @@ public sealed class RoleOptions
     /// its <c>everyone</c> role once, through <see cref="PermissionRollouts"/>, instead.
     /// </summary>
     public Permission DefaultMemberPermissions { get; set; } =
-        Permission.ViewChannel | Permission.SendMessages | Permission.CreateChannels |
+        Permission.ViewChannel | Permission.SendMessages | Permission.AttachFiles | Permission.CreateChannels |
         Permission.Connect | Permission.Speak;
 
     /// <summary>
@@ -30,4 +32,28 @@ public sealed class RoleOptions
     /// whose owner is granted the role from the console instead.
     /// </summary>
     public bool FirstMemberBecomesOwner { get; set; } = true;
+
+    /// <summary>
+    /// Reports a seed that would give a fresh server's members more than its owner is likely to have
+    /// meant, or less than it takes to use the server at all.
+    /// </summary>
+    /// <remarks>
+    /// Only ever a warning: what the <c>everyone</c> role may hold is the server owner's decision,
+    /// and on a server that has already been seeded this setting changes nothing anyway.
+    /// </remarks>
+    public void Validate(ConfigurationReport report)
+    {
+        var dangerous = DefaultMemberPermissions & (Permission.Administrator | Permission.ManageRoles |
+                                                    Permission.DeleteChannels | Permission.MuteMembers);
+
+        if (dangerous != Permission.None)
+            report.Warn("defaultMemberPermissions",
+                $"grants {string.Join(", ", PermissionNames.Of(dangerous))} to everybody who joins this server.",
+                "These are the permissions that administer the server; a role granted deliberately is the usual home " +
+                "for them.");
+
+        if (!DefaultMemberPermissions.HasFlag(Permission.ViewChannel))
+            report.Warn("defaultMemberPermissions",
+                "does not include view_channel, so a new member will see an empty server until they are given a role.");
+    }
 }

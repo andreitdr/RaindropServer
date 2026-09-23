@@ -63,7 +63,13 @@ public enum Permission : long
     /// and lift that mute again. Checked server-wide, never per channel: a mute follows its target
     /// into every call, so only somebody trusted with the whole server may set one.
     /// </summary>
-    MuteMembers = 1L << 10
+    MuteMembers = 1L << 10,
+
+    /// <summary>
+    /// Add files to messages. Checked in the channel alongside <see cref="SendMessages"/>, since a
+    /// file travels in a message; taking it away leaves a member able to talk but not to upload.
+    /// </summary>
+    AttachFiles = 1L << 11
 }
 
 /// <summary>
@@ -84,6 +90,7 @@ public static class PermissionNames
     public const string Connect = "connect";
     public const string Speak = "speak";
     public const string MuteMembers = "mute_members";
+    public const string AttachFiles = "attach_files";
 
     /// <summary>
     /// Every permission this server knows, in the order a permission editor lists them: what an
@@ -94,6 +101,7 @@ public static class PermissionNames
     [
         (Permission.ViewChannel, ViewChannel, "See channels and read what is in them."),
         (Permission.SendMessages, SendMessages, "Post messages in channels."),
+        (Permission.AttachFiles, AttachFiles, "Add files to the messages they post."),
         (Permission.Connect, Connect, "Join voice channels and hear the people in them."),
         (Permission.Speak, Speak, "Talk in voice channels."),
         (Permission.CreateChannels, CreateChannels, "Create new channels on this server."),

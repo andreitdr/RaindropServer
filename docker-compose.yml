@@ -1,15 +1,59 @@
-# Local services for RaindropServer development: Postgres or SQL Server instead of the default
-# SQLite, and a LiveKit media server for voice calls. Not required to run the server — only start
-# what you actually configured as "database.provider" / "voice.provider" in raindrop.json.
+# The full RaindropServer stack: the server itself, plus the components it can run against —
+# Postgres or SQL Server instead of the default SQLite, and a LiveKit media server for voice calls.
 #
 # Usage:
-#   cp .env.example .env          # then edit the passwords
+#   cp .env.example .env          # then edit the passwords and LIVEKIT_API_SECRET
+#   docker compose up -d server        # brings up postgres and livekit too — server depends on both
+#
+# `server` is wired to Postgres and LiveKit by default (see the `server` service below); everything
+# else — Postgres, SQL Server, LiveKit on their own — stays opt-in, only starting what you name:
 #   docker compose up -d postgres      # or: sqlserver, livekit
 #
 # Data is bind-mounted to ./data on the host, so `docker compose down` (even `down -v`) and image
 # updates never lose it — only deleting ./data does. That directory is gitignored.
 
 services:
+  server:
+    # The Raindrop server itself, built from ServerCli/Dockerfile. Wired to Postgres and LiveKit by
+    # default below — depends_on waits for Postgres to report healthy, and for LiveKit to have
+    # started, before the server's own LiveKitStartupCheck runs. See
+    # docs/local-development-and-docker.md for switching to SQLite/SQL Server or running without voice.
+    build:
+      context: .
+      dockerfile: ServerCli/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    environment:
+      # Set explicitly rather than relying on the Dockerfile's baked-in ENV: an IDE's own Docker
+      # Compose debug launcher (e.g. Rider's generated override) runs the Debug build directly and can
+      # skip the final image stage those defaults live in, leaving Kestrel to fall back to
+      # raindrop.json's "https://localhost:5001" — loopback-only, unreachable from outside the
+      # container even though `docker compose ps` and the port mapping look fine.
+      RAINDROP_URLS: https://0.0.0.0:5001
+      RAINDROP_TLS_CERTIFICATE_PATH: /app/data/raindrop.pfx
+      RAINDROP_DB_PROVIDER: postgres
+      # Encrypted files members share, on the same mounted volume as the certificate and keys.
+      RAINDROP_ATTACHMENTS_PATH: /app/data/attachments
+      RAINDROP_DB_CONNECTION_STRING: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-raindrop};Username=${POSTGRES_USER:-raindrop};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      RAINDROP_VOICE_PROVIDER: livekit
+      RAINDROP_LIVEKIT_API_URL: http://livekit:7880
+      RAINDROP_LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-raindrop}
+      RAINDROP_LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env — openssl rand -base64 48}
+      # DEVELOPMENT ONLY. Drops every table before the server starts — no confirmation, no undo. Off
+      # by default; set RAINDROP_DEV_WIPE_DATABASE=true in .env for a "fresh database every restart"
+      # dev loop, and never on a deployment whose data matters.
+      RAINDROP_DEV_WIPE_DATABASE: ${RAINDROP_DEV_WIPE_DATABASE:-false}
+    ports:
+      - "${RAINDROP_PORT:-5001}:5001"
+    volumes:
+      # The TLS certificate and server identity key must outlive the container — see
+      # ServerCli/Dockerfile and docs/transport-security.md#two-consequences.
+      - ./data/server:/app/data
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped

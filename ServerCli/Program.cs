@@ -4,9 +4,11 @@ using System.Security.Cryptography;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using RaindropServer;
+using RaindropServer.Attachments;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
+using RaindropServer.Configuration;
 using RaindropServer.Data;
 using RaindropServer.Events;
 using RaindropServer.Roles;
@@ -15,9 +17,16 @@ using RaindropServer.Users;
 using RaindropServer.Voice.LiveKit;
 using ServerCli;
 
-// ── 1. Read the server owner's configuration ─────────────────────────────────
-// raindrop.json sits next to the executable; RAINDROP_* environment variables override it.
-var config = ServerConfig.Load();
+// ── 1. Read the server owner's configuration, and check it ───────────────────
+// raindrop.json sits next to the executable; RAINDROP_* environment variables override it. Every
+// section is then handed to the component whose settings they are, and everything the owner has got
+// wrong is reported at once — a server that will not work is worth saying so before it listens.
+var report = new ConfigurationReport();
+var config = ServerConfig.Load(report);
+config.Validate(report);
+
+if (!PrintProblems(report, "raindrop.json"))
+    return 1;
 
 // ── 2. Configure services ────────────────────────────────────────────────────
 // AddRaindropServer brings in the user subsystem and discovers every endpoint automatically —
@@ -33,7 +42,8 @@ try
     if (config.VoiceProvider == "livekit")
         services.AddRaindropLiveKit(config.ApplyTo);
 
-    services.AddRaindropServer(config.ApplyTo, config.ApplyTo, config.ApplyTo, configureVoice: config.ApplyTo);
+    services.AddRaindropServer(config.ApplyTo, config.ApplyTo, config.ApplyTo,
+        configureVoice: config.ApplyTo, configureAttachments: config.ApplyTo);
 }
 catch (InvalidOperationException ex)
 {
@@ -64,10 +74,6 @@ ServerHostOptions hostOptions;
 try
 {
     hostOptions = config.CreateHostOptions();
-
-    // Checked here rather than left to ServerHost, so an https:// address with TLS switched off is
-    // reported like the configuration mistake it is.
-    hostOptions.Validate();
 }
 catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException
                                or InvalidOperationException)
@@ -101,14 +107,28 @@ services.AddSingleton(new ServerIdentity(
     identityKey.PublicKey,
     fingerprint is null ? null : identityKey.SignTlsBinding(fingerprint))
 {
-    Capabilities = fingerprint is null
-        ? [ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability]
-        : [ServerIdentity.TlsIdentityBindingCapability, ServerIdentity.E2eeDevicesCapability,
-            ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability]
+    Capabilities =
+    [
+        .. fingerprint is null ? Array.Empty<string>() : [ServerIdentity.TlsIdentityBindingCapability],
+        ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability,
+        .. config.Attachments.Enabled ? [ServerIdentity.AttachmentsCapability] : Array.Empty<string>()
+    ]
 });
 var identityFingerprint = ServerCertificate.FormatFingerprint(SHA256.HashData(identityKey.PublicKey));
 
-// ── 5. Start the HTTP server on a background thread ──────────────────────────
+// ── 5. Check what can only be found out by going and looking ─────────────────
+// The certificate against the addresses it will be presented on, and every module's own startup
+// check — for voice, that the media server is there and accepts this server's credentials. Done
+// before the port opens, so an owner hears it from the console rather than from the first member
+// who cannot join a call.
+var startup = new ConfigurationReport();
+hostOptions.Validate(startup);
+await services.RunRaindropStartupChecksAsync(startup);
+
+if (!PrintProblems(startup, "this server's surroundings"))
+    return 1;
+
+// ── 6. Start the HTTP server on a background thread ──────────────────────────
 // ServerHost.Start() launches ASP.NET Core in a Task.Run so this thread is free.
 await using var server = ServerHost.Start(services, hostOptions);
 
@@ -145,6 +165,10 @@ Console.WriteLine(config.VoiceProvider is null
     ? "Voice: off — set voice.provider in raindrop.json to let members join calls."
     : $"Voice: {config.VoiceProvider} at {config.Voice.LiveKit?.ApiUrl}");
 
+Console.WriteLine(config.Attachments.Enabled
+    ? $"Attachments: up to {config.Attachments.MaximumFileSizeMegabytes} MB, kept in {server.Services.GetRequiredService<AttachmentOptions>().StoragePath}"
+    : "Attachments: off — set attachments.enabled in raindrop.json to let members share files.");
+
 Console.WriteLine("Type 'help' for commands, 'quit' to stop.\n");
 
 // Granting a role from the terminal has to go through the very service that is answering requests,
@@ -155,7 +179,7 @@ var voiceState = server.Services.GetRequiredService<IVoiceStateStore>();
 var channelStore = server.Services.GetRequiredService<IChannelStore>();
 var userStore = server.Services.GetRequiredService<IUserStore>();
 
-// ── 6. Main thread: the server owner's console ───────────────────────────────
+// ── 7. Main thread: the server owner's console ───────────────────────────────
 // The server runs independently; use this loop for your own CLI commands.
 while (true)
 {
@@ -192,6 +216,7 @@ while (true)
             Console.WriteLine("  voice                    list who is in which voice call");
             Console.WriteLine("  purge-plaintext          delete every message stored before end-to-end encryption");
             Console.WriteLine("  reports                  show the most recently reported messages");
+            Console.WriteLine("  attachments              show how many files are stored, and how much room they take");
             Console.WriteLine("  quit                     stop the server");
             break;
 
@@ -214,6 +239,10 @@ while (true)
 
         case "reports":
             await PrintReportsAsync();
+            break;
+
+        case "attachments":
+            await PrintAttachmentsAsync();
             break;
 
         case "purge-plaintext":
@@ -245,6 +274,31 @@ while (true)
 
 Console.WriteLine("Shutting down...");
 return 0;
+
+// Prints what a configuration check found, and says whether the server may carry on. Warnings go to
+// stdout and errors to stderr, so a container's logs keep the two apart.
+static bool PrintProblems(ConfigurationReport report, string subject)
+{
+    if (report.HasProblems)
+        Console.WriteLine($"Checked {subject}:");
+
+    foreach (var problem in report.Ordered())
+    {
+        var error = problem.Severity == ConfigurationSeverity.Error;
+        var stream = error ? Console.Error : Console.Out;
+
+        stream.WriteLine($"  {(error ? "error  " : "warning")} {problem.Setting}: {problem.Message}");
+
+        if (problem.Remedy is { } remedy)
+            stream.WriteLine($"          {remedy}");
+    }
+
+    if (!report.HasErrors)
+        return true;
+
+    Console.Error.WriteLine("Cannot start Raindrop until the errors above are fixed.");
+    return false;
+}
 
 // Prints every role and what it grants — the console's answer to "who can do what on this server".
 async Task PrintRolesAsync()
@@ -310,6 +364,21 @@ async Task PrintReportsAsync()
                           $"{author?.Username ?? report.AuthorId.ToString()} (reported by {reporter?.Username ?? report.ReporterId.ToString()})");
         Console.WriteLine($"      \"{report.Body}\"" + (report.Reason is null ? "" : $"  — {report.Reason}"));
     }
+}
+
+// How many encrypted files this server holds and how much room they take — the one thing about them the
+// owner can know, since their names and contents are end-to-end encrypted.
+async Task PrintAttachmentsAsync()
+{
+    var options = server.Services.GetRequiredService<AttachmentOptions>();
+    var stats = await server.Services.GetRequiredService<IAttachmentStore>().GetStatisticsAsync(CancellationToken.None);
+
+    Console.WriteLine(options.Enabled ? $"  folder:   {options.StoragePath}" : "  attachments are off");
+    Console.WriteLine($"  sent:     {stats.Attached} file(s), {AttachmentOptions.Describe(stats.AttachedBytes)}");
+    Console.WriteLine($"  pending:  {stats.Pending} upload(s) not yet sent, {AttachmentOptions.Describe(stats.PendingBytes)}");
+
+    if (stats.AwaitingRemoval > 0)
+        Console.WriteLine($"  removing: {stats.AwaitingRemoval} file(s) from deleted messages, on the next maintenance pass");
 }
 
 // Deletes every plaintext message and the archive of deleted messages' text: everything the server

@@ -286,6 +286,48 @@ public sealed class SqliteDatabaseDriver : RelationalDatabaseDriver
         """
         CREATE INDEX IF NOT EXISTS ix_raindrop_message_reports_channel
             ON raindrop_message_reports (channel_id, reported_at)
+        """,
+
+        // Attachments: encrypted files added to messages. The server holds ciphertext and knows only
+        // who uploaded it, for which channel, its declared extension and size, and which message
+        // carries it; the bytes live in the attachment storage, not here.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_attachments (
+            attachment_id      TEXT    NOT NULL PRIMARY KEY,
+            channel_id         TEXT    NOT NULL,
+            uploader_id        TEXT    NOT NULL,
+            uploader_device_id TEXT    NOT NULL,
+            kind               TEXT    NOT NULL,
+            extension          TEXT    NOT NULL,
+            ciphertext_size    INTEGER NOT NULL,
+            received_size      INTEGER NOT NULL,
+            ciphertext_sha256  BLOB    NULL,
+            state              TEXT    NOT NULL,
+            message_id         TEXT    NULL,
+            created_at         TEXT    NOT NULL,
+            completed_at       TEXT    NULL,
+            deleted_at         TEXT    NULL
+        )
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_message
+            ON raindrop_attachments (message_id)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_channel
+            ON raindrop_attachments (channel_id)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_state
+            ON raindrop_attachments (state, created_at)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_uploader
+            ON raindrop_attachments (uploader_id, state)
         """
     ];
 }

@@ -35,7 +35,11 @@ They cover:
 - the stores under real concurrency: racing commits for one epoch, racing key-package claims, history
   paging across plaintext and encrypted messages
 - the delivery-service and device-service rules
-- LiveKit option validation
+- attachments: the ciphertext-length contract with the Rust core, the store's claim races, the upload /
+  attach / download rules over a real folder, and the v2 attestation bytes against a golden vector
+- configuration: what `ServerConfig` makes of a mistyped `raindrop.json`, every component's own
+  option validation, and `LiveKitStartupCheck` against a stub LiveKit that answers however the test
+  says
 
 Store tests run on SQLite, and also on PostgreSQL and SQL Server when `RAINDROP_TEST_POSTGRES` or
 `RAINDROP_TEST_SQLSERVER` holds a connection string (the docker-compose services will do). End-to-end
@@ -82,7 +86,8 @@ one, `fingerprint` prints the TLS fingerprint for clients to pin, `roles` lists 
 and what each grants, `grant <user> <role>` and `revoke <user> <role>` change who holds one,
 `events` shows how many clients have the event stream open, `voice` lists who is in which voice call,
 `purge-plaintext` deletes every pre-encryption message and the deleted-message archive (after a `yes`),
-`reports` shows the latest reported messages,
+`reports` shows the latest reported messages, `attachments` shows how many encrypted files are stored and
+how much room they take,
 and `quit` shuts the server down gracefully. With no console attached (a container started
 without a TTY) the server keeps serving until it receives SIGINT/SIGTERM.
 
@@ -91,7 +96,9 @@ host's usual thirty. A connection still draining must not outlast the ten second
 allows before it resorts to SIGKILL — a server killed mid-stop is one that never ran its graceful
 shutdown at all.
 
-Docker build (`ServerCli/Dockerfile`, built from the repo root as context since it references `../.dockerignore`):
+Docker: `docker-compose.yml`'s `server` service builds and runs the whole stack (server + Postgres +
+LiveKit) — `docker compose up -d server`. Built directly, `ServerCli/Dockerfile` is built from the
+repo root as context since it references `../.dockerignore`:
 
 ```bash
 docker build -f ServerCli/Dockerfile -t raindrop-server .
@@ -190,7 +197,9 @@ generated certificate is ECDSA P-256. A long-lived **server identity key** (`Ser
 `server-identity.key`) signs the certificate's fingerprint; `/api/server/info` serves the key and
 signature, and clients pin the key so a replaced certificate is followed only when that key vouches
 for it. See `docs/transport-security.md`. LiveKit's API URL must be https unless loopback or a
-container name, and weak or `--dev` LiveKit secrets are refused (`LiveKitOptions.Validate`).
+container name, and weak or `--dev` LiveKit secrets are refused (`LiveKitOptions.Validate`, which also
+refuses a quoted, placeholder or barely-varied secret, and LiveKit's `ws://` client address pasted
+into `apiUrl`).
 
 Two consequences worth remembering:
 
@@ -238,16 +247,25 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
   `TextMessageRecord.IsEncrypted` and merges both tables for history under the same cursor), never
   archived. Plaintext `send` answers `encryption_required` unless `channels.allowPlaintextMessages`;
   the console's `purge-plaintext` deletes old plaintext and the deleted-message archive.
+- **Attachments** (`RaindropServer/Attachments/`, full reference [`docs/attachments.md`](docs/attachments.md)):
+  files are encrypted by the sender under a per-file key (the Rust core's chunked `raindrop/attachment/v1`
+  format), uploaded in chunks as ciphertext, and named by id in `send-encrypted`'s `AttachmentIds`; the key
+  travels inside the MLS message. The server sees only a file's channel, declared extension and size — the
+  ciphertext length fixes the plaintext length exactly (`AttachmentFormat`), which is how
+  `attachments.maximumFileSizeMegabytes` is enforced without trusting the client.
 - **Reports** (`MessageReportService`): a device attests every message it sends (Ed25519 over the
   channel, client message id, time, type and body, inside the encrypted payload); a reporter reveals
   the text and the attestation, the server verifies it against the sending device's key and stores
   it in `raindrop_message_reports` — the only encrypted-message text the server ever holds — and
-  sends `message.reported` to channel moderators (`manage_messages`). Console: `reports`.
+  sends `message.reported` to channel moderators (`manage_messages`). Console: `reports`. A message with
+  files is attested under `raindrop/message-attestation/v2`, which also signs each file's id and ciphertext
+  hash; the server checks those against the files stored with the message.
 - Ed25519 verification is BouncyCastle, confined to `Security/Ed25519Signatures.cs` (.NET has none).
 - Seams: `IDeviceStore`/`IKeyBackupStore` (driver factories with refusing defaults), `IDeviceLinkRelay`,
   `IDeviceListener`, `ISessionStore.BindDevice`/`RemoveAllForDevice` (refusing defaults), `E2eeOptions`;
   `IE2eeMembershipPolicy`, `IMlsGroupStore`/`IKeyPackageStore`/`IWelcomeStore`; registered by
-  `AddRaindropE2ee`, called from `AddRaindropServer`. Capabilities `e2ee.devices.v1`, `e2ee.delivery.v1`.
+  `AddRaindropE2ee`, called from `AddRaindropServer`. Capabilities `e2ee.devices.v1`, `e2ee.delivery.v1`;
+  `attachments.v1` while attachments are enabled.
 
 ### Users
 
@@ -320,7 +338,7 @@ button rather than let a request fail — but it is never trusted about it: ever
 `Permission` is a `[Flags]` enum backed by `long` rather than `int`: the set lives in one database
 column, there is no migration mechanism here (see **Database modules**), so the room for another
 fifty permissions has to exist from the start. The permissions are `ViewChannel`, `SendMessages`,
-`ManageMessages`, `CreateChannels`, `RenameChannels`, `DeleteChannels`, `ManageRoles`,
+`AttachFiles` (add files to messages, checked in the channel beside `SendMessages`), `ManageMessages`, `CreateChannels`, `RenameChannels`, `DeleteChannels`, `ManageRoles`,
 `Administrator`, and for voice `Connect`, `Speak` and `MuteMembers` (the last checked server-wide,
 never per channel, and not part of the channel-creator rule — a mute for everyone follows its target
 into every call).
@@ -348,8 +366,8 @@ server is somebody registering and expecting to own it.
   *assigned* it; holding it is what being an active member means, so the resolver folds it in for
   everyone and it is refused as a target for assign and unassign. Its permissions are editable (that
   is how an owner closes a server down to read-only); its name is not, and it cannot be deleted. It
-  is seeded from `RoleOptions.DefaultMemberPermissions` — view, post, create channels, connect,
-  speak — and *only* seeded: changing that setting later does not reach back and overwrite what
+  is seeded from `RoleOptions.DefaultMemberPermissions` — view, post, attach files, create channels,
+  connect, speak — and *only* seeded: changing that setting later does not reach back and overwrite what
   administrators have since made it. A permission a later build introduces for everybody reaches an
   already-seeded `everyone` role **once**, through `PermissionRollouts` (recorded in
   `raindrop_permission_rollouts`, so an owner who removes it keeps it removed). The list is in code
@@ -540,7 +558,10 @@ WebSocket lives in `Events/WebSockets/` and is one implementation), `IServerEven
 (in-process subscribers, registered with `AddServerEventHandler<T, THandler>`),
 `Users/ISessionListener` (told when a member's sessions change), and
 `Channels/Text/IMessageDeletionListener` (told *before* message text is destroyed — not an event, and
-fail-closed), and the voice seams in **Voice** above. `EventHub` is the default publisher
+fail-closed), the voice seams in **Voice** above, and for files `IAttachmentStorage` (where ciphertext is
+kept; a local folder by default), `IAttachmentPolicy` (enumerable: every policy must accept an upload),
+`IAttachmentListener` (enumerable, told when a file is uploaded, sent or removed) and
+`Channels/Text/IMessageAttachments` (how text channels hand files to whatever stores them). `EventHub` is the default publisher
 and registry; it sends `ready` first, closes a stream whose session ends (`4401`), renews an open
 stream's session, bounds each connection's queue (`4429` when full), and closes everything with
 `1001` on shutdown. Publishing never fails or blocks the request that caused it.
@@ -552,9 +573,11 @@ clients exactly like the API's. Over HTTP/2 a WebSocket is an extended `CONNECT`
 ### Database modules
 
 `IDatabaseDriver` is the whole contract: a name, a store per kind of data (`IUserStore`,
-`IChannelStore`, `IRoleStore`, `ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`, and
-`IDeviceStore`/`IKeyBackupStore`, whose factories have refusing default implementations so older
-drivers still load), and idempotent schema DDL. Drivers
+`IChannelStore`, `IRoleStore`, `ITextMessageStore`, `IDeletedMessageStore`, `IVoiceMuteStore`,
+`IAttachmentStore`, and `IDeviceStore`/`IKeyBackupStore`, whose factories have refusing default implementations so older
+drivers still load), idempotent schema DDL (`EnsureSchemaAsync`), and its dev-only counterpart
+`ResetSchemaAsync` (drops every table, refuses by default so an older driver still loads) — see
+**Configuration** below for `database.wipeOnStartup`. Drivers
 are discovered by `DatabaseDriverRegistry` from loaded assemblies, from `RaindropServer.Data.*.dll`
 next to the executable, and from any `*.dll` in a `drivers/` folder — which is how a third-party
 driver gets added without touching this repo. A driver is only *used* when the owner names it in
@@ -582,8 +605,9 @@ message text), `raindrop_permission_rollouts` (which one-time permission grants 
 `raindrop_voice_mutes` (members muted for everyone), and for end-to-end encryption
 `raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, and the delivery service's
 `raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`,
-`raindrop_encrypted_messages` and `raindrop_message_reports` — everything after the first five added as
-new tables, so existing databases gain them without an `ALTER`.
+`raindrop_encrypted_messages` and `raindrop_message_reports`, and `raindrop_attachments` (records of
+encrypted files; the bytes live in `IAttachmentStorage`) — everything after the first five added as new
+tables, so existing databases gain them without an `ALTER`.
 
 `EnsureSchemaAsync` **only creates what is missing** — there is no migration mechanism, so adding a
 column to a table that already exists in the wild needs a guarded `ALTER TABLE` per dialect, which
@@ -599,8 +623,13 @@ consistent. So deleting a role deletes its assignments explicitly.
 ### Wiring
 
 - `AddRaindropServer(configureUsers?, configureChannels?, configureRoles?, configureEvents?,
-  configureVoice?)` registers routing, events, the user subsystem, roles, channels and every kind of
-  channel this server can host, voice, and every discovered endpoint.
+  configureVoice?, configureAttachments?)` registers routing, events, the user subsystem, roles,
+  attachments, channels and every kind of channel this server can host, voice, and every discovered
+  endpoint.
+- `AddRaindropAttachments(configure?)` registers `AttachmentService` (also the `IMessageAttachments` text
+  channels use), the local-folder storage, the configured policy, the deletion listener, the maintenance
+  sweep and the storage startup check. It runs **before** `AddRaindropChannels`, which otherwise fills in
+  `NoMessageAttachments` (refuses every file).
 - `AddRaindropEvents(configure?)` registers the publisher, the connection registry and the WebSocket
   transport. Every subsystem that publishes calls it itself; register your own `IEventPublisher` or
   `IEventConnectionRegistry` first to replace them.
@@ -733,7 +762,7 @@ see Transport security.
 | POST | `/api/channels/get` | one channel, and what the caller may do in it |
 | POST | `/api/channels/rename` | rename it — needs `RenameChannels`, or having created it |
 | POST | `/api/channels/delete` | delete it and everything in it — needs `DeleteChannels`, or having created it |
-| POST | `/api/channels/text/messages/send-encrypted` | post an end-to-end encrypted message — needs `SendMessages` and a bound session |
+| POST | `/api/channels/text/messages/send-encrypted` | post an end-to-end encrypted message — needs `SendMessages` and a bound session; `attachmentIds` adds finished uploads (needs `AttachFiles`) |
 | POST | `/api/channels/text/messages/send` | post a plaintext message — `encryption_required` unless `channels.allowPlaintextMessages` |
 | POST | `/api/channels/text/messages/report` | report an encrypted message, revealing its text with the author's attestation |
 | POST | `/api/channels/text/messages/reports` | a channel's reports — needs `ManageMessages` |
@@ -752,19 +781,84 @@ Channel error codes on top of the user ones: `invalid_channel_type`, `channel_ty
 `encryption_required`, `device_required`, `invalid_mls_message`, `wrong_group`, `group_not_found`, `stale_epoch`,
 and for voice `voice_unavailable`, `channel_full`, `not_in_voice`, `member_not_found`.
 
+### Attachment API
+
+All authenticated; full reference [`docs/attachments.md`](docs/attachments.md). Uploads need `SendMessages`
+and `AttachFiles` in the channel and a bound session.
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/attachments/policy` | what this server accepts: size limits, allowed/blocked extensions, preview list, chunk size |
+| POST | `/api/attachments/uploads/create` | start an upload: `{channelId, extension, ciphertextSize, kind?}` |
+| PUT | `/api/attachments/uploads/chunk` | raw bytes, with `Raindrop-Attachment-Id` and `Raindrop-Upload-Offset` headers |
+| POST | `/api/attachments/uploads/status` | bytes received so far, to resume |
+| POST | `/api/attachments/uploads/complete` | finish it, checked against the ciphertext's SHA-256 |
+| POST | `/api/attachments/uploads/cancel` | throw away an upload not yet sent |
+| POST | `/api/attachments/download` | the ciphertext, to anyone who can see the channel (`Range` honoured) |
+
+Attachment error codes: `attachments_disabled`, `invalid_attachment`, `file_type_not_allowed`,
+`file_too_large`, `too_many_pending_uploads`, `upload_offset_mismatch`, `chunk_too_large`,
+`upload_incomplete`, `upload_finished`, `hash_mismatch`, `too_many_attachments`,
+`attachment_already_sent`, `attachment_not_found`, `attachment_unavailable`.
+
 
 ## Configuration
 
 `ServerCli/raindrop.json` is copied next to the executable and read at startup; its sections are
-`urls`, `tls`, `database`, `users`, `channels` (message length and history page sizes), `roles` and
-`voice`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
-`RAINDROP_DB_PROVIDER`, `RAINDROP_DB_CONNECTION_STRING`, `RAINDROP_TLS_ENABLED`,
+`urls`, `tls`, `database`, `users`, `channels` (message length and history page sizes), `roles`,
+`voice` and `attachments`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
+`RAINDROP_DB_PROVIDER`, `RAINDROP_DB_CONNECTION_STRING`, `RAINDROP_DEV_WIPE_DATABASE`,
+`RAINDROP_TLS_ENABLED`,
 `RAINDROP_TLS_CERTIFICATE_PATH`, `RAINDROP_TLS_CERTIFICATE_PASSWORD`, `RAINDROP_VOICE_PROVIDER`,
-`RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`, `RAINDROP_LIVEKIT_API_SECRET`.
+`RAINDROP_VOICE_STARTUP_CHECK`, `RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`,
+`RAINDROP_LIVEKIT_API_SECRET`, `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`, `RAINDROP_ATTACHMENTS_ENABLED`,
+`RAINDROP_ATTACHMENTS_PATH`, `RAINDROP_ATTACHMENTS_MAX_MB`.
 
-The `voice` section is `provider` (`livekit`, or null for no voice — the default), `maximumParticipants`
-and `livekit` (`apiUrl`, a private address clients never reach; `apiKey`; `apiSecret`). `livekit` with
-a missing key or secret is a startup error.
+The `attachments` section is `enabled`, `storagePath` (relative to the executable; back it up with the
+database), `maximumFileSizeMegabytes` and `maximumFileSizeMegabytesByExtension` (a map, e.g.
+`{ "mp4": 500 }` — `ServerConfig`'s strict walker treats a `Dictionary<string, T>` setting's keys as the
+owner's and checks only its values), `allowedExtensions` (null = any), `blockedExtensions` (always wins;
+defaults to programs such as `exe`), `allowFilesWithoutExtension`, `maximumFilesPerMessage`,
+`pendingUploadExpiryHours`, `maximumPendingUploadsPerMember`, and `preview` (`extensions` clients show
+inline, `autoLoadMaximumMegabytes`). `AttachmentOptions.Validate` reports malformed extensions (`.png`,
+`PNG`), an extension both allowed and blocked, a size override or preview for a type never accepted,
+and limits that contradict each other. See `docs/configuration.md#attachments`.
+
+`database.wipeOnStartup` (`RAINDROP_DEV_WIPE_DATABASE`) is **development only**: when set, every
+Raindrop table is dropped (`IDatabaseDriver.ResetSchemaAsync`, implemented once generically in
+`RelationalDatabaseDriver` for all three shipped drivers via `DROP TABLE IF EXISTS`) before
+`EnsureSchemaAsync` recreates them — `InitializeRaindropDatabaseAsync` runs this before schema
+creation and logs it loudly. No confirmation, no undo; `DatabaseOptions.Validate` reports it as a
+warning whenever it's on. `docker-compose.yml` wires it into the `server` service, off by default —
+see `docs/local-development-and-docker.md#wiping-the-database-on-every-start`.
+
+The `voice` section is `provider` (`livekit`, or null for no voice — the default), `maximumParticipants`,
+`startupCheck` (`off`/`warn`/`require`) and `livekit` (`apiUrl`, a private address clients never reach;
+`apiKey`; `apiSecret`; `allowWeakSecret`). `livekit` with a missing key or secret is a startup error.
+
+**There is no shipped LiveKit secret, and no `--dev` mode behind it.** `docker-compose.yml` runs
+`livekit/livekit-server` from `livekit.yaml` with `LIVEKIT_KEYS` built from `LIVEKIT_API_KEY` /
+`LIVEKIT_API_SECRET` in `.env`, and Raindrop must be given the same pair. `apiSecret` is generated
+(`openssl rand -base64 48`), and `LiveKitOptions` refuses anything that is not a secret: shorter than
+32 characters, one of LiveKit's own dev values, a placeholder nobody substituted, or long without
+being varied. `allowWeakSecret` (`RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`) downgrades those refusals to a
+warning — it is the escape hatch for a throwaway LiveKit on your own machine, and nothing writing
+about voice should present it as the ordinary way to run one.
+
+**Everything in the file is validated before the server listens, and every problem is reported at
+once** rather than one per restart. Each component validates its own settings by taking a
+`ConfigurationReport` (`RaindropServer/Configuration/`) — `DatabaseOptions`, `UserOptions`,
+`ChannelOptions`, `RoleOptions`, `VoiceOptions`, `LiveKitOptions`, `ServerHostOptions` — while
+`ServerConfig.Load` checks the file itself: JSON that does not parse, a setting this build does not
+have (an error, with the nearest real name suggested, because the deserializer would silently ignore
+it and leave a default nobody chose), a value of the wrong kind, and `RAINDROP_*` variables that are
+empty, malformed or misspelled. What can only be found out by asking is an `IStartupCheck`, run by
+`services.RunRaindropStartupChecksAsync()` after registration and before the port opens; a plugin
+registers its own with `AddStartupCheck<T>()`. `LiveKitStartupCheck` is the one this build ships:
+LiveKit's host resolves, it answers, it is LiveKit, it accepts this server's key and secret, and its
+clock is within 30 seconds of ours. `voice.startupCheck` decides whether an *unreachable* media
+server is a warning or a refusal to start; credentials it actively refuses are an error either way,
+since waiting cannot fix them. See `docs/configuration.md` and `docs/voice.md`.
 
 Connection string examples per provider:
 
@@ -782,14 +876,24 @@ relative to the working directory. Set `tls.enabled` to false only when a revers
 TLS, and listen on `http://` in that case — an `https://` URL without a certificate is a startup
 error rather than a silent downgrade.
 
-## Local databases and LiveKit (Docker)
+## Docker Compose: the whole stack, or just its components
 
-`docker-compose.yml` runs Postgres and SQL Server locally for development against a real database
-instead of the default SQLite, and LiveKit (configured by `livekit.yaml`, key and secret from
-`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` in `.env`; the server refuses `--dev` credentials) for voice
-calls — not part of the deployed server. `docker compose up -d livekit`, then run with
-`RAINDROP_VOICE_PROVIDER=livekit`; `LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for
-audio (127.0.0.1 for clients on this machine, the LAN address otherwise).
+`docker-compose.yml`'s `server` service builds and runs the server itself (`ServerCli/Dockerfile`),
+wired by default to `postgres` and `livekit` — `depends_on` starts both automatically:
+
+```bash
+cp .env.example .env   # then set POSTGRES_PASSWORD and LIVEKIT_API_SECRET
+docker compose up -d server
+```
+
+`postgres`, `sqlserver` and `livekit` can also run on their own, for `dotnet run` development against
+a real database instead of the default SQLite, or a LiveKit sidecar for voice calls (configured by
+`livekit.yaml`, key and secret from `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` in `.env`; the server
+refuses `--dev` credentials). `docker compose up -d livekit`, then run with
+`RAINDROP_VOICE_PROVIDER=livekit` and the *same* pair as `RAINDROP_LIVEKIT_API_KEY` /
+`RAINDROP_LIVEKIT_API_SECRET` — LiveKit rejects everything signed with any other secret;
+`LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for audio (127.0.0.1 for clients on
+this machine, the LAN address otherwise).
 
 ```bash
 cp .env.example .env   # then set real passwords
@@ -797,8 +901,8 @@ docker compose up -d postgres      # or: sqlserver
 ```
 
 Each service bind-mounts its data to `./data/<service>` on the host (gitignored), so `docker compose
-down` — even `down -v` — and image updates never lose it; only deleting `./data` does. Point the
-server at whichever one is running:
+down` — even `down -v` — and image updates never lose it; only deleting `./data` does. Point a
+`dotnet run` server at whichever one is running:
 
 ```bash
 RAINDROP_DB_PROVIDER=postgres RAINDROP_DB_CONNECTION_STRING="Host=localhost;Port=5432;Database=raindrop;Username=raindrop;Password=<POSTGRES_PASSWORD>" dotnet run --project ServerCli

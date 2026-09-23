@@ -19,7 +19,11 @@ page covers what the server *does* hold and do:
 | Encrypted voice | Implemented — see [Voice](voice.md#end-to-end-encrypted-calls) |
 
 What stays visible to the server is metadata: who talks in which channel and call, when, and roughly
-how much.
+how much. **Files** are encrypted too, each under a key of its own that travels inside the message
+(see [Attachments](attachments.md)); the server additionally learns a file's declared extension and its
+exact size, which is what the owner's attachment rules are enforced on. A message carrying files is
+attested under `raindrop/message-attestation/v2`, which also binds each file's id and ciphertext hash
+([Messages](messages.md#reporting-an-encrypted-message)).
 
 Code: [`RaindropServer/E2ee/`](../RaindropServer/E2ee), endpoints in
 [`ServerCli/Endpoints/E2ee/`](../ServerCli/Endpoints/E2ee). Capabilities in `GET /api/server/info`:

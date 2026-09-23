@@ -82,13 +82,97 @@ public sealed class LiveKitRoomClient : IDisposable
     public Task DeleteRoomAsync(string room, CancellationToken cancellationToken) =>
         CallAsync("DeleteRoom", room, new JsonObject { ["room"] = room }, cancellationToken);
 
+    /// <summary>
+    /// Asks LiveKit for its rooms purely to find out whether it is there and whether it accepts this
+    /// server's credentials — what <see cref="LiveKitStartupCheck"/> runs before the server listens.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not routed through the ordinary call path, which exists to turn every failure
+    /// into "try again later". A check wants the opposite: to tell an unreachable LiveKit from one
+    /// that answered and refused this server, because the first is usually a sidecar still starting
+    /// and the second is always a mistake in the configuration.
+    /// </remarks>
+    public async Task<LiveKitProbe> ProbeAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "twirp/livekit.RoomService/ListRooms")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _jwt.CreateAdminToken(null));
+
+        HttpResponseMessage response;
+        string text;
+        var sentAt = DateTimeOffset.UtcNow;
+
+        try
+        {
+            response = await _http.SendAsync(request, cancellationToken);
+            text = await response.Content.ReadAsStringAsync(cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            return new LiveKitProbe(LiveKitReachability.Unreachable, Innermost(ex).Message);
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new LiveKitProbe(LiveKitReachability.TimedOut, $"it did not answer within {_http.Timeout.TotalSeconds:0.##}s");
+        }
+
+        using (response)
+        {
+            // LiveKit stamps every response with its own clock, and every token this server mints is
+            // timestamped too — so the difference between the two is worth knowing before a member
+            // finds out by having a freshly minted token refused as expired.
+            var skew = response.Headers.Date is { } theirs
+                ? theirs - (sentAt + (DateTimeOffset.UtcNow - sentAt) / 2)
+                : (TimeSpan?)null;
+
+            if (response.IsSuccessStatusCode)
+                return new LiveKitProbe(LiveKitReachability.Reachable, "it answered", skew);
+
+            var error = TryParse(text);
+            var message = Text(error, "msg") ?? text.Trim();
+
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                return new LiveKitProbe(LiveKitReachability.CredentialsRefused, Shorten(message), skew);
+
+            // Twirp answers every one of its own methods, whatever it thinks of the request. A 404
+            // means something else is listening on that port.
+            if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed && error is null)
+                return new LiveKitProbe(LiveKitReachability.NotLiveKit, $"{(int)response.StatusCode} {response.ReasonPhrase}", skew);
+
+            return new LiveKitProbe(LiveKitReachability.Failed, $"{(int)response.StatusCode} {Shorten(message)}".TrimEnd(), skew);
+        }
+    }
+
+    /// <summary>The exception at the bottom of the chain, which is the one that says what went wrong.</summary>
+    private static Exception Innermost(Exception exception) =>
+        exception.InnerException is { } inner ? Innermost(inner) : exception;
+
+    /// <summary>Keeps a server's error text to one line, in case it answered with a page.</summary>
+    private static string Shorten(string message) =>
+        message.Length <= 200 ? message.ReplaceLineEndings(" ") : message[..200].ReplaceLineEndings(" ") + "…";
+
     public void Dispose() => _http.Dispose();
 
     // ── Plumbing ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Makes one call. A Twirp <c>not_found</c> answers with an empty object, since every caller here
-    /// treats "already gone" as success.
+    /// What LiveKit says when a call about a room or one of its participants reached no node.
+    /// </summary>
+    /// <remarks>
+    /// LiveKit answers these from the node holding the room rather than from its records, so it waits
+    /// for that node and reports <c>unavailable</c> when none answers — which means the room is in its
+    /// records but live nowhere. The usual way to see it is removing somebody at the moment they were
+    /// leaving anyway: the state asked for, arrived at without us. Treating it as an error would have
+    /// the reconciler report it every pass and keep asking for something already done.
+    /// </remarks>
+    private const string NoResponse = "no response from servers";
+
+    /// <summary>
+    /// Makes one call. A Twirp <c>not_found</c> — and, for a call about one room, an
+    /// <c>unavailable</c> carrying <see cref="NoResponse"/> — answers with an empty object, since
+    /// every caller here treats "already gone" as success.
     /// </summary>
     private async Task<JsonNode?> CallAsync(string method, string? room, JsonObject body, CancellationToken cancellationToken)
     {
@@ -121,12 +205,16 @@ public sealed class LiveKitRoomClient : IDisposable
 
             var error = TryParse(text);
             var code = Text(error, "code");
+            var message = Text(error, "msg") ?? text;
 
             if (response.StatusCode == HttpStatusCode.NotFound || code == "not_found")
                 return new JsonObject();
 
+            if (room is not null && code == "unavailable" && message.Contains(NoResponse, StringComparison.Ordinal))
+                return new JsonObject();
+
             throw new VoiceTransportException(
-                $"LiveKit refused {method}: {(int)response.StatusCode} {code ?? ""} {Text(error, "msg") ?? text}".TrimEnd());
+                $"LiveKit refused {method}: {(int)response.StatusCode} {code ?? ""} {message}".TrimEnd());
         }
     }
 
@@ -171,3 +259,33 @@ public sealed class LiveKitRoomClient : IDisposable
 /// <param name="State"><c>JOINING</c>, <c>JOINED</c>, <c>ACTIVE</c> or <c>DISCONNECTED</c>.</param>
 /// <param name="CanPublish">Whether LiveKit currently accepts their microphone.</param>
 public sealed record LiveKitParticipant(string Identity, string State, bool CanPublish);
+
+/// <summary>What asking LiveKit whether it is there came back with.</summary>
+public enum LiveKitReachability
+{
+    /// <summary>LiveKit answered, and accepted this server's credentials.</summary>
+    Reachable,
+
+    /// <summary>Nothing accepted a connection at that address.</summary>
+    Unreachable,
+
+    /// <summary>Something accepted the connection but did not answer in time.</summary>
+    TimedOut,
+
+    /// <summary>LiveKit answered, and refused the API key or secret it was given.</summary>
+    CredentialsRefused,
+
+    /// <summary>Something is listening there, but it is not LiveKit's API.</summary>
+    NotLiveKit,
+
+    /// <summary>LiveKit answered with something else that stops it being usable.</summary>
+    Failed
+}
+
+/// <param name="Result">How the attempt went.</param>
+/// <param name="Detail">What LiveKit or the network said, for the owner to read.</param>
+/// <param name="ClockSkew">
+/// How far LiveKit's clock is ahead of this server's, when it answered at all. Tokens carry the time
+/// they were minted and the time they expire, so a large difference makes them unusable.
+/// </param>
+public sealed record LiveKitProbe(LiveKitReachability Result, string Detail, TimeSpan? ClockSkew = null);

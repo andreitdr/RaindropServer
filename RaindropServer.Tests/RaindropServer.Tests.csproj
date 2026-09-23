@@ -30,6 +30,10 @@
     <ProjectReference Include="..\RaindropServer.Data.Postgres\RaindropServer.Data.Postgres.csproj" />
     <ProjectReference Include="..\RaindropServer.Data.SqlServer\RaindropServer.Data.SqlServer.csproj" />
     <ProjectReference Include="..\RaindropServer.Voice.LiveKit\RaindropServer.Voice.LiveKit.csproj" />
+
+    <!-- The executable, for the configuration file it reads: ServerConfig is where raindrop.json
+         becomes settings, and what it makes of a mistyped one is worth a test of its own. -->
+    <ProjectReference Include="..\ServerCli\ServerCli.csproj" />
   </ItemGroup>
 
 </Project>

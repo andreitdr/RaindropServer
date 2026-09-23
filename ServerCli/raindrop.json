@@ -15,7 +15,11 @@
   "database": {
     "provider": "sqlite",
     "connectionString": "Data Source=raindrop.db",
-    "autoCreateSchema": true
+    "autoCreateSchema": true,
+    // Development only: drops every table before it is (re)created, so the server starts from an
+    // empty database every time. No confirmation, no undo — never set this to true where the
+    // database holds anything worth keeping. RAINDROP_DEV_WIPE_DATABASE overrides this.
+    "wipeOnStartup": false
   },
 
   "users": {
@@ -37,9 +41,37 @@
   // defaultMemberPermissions the first time the server runs; after that it is
   // edited through the API, and changing this setting leaves it alone.
   "roles": {
-    "defaultMemberPermissions": [ "view_channel", "send_messages", "create_channels", "connect", "speak" ],
+    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak" ],
     "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
+  },
+
+  // Files members add to messages. They are end-to-end encrypted like the messages themselves: the
+  // server stores ciphertext and learns only each file's extension and size, which is what these rules
+  // are enforced on. Sizes are in megabytes (1 MB = 1,048,576 bytes); extensions are lower case, no dot.
+  "attachments": {
+    "enabled": true,
+    // Relative to the executable. Back it up with the database: the database says which message each
+    // file belongs to, and this folder holds the file.
+    "storagePath": "attachments",
+    "maximumFileSizeMegabytes": 25,
+    // Larger or smaller limits for particular types.
+    "maximumFileSizeMegabytesByExtension": { "mp4": 500, "mov": 500, "webm": 500, "zip": 100 },
+    // null accepts any type that is not blocked; a list accepts only those.
+    "allowedExtensions": null,
+    // Never accepted, whatever allowedExtensions says: files that run as programs when opened.
+    "blockedExtensions": [ "exe", "msi", "bat", "cmd", "com", "scr", "pif", "vbs", "vbe", "jse", "wsf", "hta", "cpl", "ps1", "lnk", "jar", "apk" ],
+    "allowFilesWithoutExtension": true,
+    "maximumFilesPerMessage": 10,
+    // Uploads never sent in a message are thrown away after this.
+    "pendingUploadExpiryHours": 24,
+    "maximumPendingUploadsPerMember": 20,
+    "preview": {
+      // Clients show these inline when they can render them; everything else is a file to save.
+      "extensions": [ "png", "jpg", "jpeg", "gif", "webp", "mp4", "webm", "mov", "mp3", "m4a", "ogg", "wav", "flac", "opus" ],
+      // Larger previewable files wait for a click before they are downloaded.
+      "autoLoadMaximumMegabytes": 10
+    }
   },
 
   // Voice calls need a media server to carry the audio. Set "provider" to
@@ -51,12 +83,16 @@
   // RAINDROP_LIVEKIT_API_SECRET, with the same values LiveKit has (.env). The
   // secret must be 32+ random characters; LiveKit's --dev "secret" is refused.
   "voice": {
-    "provider": null,
+    "provider": "livekit",
     "maximumParticipants": 25,
+    // How hard the server looks for the media server before it starts listening: "off" not at all,
+    // "warn" to report an unreachable one and start anyway, "require" to refuse to start without it.
+    // A media server that answers and refuses these credentials stops the server whichever this is.
+    "startupCheck": "warn",
     "livekit": {
       "apiUrl": "http://localhost:7880",
-      "apiKey": null,
-      "apiSecret": null,
+      "apiKey": "raindrop",
+      "apiSecret": "s6rJRNNqo6ra0i1BCw4n1EeDP3pLy7c0O0NeJT0zBryM1Gwx",
       "allowWeakSecret": false
     }
   }

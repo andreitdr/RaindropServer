@@ -59,10 +59,12 @@ All of this lives in [`ServiceCollectionExtensions.cs`](../RaindropServer/Servic
 Every method here uses `TryAdd*`, so a service registered before it runs wins — this is how a host can
 swap in a custom `IPermissionResolver` or `IPresenceTracker` before calling the umbrella method.
 
-### `AddRaindropServer(configureUsers?, configureChannels?, configureRoles?, configureEvents?, configureVoice?)`
+### `AddRaindropServer(configureUsers?, configureChannels?, configureRoles?, configureEvents?, configureVoice?, configureAttachments?)`
 
 The umbrella call. Registers, in order: routing, `AddRaindropPayloads`, `AddRaindropEvents`, `AddRaindropUsers`,
-`AddRaindropRoles`, `AddRaindropMembers`, `AddRaindropChannels`, `AddRaindropVoice`, then discovers every endpoint. A
+`AddRaindropRoles`, `AddRaindropMembers`, `AddRaindropAttachments`, `AddRaindropChannels`, `AddRaindropVoice`,
+then discovers every endpoint. Attachments go before channels because text channels fill in a refusing
+`IMessageAttachments` when nothing registered one first. A
 database module still has to be enabled separately — nothing is persisted until `AddRaindropDatabase`
 runs.
 
@@ -111,6 +113,21 @@ module (`TextChannelModule` as an `IChannelModule`, plus `TextChannelService`), 
 `IMessageDeletionListener` (`ArchivingMessageDeletionListener`, added with `TryAddEnumerable` so plugin
 listeners run beside it — see [Messages](messages.md#the-deleted-message-archive)). Adding a new channel
 type means adding its own module registration here, not editing `ChannelService`.
+
+### `AddRaindropAttachments(configure?)`
+
+Registers `AttachmentOptions`, `AttachmentService` (also as the `IMessageAttachments` text channels use),
+the default `IAttachmentStorage` (`LocalFolderAttachmentStorage`), `ConfiguredAttachmentPolicy` and
+`AttachmentDeletionListener` (both with `TryAddEnumerable`), `AttachmentMaintenanceService` and
+`AttachmentStorageStartupCheck`, then calls `AddRaindropChannels()`. Register a different storage, or an
+`IMessageAttachments` of your own, before it runs. See [Attachments](attachments.md#seams-for-plugins).
+
+Its chunk upload (`PUT /api/attachments/uploads/chunk`) and download (`POST /api/attachments/download`) are
+**raw `IAuthenticatedEndpoint`s** rather than typed ones, because their bodies are bytes rather than a
+negotiated payload: the chunk endpoint raises `IHttpMaxRequestBodySizeFeature` for its own request only,
+reads the ids from headers, and answers in the negotiated format through `EndpointResponse.WriteAsync`;
+the download endpoint reads its small typed body with `ReadPayloadAsync` and streams
+`application/octet-stream`, writing errors with `ApiException.WriteToAsync` before anything is streamed.
 
 ### `AddRaindropVoice(configure?)`
 

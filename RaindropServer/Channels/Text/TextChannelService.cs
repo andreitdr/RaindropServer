@@ -23,6 +23,7 @@ public sealed class TextChannelService
     private readonly ChannelOptions _options;
     private readonly IEventPublisher _events;
     private readonly IReadOnlyList<IMessageDeletionListener> _deletionListeners;
+    private readonly IMessageAttachments _attachments;
     private readonly TimeProvider _time;
 
     public TextChannelService(
@@ -32,6 +33,7 @@ public sealed class TextChannelService
         ChannelOptions options,
         IEventPublisher events,
         IEnumerable<IMessageDeletionListener> deletionListeners,
+        IMessageAttachments? attachments = null,
         TimeProvider? time = null)
     {
         _channels = channels;
@@ -40,6 +42,7 @@ public sealed class TextChannelService
         _options = options;
         _events = events;
         _deletionListeners = deletionListeners.ToList();
+        _attachments = attachments ?? new NoMessageAttachments();
         _time = time ?? TimeProvider.System;
     }
 
@@ -125,9 +128,26 @@ public sealed class TextChannelService
             SentAtUtc = UtcNow
         };
 
-        await _messages.InsertAsync(message, cancellationToken);
+        // Files are claimed for the message before it is stored, so two messages can never both carry
+        // one, and let go of again if storing it fails.
+        IReadOnlyList<MessageAttachment>? attachments = null;
+        if (request.AttachmentIds is { Count: > 0 } attachmentIds)
+            attachments = await _attachments.AttachAsync(session, access, message.MessageId, attachmentIds, cancellationToken);
 
-        var sent = ToContract(message);
+        try
+        {
+            await _messages.InsertAsync(message, cancellationToken);
+        }
+        catch when (attachments is not null)
+        {
+            await _attachments.DetachAsync(message.MessageId, CancellationToken.None);
+            throw;
+        }
+
+        if (attachments is not null)
+            await _attachments.OnMessageStoredAsync(message.MessageId, attachments, cancellationToken);
+
+        var sent = ToContract(message, attachments);
         await _events.PublishAsync(ServerEventTypes.MessageCreated, sent, _channels.AudienceFor(access.Channel));
 
         return sent;
@@ -152,9 +172,17 @@ public sealed class TextChannelService
         var oldest = messages.Count > 0 ? messages[^1] : null;
         messages.Reverse();
 
+        var withFiles = messages.Where(message => message is { IsEncrypted: true, IsDeleted: false })
+            .Select(message => message.MessageId)
+            .ToList();
+        var attachments = withFiles.Count == 0
+            ? null
+            : await _attachments.ListAsync(withFiles, cancellationToken);
+
         return new MessageHistoryResponse(
             access.Channel.ChannelId,
-            messages.Select(ToContract).ToList(),
+            messages.Select(message => ToContract(message,
+                attachments is not null && attachments.TryGetValue(message.MessageId, out var files) ? files : null)).ToList(),
             hasMore && oldest is not null ? MessageCursor.Of(oldest).Encode() : null);
     }
 
@@ -230,7 +258,8 @@ public sealed class TextChannelService
         int n => Math.Min(n, _options.MaximumHistoryPageSize)
     };
 
-    private static ChannelMessage ToContract(TextMessageRecord message) => new(
+    private static ChannelMessage ToContract(
+        TextMessageRecord message, IReadOnlyList<MessageAttachment>? attachments = null) => new(
         message.MessageId,
         message.ChannelId,
         message.AuthorId,
@@ -241,5 +270,6 @@ public sealed class TextChannelService
         message.DeletedBy,
         message.Ciphertext,
         message.Epoch,
-        message.SenderDeviceId);
+        message.SenderDeviceId,
+        message.IsDeleted ? null : attachments);
 }

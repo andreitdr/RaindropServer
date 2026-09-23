@@ -283,6 +283,47 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
         """
         CREATE INDEX IF NOT EXISTS ix_raindrop_message_reports_channel
             ON raindrop_message_reports (channel_id, reported_at)
+        """,
+
+        // Attachments: encrypted files added to messages. The server holds ciphertext and knows only
+        // who uploaded it, for which channel, its declared extension and size, and which message
+        // carries it; the bytes live in the attachment storage, not here.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_attachments (
+            attachment_id      varchar(36) NOT NULL PRIMARY KEY,
+            channel_id         varchar(36) NOT NULL,
+            uploader_id        varchar(36) NOT NULL,
+            uploader_device_id varchar(36) NOT NULL,
+            kind               varchar(32) NOT NULL,
+            extension          varchar(16) NOT NULL,
+            ciphertext_size    bigint      NOT NULL,
+            received_size      bigint      NOT NULL,
+            ciphertext_sha256  bytea       NULL,
+            state              varchar(16) NOT NULL,
+            message_id         varchar(36) NULL,
+            created_at         timestamptz NOT NULL,
+            completed_at       timestamptz NULL,
+            deleted_at         timestamptz NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_message
+            ON raindrop_attachments (message_id)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_channel
+            ON raindrop_attachments (channel_id)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_state
+            ON raindrop_attachments (state, created_at)
+        """,
+
+        """
+        CREATE INDEX IF NOT EXISTS ix_raindrop_attachments_uploader
+            ON raindrop_attachments (uploader_id, state)
         """
     ];
 }

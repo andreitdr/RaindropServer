@@ -1,5 +1,10 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using RaindropServer.Channels;
+using RaindropServer.Channels.Voice;
 using RaindropServer.E2ee;
+using RaindropServer.Roles;
 using RaindropServer.Users;
 using RaindropServer.Voice.LiveKit;
 
@@ -254,37 +259,219 @@ public class DeviceServiceTests
     }
 }
 
-public class LiveKitOptionsTests
+/// <summary>
+/// The room client against a stub LiveKit, for the answers that are not a plain success: what it
+/// treats as "already gone" and what it reports.
+/// </summary>
+public class LiveKitRoomClientTests
 {
-    private static LiveKitOptions Options(string url, string secret, bool allowWeak = false) => new()
+    /// <summary>A LiveKit that gives every call the same canned answer, and remembers what it was asked.</summary>
+    private sealed class StubLiveKit : IDisposable
     {
-        ApiUrl = url,
-        ApiKey = "key",
-        ApiSecret = secret,
-        AllowWeakSecret = allowWeak
-    };
+        private readonly HttpListener _listener = new();
 
-    private static readonly string Strong = new('s', 48);
+        public StubLiveKit(HttpStatusCode status, string body)
+        {
+            var port = FreePort();
+            Url = $"http://127.0.0.1:{port}";
+            _listener.Prefixes.Add(Url + "/");
+            _listener.Start();
 
-    [Theory]
-    [InlineData("http://localhost:7880")]
-    [InlineData("http://127.0.0.1:7880")]
-    [InlineData("http://livekit:7880")]
-    [InlineData("https://livekit.example.com")]
-    public void Private_or_encrypted_api_urls_are_accepted(string url) => Options(url, Strong).Validate();
+            _ = Task.Run(async () =>
+            {
+                while (_listener.IsListening)
+                {
+                    HttpListenerContext context;
+                    try
+                    {
+                        context = await _listener.GetContextAsync();
+                    }
+                    catch (Exception)
+                    {
+                        return;
+                    }
 
-    [Theory]
-    [InlineData("http://livekit.example.com:7880")]
-    [InlineData("http://192.168.1.5:7880")]
-    public void Plain_http_across_a_network_is_refused(string url) =>
-        Assert.Throws<InvalidOperationException>(() => Options(url, Strong).Validate());
+                    Calls.Add(context.Request.Url!.AbsolutePath);
+                    context.Response.StatusCode = (int)status;
+                    context.Response.ContentType = "application/json";
+                    var bytes = Encoding.UTF8.GetBytes(body);
+                    await context.Response.OutputStream.WriteAsync(bytes);
+                    context.Response.Close();
+                }
+            });
+        }
 
-    [Theory]
-    [InlineData("secret")]
-    [InlineData("too-short")]
-    public void Weak_secrets_are_refused_unless_explicitly_allowed(string secret)
+        public string Url { get; }
+
+        public List<string> Calls { get; } = [];
+
+        public void Dispose()
+        {
+            _listener.Stop();
+            _listener.Close();
+        }
+
+        private static int FreePort()
+        {
+            var probe = new TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            return port;
+        }
+    }
+
+    private static LiveKitRoomClient Client(StubLiveKit livekit)
     {
-        Assert.Throws<InvalidOperationException>(() => Options("http://localhost:7880", secret).Validate());
-        Options("http://localhost:7880", secret, allowWeak: true).Validate();
+        var options = new LiveKitOptions { ApiUrl = livekit.Url, ApiKey = "key", ApiSecret = new string('s', 48) };
+        return new LiveKitRoomClient(options, new LiveKitJwt(options));
+    }
+
+    private static string Twirp(string code, string message) =>
+        $$"""{"code":"{{code}}","msg":"{{message}}"}""";
+
+    private static readonly Guid Channel = Guid.Parse("d592c66e-d5fe-47df-a103-5e77e77eefa9");
+    private static readonly string Member = Guid.Parse("f3803c9b-723c-459b-a9d4-01653bf8d2b5").ToString("D");
+
+    [Fact]
+    public async Task A_participant_already_gone_is_not_an_error()
+    {
+        using var livekit = new StubLiveKit(HttpStatusCode.NotFound,
+            Twirp("not_found", "twirp error unknown: participant does not exist"));
+        using var client = Client(livekit);
+
+        await client.RemoveParticipantAsync("raindrop-" + Channel, Member, default);
+
+        Assert.Equal(["/twirp/livekit.RoomService/RemoveParticipant"], livekit.Calls);
+    }
+
+    /// <summary>
+    /// Removing somebody at the moment they were leaving anyway: LiveKit waits for the node that held
+    /// them, none answers, and it reports `unavailable`. They are gone, which is what was asked for.
+    /// </summary>
+    [Fact]
+    public async Task A_participant_whose_node_no_longer_answers_is_not_an_error()
+    {
+        using var livekit = new StubLiveKit(HttpStatusCode.ServiceUnavailable,
+            Twirp("unavailable", "twirp error unknown: no response from servers"));
+        using var client = Client(livekit);
+
+        await client.RemoveParticipantAsync("raindrop-" + Channel, Member, default);
+        await client.UpdatePermissionAsync("raindrop-" + Channel, Member, canPublish: true, default);
+        await client.DeleteRoomAsync("raindrop-" + Channel, default);
+    }
+
+    [Fact]
+    public async Task Every_other_refusal_is_reported()
+    {
+        using var livekit = new StubLiveKit(HttpStatusCode.Unauthorized,
+            Twirp("unauthenticated", "invalid API key"));
+        using var client = Client(livekit);
+
+        var error = await Assert.ThrowsAsync<VoiceTransportException>(() =>
+            client.RemoveParticipantAsync("raindrop-" + Channel, Member, default));
+
+        Assert.Contains("401", error.Message);
+        Assert.Contains("invalid API key", error.Message);
+    }
+
+    /// <summary>
+    /// A server-wide call has no room whose node could have gone: nothing answering means LiveKit
+    /// itself is in trouble, and a reconciler told "no rooms" would tear down every live call.
+    /// </summary>
+    [Fact]
+    public async Task A_server_wide_call_that_nothing_answers_is_reported()
+    {
+        using var livekit = new StubLiveKit(HttpStatusCode.ServiceUnavailable,
+            Twirp("unavailable", "twirp error unknown: no response from servers"));
+        using var client = Client(livekit);
+
+        var error = await Assert.ThrowsAsync<VoiceTransportException>(() => client.ListRoomsAsync(default));
+
+        Assert.Contains("ListRooms", error.Message);
+    }
+}
+
+public class ReturningMemberTests
+{
+    private const string Password = "correct horse";
+
+    private sealed record Setup(UserService Users, RoleService Roles);
+
+    private static async Task<Setup> CreateAsync()
+    {
+        var (driver, options) = await TestDatabases.OpenAsync("sqlite");
+        var users = driver.CreateUserStore(options);
+        var roles = driver.CreateRoleStore(options);
+        var roleOptions = new RoleOptions();
+        await RoleService.EnsureBuiltInRolesAsync(roles, roleOptions, null, default);
+
+        var events = new RecordingPublisher();
+        var cache = new RolePermissionCache();
+        var roleService = new RoleService(roles, users,
+            new RolePermissionResolver(roles, users, roleOptions, cache), cache, roleOptions, events);
+        var userOptions = new UserOptions();
+        var userService = new UserService(users, new Pbkdf2PasswordHasher(1_000),
+            new InMemorySessionStore(userOptions), userOptions, events,
+            listeners: [new OwnerClaim(roleService)],
+            leaveGuards: [new OwnerLeaveGuard(roleService)]);
+
+        return new Setup(userService, roleService);
+    }
+
+    private static async Task<SessionResponse> RegisterAsync(Setup setup, string username) =>
+        await setup.Users.RegisterAsync(new RegisterRequest(Guid.NewGuid(), username, Password), default);
+
+    private static UserSession SessionOf(SessionResponse response) =>
+        Sessions.For(response.User.UserId) with { Username = response.User.Username };
+
+    [Fact]
+    public async Task A_client_that_lost_its_uuid_logs_back_in_by_username_as_the_same_member()
+    {
+        var setup = await CreateAsync();
+        var owner = await RegisterAsync(setup, "alice");
+
+        var again = await setup.Users.LoginAsync(new LoginRequest(null, "Alice", Password), default);
+
+        Assert.Equal(owner.User.UserId, again.User.UserId);
+        Assert.True(await setup.Roles.IsSoleOwnerAsync(again.User.UserId, default));
+    }
+
+    [Fact]
+    public async Task A_preserved_owner_rejoins_by_username_and_is_still_the_owner()
+    {
+        var setup = await CreateAsync();
+        var owner = await RegisterAsync(setup, "alice");
+
+        await setup.Users.LeaveAsync(SessionOf(owner), new LeaveRequest(Password, PreserveData: true), default);
+
+        var left = await Assert.ThrowsAsync<ApiException>(() =>
+            setup.Users.LoginAsync(new LoginRequest(null, "alice", Password), default));
+        Assert.Equal("account_left", left.Code);
+
+        var rejoined = await setup.Users.RejoinAsync(new RejoinRequest(null, "alice", Password), default);
+
+        Assert.Equal(owner.User.UserId, rejoined.User.UserId);
+        Assert.True(await setup.Roles.IsSoleOwnerAsync(rejoined.User.UserId, default));
+    }
+
+    [Fact]
+    public async Task The_only_owner_cannot_erase_their_account_until_somebody_else_owns_the_server()
+    {
+        var setup = await CreateAsync();
+        var owner = await RegisterAsync(setup, "alice");
+        await RegisterAsync(setup, "bob");
+
+        var refused = await Assert.ThrowsAsync<ApiException>(() =>
+            setup.Users.LeaveAsync(SessionOf(owner), new LeaveRequest(Password, PreserveData: false), default));
+        Assert.Equal("last_owner", refused.Code);
+
+        // Refused before anything was written: the owner can still log in.
+        await setup.Users.LoginAsync(new LoginRequest(owner.User.UserId, null, Password), default);
+
+        await setup.Roles.GrantFromConsoleAsync("bob", "owner", default);
+        var left = await setup.Users.LeaveAsync(SessionOf(owner), new LeaveRequest(Password, PreserveData: false), default);
+
+        Assert.Equal(StateNames.Erased, left.State);
     }
 }

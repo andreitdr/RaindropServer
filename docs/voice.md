@@ -113,6 +113,13 @@ LiveKit does not trust without extra setup. Instead:
 
   A LiveKit outage is logged once, then retried quietly until it recovers. Queued work and
   reconciliation share the one loop, so they never race each other.
+
+  **"Already gone" is success.** LiveKit answers a call about a room from the node holding it, so
+  removing or muting somebody at the moment they were leaving anyway comes back either `not_found`
+  (404) or `unavailable` (503, `no response from servers` — it waited ~3 s for a node that had closed).
+  Both mean the state asked for has arrived, so both are treated as done rather than reported. A call
+  that names no room, such as listing the rooms, is not: nothing answering there means LiveKit itself
+  is in trouble, and a reconciler told "no rooms" would tear down every live call.
 - **Role changes** (`role.updated`, `role.deleted`, `member.roles`, `member.left`) queue a re-check of
   every participant (`VoicePermissionWatcher`), coalesced so a burst of changes costs one pass.
 - **Session changes** (logout, password change, leaving) queue a re-check of that member
@@ -216,31 +223,151 @@ as `left`. See [Events](events.md).
 "voice": {
   "provider": null,              // "livekit" to switch voice on
   "maximumParticipants": 25,
-  "livekit": { "apiUrl": "http://localhost:7880", "apiKey": "devkey", "apiSecret": "secret" }
+  "startupCheck": "warn",        // off | warn | require — how hard to look for LiveKit at startup
+  "livekit": {
+    "apiUrl": "http://localhost:7880",
+    "apiKey": "raindrop",        // whatever LiveKit itself was configured with
+    "apiSecret": null,           // 32+ random characters; prefer the environment variable
+    "allowWeakSecret": false
+  }
 }
 ```
 
-Environment overrides: `RAINDROP_VOICE_PROVIDER`, `RAINDROP_LIVEKIT_API_URL`,
-`RAINDROP_LIVEKIT_API_KEY`, `RAINDROP_LIVEKIT_API_SECRET`. Prefer the environment variable to writing
-the secret into the file.
+Environment overrides: `RAINDROP_VOICE_PROVIDER`, `RAINDROP_VOICE_STARTUP_CHECK`,
+`RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`, `RAINDROP_LIVEKIT_API_SECRET`,
+`RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`. Prefer the environment variable to writing the secret into the
+file.
 
 With `provider: null`, voice channels can still be created and deleted, but joining is refused with
 `voice_unavailable`, and `GET /api/channels/voice` reports `available: false`. `livekit` with a
 missing key or secret is a startup error. The console's `voice` command lists who is in which call.
 
+**There is no default secret to forget to change.** Nothing here ships with one, and LiveKit's own
+`--dev` values are among those refused outright (see the table below). Generate the secret instead:
+
+```bash
+openssl rand -base64 48
+```
+
+`allowWeakSecret` (or `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET=true`) turns those refusals into a warning.
+It is an escape hatch for a throwaway LiveKit on your own machine, nothing more; a server anybody else
+connects to has no reason to set it, because the secret signs every join token.
+
+`apiUrl` is where *this server* reaches LiveKit, and stays private. Plain `http://` is accepted only
+for a loopback address or a single-label container name such as `http://livekit:7880`; anything
+further away must be `https://`. See [Transport security](transport-security.md#livekit).
+
+### What is checked at startup
+
+Voice is the part of the configuration with the most ways to be quietly wrong — a secret that does not
+match LiveKit's, a port nothing listens on, the WebSocket address copied in place of the API one — and
+every one of them leaves a server that starts, runs, and cannot carry a single call. So it is checked
+twice before the server listens, and the whole voice section is validated even when several things are
+wrong at once (see [Configuration](configuration.md#startup-validation)).
+
+**By reading the settings** (`LiveKitOptions.Validate`, and `VoiceOptions.Validate` for the rules that
+hold whichever media server carries the calls):
+
+| Refused | Why |
+|---|---|
+| `provider` naming a media server this build does not have | listed with what it does have, and what it was probably meant to be |
+| a `ws://` or `wss://` `apiUrl` | that is LiveKit's *client* address; this setting wants its HTTP API |
+| an `apiUrl` with a path, query or credentials in it | Raindrop appends LiveKit's own API paths to it |
+| plain `http://` to anything but loopback or a container name | join tokens would cross the network readable |
+| a missing, quoted, whitespace-wrapped or control-character `apiKey`/`apiSecret` | how an `.env` value arrives mangled |
+| an `apiSecret` under 32 characters, well-known, a placeholder (`${…}`, `<your secret>`, `change…`), or repeating fewer than 8 distinct characters | anybody who knows it can mint a token into any call |
+| an `apiSecret` equal to the `apiKey` | the key names the server; the secret proves it |
+| a token lifetime over an hour | LiveKit cannot revoke a token, so that is how long a removed member could reconnect |
+| `maximumParticipants` outside 2–1000 | warned above 50, where a full call's bandwidth starts to hurt |
+
+An `apiUrl` with no port, and a `livekit` section filled in while `provider` is null, are warnings: the
+server runs, but not the way its owner probably meant.
+
+**By going and looking** (`LiveKitStartupCheck`, an `IStartupCheck` the module registers): the host
+resolves, something answers, it is LiveKit's API, it accepts *this* key and secret, and its clock is
+within 30 seconds of this server's — tokens carry the time they were minted, so two machines that
+disagree make tokens that expire before they are used.
+
+`startupCheck` decides how much an unreachable LiveKit matters, because a media sidecar and the server
+that uses it are usually started together:
+
+| `startupCheck` | A LiveKit that cannot be reached | A LiveKit that refuses these credentials, or is not LiveKit |
+|---|---|---|
+| `off` | not checked | not checked |
+| `warn` (default) | warning; the server starts and calls fail until LiveKit is up | **error; the server does not start** |
+| `require` | error; the server does not start | error; the server does not start |
+
+Waiting cannot fix a secret that does not match, which is why no setting makes that one survivable.
+
 ### Running LiveKit
 
-For development, `docker compose up -d livekit` starts it in `--dev` mode (key `devkey`, secret
-`secret`, matching the defaults above); see [Local development](local-development-and-docker.md). Or
-run `brew install livekit`, then `livekit-server --dev --bind 0.0.0.0`.
+`docker compose up -d livekit` runs `livekit/livekit-server` with the settings in
+[`livekit.yaml`](../livekit.yaml) and the key pair from `.env` — **not** `--dev`. Set that up once:
+
+```bash
+cp .env.example .env
+openssl rand -base64 48
+```
+
+Put the generated value in `.env`, and give Raindrop the *same* pair:
+
+```dotenv
+LIVEKIT_API_KEY=raindrop
+LIVEKIT_API_SECRET=<the generated secret>
+LIVEKIT_NODE_IP=127.0.0.1       # this machine's LAN address when other devices join calls
+```
+
+```bash
+RAINDROP_VOICE_PROVIDER=livekit \
+RAINDROP_LIVEKIT_API_KEY=raindrop \
+RAINDROP_LIVEKIT_API_SECRET=<the same secret> \
+dotnet run --project ServerCli
+```
+
+The same values can live in `raindrop.json` under `voice.livekit` instead, but a secret in a file is a
+secret in a backup. See [Local development](local-development-and-docker.md#livekit-for-voice-channels).
+
+Without Docker, `brew install livekit` and then run it with the same key pair:
+
+```bash
+LIVEKIT_KEYS="raindrop: <the same secret>" livekit-server --bind 0.0.0.0 --node-ip 127.0.0.1
+```
+
+`livekit-server --dev` is quicker to type, but its key pair is `devkey` / `secret`, which Raindrop
+refuses unless you also set `allowWeakSecret`.
 
 For a real server:
 
-- Give LiveKit its own key and secret, set `rtc.use_external_ip: true` or `--node-ip`, and keep port
-  7880 private.
+- Give LiveKit its own key and secret — one per deployment, never shared or reused — set
+  `rtc.use_external_ip: true` or `--node-ip`, and keep port 7880 private.
 - Open **UDP 7882** (media) and **TCP 7881** (fallback) to the internet.
 
 Packaging Raindrop and LiveKit together in one Docker deployment is planned.
+
+### When a participant joins and is removed without a connection
+
+LiveKit logging `starting RTC session` and then `removing participant without connection` for the
+same member, over and over, means the signalling reached it and the media never did. The relay is
+rarely the culprit — it either forwards the whole stream or fails the WebSocket outright, and the
+`participantInit` it logs proves the join arrived intact. Read the candidate lists in the
+`removing participant without connection` line instead; they say which side ran out of ways to
+connect:
+
+- **No `[remote]` candidates at all.** The client never got as far as gathering. Its own logs are
+  the place to look.
+- **`[remote]` candidates, but every one of them `tcp … :9`.** Those are ICE-TCP *active*
+  placeholders. A client offering nothing but those has no UDP transport, which on a sandboxed macOS
+  build means the app is missing `com.apple.security.network.server` — see the client's
+  [Voice doc](../../RaindropClient/docs/voice.md#platform-setup).
+- **`[local]` candidates naming an address the client cannot reach** — `127.0.0.1` when the client
+  is on another machine, or a container address. That is `--node-ip` / `LIVEKIT_NODE_IP`, above.
+
+The two shapes of session are worth telling apart, because they have different causes. One that ends
+in ~100 ms with `reason: SIGNAL_SOURCE_CLOSE` is the client tearing its own socket down, normally to
+start a full reconnect after its peer connection failed immediately; one that ends after ~10 s with
+`reason: CLIENT_REQUEST_LEAVE` is the LiveKit SDK giving up on the peer connection and leaving. A
+client that cannot reach the media ports at all produces the second repeatedly, with the first in
+front of each attempt.
 
 ## Seams for plugins
 
@@ -251,6 +378,7 @@ Packaging Raindrop and LiveKit together in one Docker deployment is planned.
 | `IVoiceStateStore` | `InMemoryVoiceStateStore` | `TryAddSingleton` |
 | `IVoiceMuteStore` | `RelationalVoiceMuteStore`, from the database driver | `IDatabaseDriver.CreateVoiceMuteStore` |
 | `IVoiceJoinPolicy` | none | `TryAddEnumerable`; each one can refuse a join by throwing an `ApiException` |
+| `IStartupCheck` | `LiveKitStartupCheck`, when LiveKit is the transport | `AddStartupCheck<T>()`; how a transport confirms its settings describe something real before the server listens |
 | `voice.*` events | `VoiceEvents` | ordinary `IServerEventHandler<VoiceParticipant>` / `<VoiceLeftEvent>` subscribers |
 
 ## Related

@@ -63,7 +63,7 @@ Types are **names**, like permissions and presence: a client too old to know one
 | Type | Data | Sent to |
 |---|---|---|
 | `ready` | `ReadyEvent(UserId, ProtocolVersion)` | the new connection, first, once |
-| `message.created` | `ChannelMessage` — as in history | members who can see the channel |
+| `message.created` | `ChannelMessage` — as in history, with `attachments` when it carries [files](attachments.md) | members who can see the channel |
 | `message.deleted` | `ChannelMessage` — the tombstone, `content: null`, `deleted: true` | members who can see the channel |
 | `message.reported` | `MessageReportSummary` — an encrypted message a member reported, its text proven by the author's attestation, see [Messages](messages.md#reporting-an-encrypted-message) | members with `manage_messages` in the channel |
 | `channel.created` | `ChannelSummary` — with the **recipient's own** `yourPermissions` | members who can see it |

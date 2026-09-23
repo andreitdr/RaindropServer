@@ -20,6 +20,7 @@ has to exist from day one. The permissions today:
 |---|---|---|
 | `ViewChannel` | `view_channel` | See channels and read what's in them |
 | `SendMessages` | `send_messages` | Post messages in channels |
+| `AttachFiles` | `attach_files` | Add files to the messages they post (checked in the channel alongside `send_messages`; see [Attachments](attachments.md)) |
 | `Connect` | `connect` | Join voice channels and hear the people in them |
 | `Speak` | `speak` | Talk in voice channels (without it, a member joins as a listener) |
 | `ManageMessages` | `manage_messages` | Delete other members' messages |
@@ -53,8 +54,8 @@ registering and expecting to own it.
   *assigned* it; holding it is what being an active member means, so the resolver folds it in for
   everyone. It's refused as a target for `assign`/`unassign`. Its permissions **are** editable (that's
   how an owner closes a server down to read-only); its name is not, and it cannot be deleted. It's
-  seeded from `RoleOptions.DefaultMemberPermissions` (view, post, create channels, connect and speak
-  by default) and *only* seeded — changing that config setting later doesn't reach back and overwrite
+  seeded from `RoleOptions.DefaultMemberPermissions` (view, post, attach files, create channels,
+  connect and speak by default) and *only* seeded — changing that config setting later doesn't reach back and overwrite
   what administrators have since made it. A permission a later build introduces for everybody reaches
   an already-seeded `everyone` role exactly once instead, through a **permission rollout** — see below.
 - **`owner`** — holds `Administrator`, and is neither editable nor deletable. A server whose
@@ -84,13 +85,16 @@ Every write goes through `RoleService`, and two rules do the work:
 
 One more guard: **the last member holding the owner role keeps it.** There is no account above them to
 put a server with no owner right again. Ownership is transferred by granting the role to somebody else
-first (then, optionally, revoking it from the original owner).
+first (then, optionally, revoking it from the original owner). The same rule stops the only owner
+*erasing* their account when they leave: [`OwnerLeaveGuard`](../RaindropServer/Roles/OwnerLeaveGuard.cs),
+an `ILeaveGuard`, refuses it with `last_owner`. Leaving with the data preserved is allowed, since the
+owner can rejoin, by UUID or by username, and keeps the role.
 
 ## Permission rollouts
 
 [`PermissionRollouts.All`](../RaindropServer/Roles/PermissionRollouts.cs) lists what newer builds hand
-to `everyone` on servers seeded before those permissions existed — today one entry,
-`new("voice", Connect | Speak)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
+to `everyone` on servers seeded before those permissions existed — today
+`new("voice", Connect | Speak)` and `new("attachments", AttachFiles)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
 `raindrop_permission_rollouts`, then records it: grant first, record second, so a crash between the
 two re-applies an OR that changes nothing. Each one is offered **exactly once**, so an owner who takes
 the permissions away afterwards keeps them away. A fresh server records every rollout without granting

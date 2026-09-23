@@ -25,6 +25,13 @@ it without being able to read it. What it does check is what it can see:
 An encrypted `ChannelMessage` has no `Content`. Instead it carries `Ciphertext`, `Epoch` and
 `SenderDeviceId`, and those three are null on a plaintext message.
 
+- **Files.** `send-encrypted` takes an optional `AttachmentIds`: finished uploads of the caller's for
+  this channel, claimed for the message before it is stored (see [Attachments](attachments.md)). The
+  message then carries `Attachments` — `{attachmentId, kind, extension, ciphertextSize,
+  ciphertextSha256}` each — in history and in `message.created`; null for a message without files and
+  for a deleted one. The files' names, types and keys are inside the ciphertext. Plaintext `send`
+  cannot carry files.
+
 - **Plaintext posting is off by default** (`channels.allowPlaintextMessages`, see
   [Configuration](configuration.md#channels)). The plain `send` answers `400 encryption_required`
   unless an owner turns it back on for clients that cannot encrypt.
@@ -66,6 +73,11 @@ proves who wrote it. `MessageReportService` does this.
 - **What it proves** is authorship: that device wrote those words in that channel. It does not bind
   them to the exact stored ciphertext, which only group members can decrypt. A reporter could present
   a different message the same device genuinely sent in the same channel.
+- **Messages with files** are attested under `"raindrop/message-attestation/v2\n"`: the v1 fields,
+  then a 4-byte big-endian count of files and, for each in the message's order, its id (lower case, as
+  a length-prefixed field) and the 32 bytes of its ciphertext's SHA-256. The report carries
+  `attachments: [{attachmentId, ciphertextSha256}]`, and the server checks both the signature and that
+  those are the files stored with **this** message, so words cannot be paired with another file.
 
 ## Deletion is a tombstone
 
@@ -153,11 +165,11 @@ All authenticated, all under `/api/channels/text/messages`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/channels/text/messages/send-encrypted` | Post an end-to-end encrypted message (`{channelId, message}`) — needs `SendMessages` and a bound session |
+| POST | `/api/channels/text/messages/send-encrypted` | Post an end-to-end encrypted message (`{channelId, message, attachmentIds?}`) — needs `SendMessages` and a bound session, and `AttachFiles` to carry files |
 | POST | `/api/channels/text/messages/send` | Post a plaintext message — refused with `encryption_required` unless `allowPlaintextMessages` |
 | POST | `/api/channels/text/messages/history` | One page of history, newest page first; follow `nextCursor` |
 | POST | `/api/channels/text/messages/delete` | Delete a message: your own always, anyone else's with `ManageMessages` |
-| POST | `/api/channels/text/messages/report` | Report an encrypted message: `{messageId, body, clientMessageId, clientSentAtUnixMs, type, attestation, reason?}` |
+| POST | `/api/channels/text/messages/report` | Report an encrypted message: `{messageId, body, clientMessageId, clientSentAtUnixMs, type, attestation, reason?, attachments?}` |
 | POST | `/api/channels/text/messages/reports` | A channel's reports, newest first — needs `ManageMessages` there |
 
 Endpoint implementations:
@@ -171,10 +183,12 @@ Defined in
 [`RaindropServer/Channels/Text/TextChannelContracts.cs`](../RaindropServer/Channels/Text/TextChannelContracts.cs):
 
 - `ChannelMessage(MessageId, ChannelId, AuthorId, Content?, SentAtUtc, Deleted, DeletedAtUtc?, DeletedBy?,
-  Ciphertext?, Epoch?, SenderDeviceId?)` — `Content` is null once deleted, and always for an encrypted
-  message, which carries `Ciphertext` (null once deleted), `Epoch` and `SenderDeviceId`; `Deleted` is
-  the flag a client renders the tombstone from.
-- `SendEncryptedMessageRequest(ChannelId, Message)` — `Message` is the MLS ciphertext.
+  Ciphertext?, Epoch?, SenderDeviceId?, Attachments?)` — `Content` is null once deleted, and always for
+  an encrypted message, which carries `Ciphertext` (null once deleted), `Epoch` and `SenderDeviceId`;
+  `Deleted` is the flag a client renders the tombstone from. `Attachments` is a list of
+  `MessageAttachment(AttachmentId, Kind, Extension, CiphertextSize, CiphertextSha256?)`.
+- `SendEncryptedMessageRequest(ChannelId, Message, AttachmentIds?)` — `Message` is the MLS ciphertext;
+  `AttachmentIds` the finished uploads it carries (see [Attachments](attachments.md)).
 - `SendMessageRequest(ChannelId, Content)`
 - `MessageHistoryRequest(ChannelId, Before?, Limit?)` — `Before` is the previous page's `NextCursor`,
   or omitted for the newest messages; `Limit` defaults to the server's configured page size and is
@@ -187,7 +201,10 @@ Defined in
 On top of the [channel error codes](channels.md#error-codes): `invalid_message`,
 `message_too_long`, `message_not_found`, `invalid_cursor`, and for encryption `encryption_required`,
 `device_required`, `invalid_mls_message`, `wrong_group`, `group_not_found`, `stale_epoch`, and for
-reports `not_encrypted`, `invalid_attestation`, `invalid_reason`.
+reports `not_encrypted`, `invalid_attestation`, `invalid_reason`. A message carrying files can also
+be refused with the [attachment error codes](attachments.md#api) (`attachments_disabled`,
+`too_many_attachments`, `attachment_not_found`, `attachment_already_sent`, `upload_incomplete`,
+`invalid_attachment`).
 
 ## Related
 

@@ -22,7 +22,8 @@ is how the Docker container is configured without editing the file.
   "database": {
     "provider": "sqlite",
     "connectionString": "Data Source=raindrop.db",
-    "autoCreateSchema": true
+    "autoCreateSchema": true,
+    "wipeOnStartup": false
   },
 
   "users": {
@@ -39,7 +40,7 @@ is how the Docker container is configured without editing the file.
   },
 
   "roles": {
-    "defaultMemberPermissions": [ "view_channel", "send_messages", "create_channels", "connect", "speak" ],
+    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak" ],
     "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
   },
@@ -47,6 +48,7 @@ is how the Docker container is configured without editing the file.
   "voice": {
     "provider": null,
     "maximumParticipants": 25,
+    "startupCheck": "warn",
     "livekit": {
       "apiUrl": "http://localhost:7880",
       "apiKey": null,
@@ -94,6 +96,10 @@ See [Database modules](database-modules.md) for the driver architecture.
 - `connectionString` — see the per-provider examples in [Database modules](database-modules.md#the-three-shipped-drivers).
 - `autoCreateSchema` — when `true`, missing tables/indexes are created on every startup (idempotent);
   set `false` to manage schema separately.
+- `wipeOnStartup` — **development only.** When `true`, every table is dropped before the schema is
+  (re)created, so the server starts from an empty database every time. No confirmation, no undo;
+  said out loud as a startup warning whenever it's on. `RAINDROP_DEV_WIPE_DATABASE` overrides it —
+  see [Local development & Docker](local-development-and-docker.md#wiping-the-database-on-every-start).
 
 ### `users`
 
@@ -140,6 +146,10 @@ See [Voice](voice.md) for the model these configure.
   which case voice channels can be created but joining one is refused with `voice_unavailable`. Any
   other name is a startup error.
 - `maximumParticipants` — the most members one call holds (`channel_full` beyond it).
+- `startupCheck` — how hard the server looks for the media server before it starts listening: `off`
+  not at all, `warn` (the default) to report an unreachable one and start anyway, `require` to refuse
+  to start without it. A media server that answers and *refuses* these credentials stops the server
+  whichever this is — see [Voice](voice.md#what-is-checked-at-startup).
 - `livekit.apiUrl` — where *this server* reaches LiveKit's API and signalling; keep it private. Clients
   never connect to it: they go through this server's relay (`/api/channels/voice/signal`), over its
   pinned TLS. Only LiveKit's media ports (UDP 7882, TCP 7881) need to be reachable from outside.
@@ -152,6 +162,60 @@ See [Voice](voice.md) for the model these configure.
 - `livekit.allowWeakSecret` — accept a short or well-known secret such as LiveKit's `--dev` `secret`.
   Only for a throwaway server on your own machine.
 
+### `attachments`
+
+See [Attachments](attachments.md) for the model these configure. Files are end-to-end encrypted, so
+the server enforces these rules on what an upload declares in the clear — its extension and a
+ciphertext length that fixes the plaintext length exactly — and never sees a name or contents.
+
+```json
+"attachments": {
+  "enabled": true,
+  "storagePath": "attachments",
+  "maximumFileSizeMegabytes": 25,
+  "maximumFileSizeMegabytesByExtension": { "mp4": 500, "mov": 500, "webm": 500, "zip": 100 },
+  "allowedExtensions": null,
+  "blockedExtensions": [ "exe", "msi", "bat", "cmd", "com", "scr", "pif", "vbs", "vbe", "jse", "wsf", "hta", "cpl", "ps1", "lnk", "jar", "apk" ],
+  "allowFilesWithoutExtension": true,
+  "maximumFilesPerMessage": 10,
+  "pendingUploadExpiryHours": 24,
+  "maximumPendingUploadsPerMember": 20,
+  "preview": {
+    "extensions": [ "png", "jpg", "jpeg", "gif", "webp", "mp4", "webm", "mov", "mp3", "m4a", "ogg", "wav", "flac", "opus" ],
+    "autoLoadMaximumMegabytes": 10
+  }
+}
+```
+
+- `enabled` — whether members may add files at all. Off, the upload endpoints answer
+  `attachments_disabled`, a message naming a file is refused, and `attachments.v1` is not advertised.
+- `storagePath` — the folder encrypted files are kept in, relative to the executable
+  (`/app/data/attachments` in Docker). **Back it up with the database.** Checked for writability at
+  startup; a disk with less room than the largest accepted file is a warning.
+- `maximumFileSizeMegabytes` — the largest file, in megabytes of plaintext (1 MB = 1,048,576 bytes),
+  between 1 and 1,048,576; above 4,096 is a warning.
+- `maximumFileSizeMegabytesByExtension` — larger or smaller limits for particular extensions. A limit
+  for an extension that can never be uploaded is an error.
+- `allowedExtensions` — `null` accepts any type that is not blocked; a list accepts only those.
+- `blockedExtensions` — never accepted, whatever `allowedExtensions` says; left out, the list above
+  applies, and `[]` blocks nothing. An extension in both lists is an error.
+- `allowFilesWithoutExtension` — whether a file with no extension may be uploaded. An empty
+  `allowedExtensions` with this off accepts nothing and is an error.
+- `maximumFilesPerMessage` — 1 to 100 files per message (each may also carry a thumbnail).
+- `pendingUploadExpiryHours` — uploads never sent in a message are thrown away after this (1 hour to
+  30 days).
+- `maximumPendingUploadsPerMember` — how many uploads one member may have waiting; fewer than
+  `maximumFilesPerMessage` is an error.
+- `preview.extensions` — the types clients show inline (images, video, audio) when they can render
+  them; everything else is a file to save. An entry that can never be uploaded is a warning.
+- `preview.autoLoadMaximumMegabytes` — the largest previewable file a client loads without being
+  asked; `0` never loads one unasked.
+
+Extensions are written lower case without the dot: `".png"` or `"PNG"` is an error that says how to
+write it, and a repeated entry is a warning. A section of settings that includes a map (the size
+overrides) is still checked strictly: a misspelled setting beside it is reported, and so is a map
+value that is not a whole number.
+
 ## Environment variable overrides
 
 Used by the Docker container instead of editing `raindrop.json` directly:
@@ -161,14 +225,78 @@ Used by the Docker container instead of editing `raindrop.json` directly:
 | `RAINDROP_URLS` | `urls` |
 | `RAINDROP_DB_PROVIDER` | `database.provider` |
 | `RAINDROP_DB_CONNECTION_STRING` | `database.connectionString` |
+| `RAINDROP_DEV_WIPE_DATABASE` | `database.wipeOnStartup` — **development only**, drops every table on startup |
 | `RAINDROP_TLS_ENABLED` | `tls.enabled` |
 | `RAINDROP_TLS_CERTIFICATE_PATH` | `tls.certificatePath` |
 | `RAINDROP_TLS_CERTIFICATE_PASSWORD` | `tls.certificatePassword` |
 | `RAINDROP_VOICE_PROVIDER` | `voice.provider` |
+| `RAINDROP_VOICE_STARTUP_CHECK` | `voice.startupCheck` |
 | `RAINDROP_LIVEKIT_API_URL` | `voice.livekit.apiUrl` |
 | `RAINDROP_LIVEKIT_API_KEY` | `voice.livekit.apiKey` |
 | `RAINDROP_LIVEKIT_API_SECRET` | `voice.livekit.apiSecret` |
 | `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET` | `voice.livekit.allowWeakSecret` |
+| `RAINDROP_ATTACHMENTS_ENABLED` | `attachments.enabled` |
+| `RAINDROP_ATTACHMENTS_PATH` | `attachments.storagePath` |
+| `RAINDROP_ATTACHMENTS_MAX_MB` | `attachments.maximumFileSizeMegabytes` (a whole number) |
+
+## Startup validation
+
+Every setting in this file is checked before the server listens, and **everything wrong with it is
+reported at once** — an owner with three mistakes should not have to restart three times to find them
+all. Errors stop the server; warnings are printed and it carries on.
+
+```
+Checked raindrop.json:
+  error   voice.maxParticipants: is not a setting this server has, so it does nothing.
+          Did you mean 'maximumParticipants'?
+  error   database.provider: is 'sqlite3', which is not an installed database driver.
+          Did you mean 'sqlite'? Installed drivers: postgres, sqlite, sqlserver.
+  warning channels.allowPlaintextMessages: is on, so members may post messages this server can read
+          and store in the clear.
+Cannot start Raindrop until the errors above are fixed.
+```
+
+### How it is put together
+
+Nothing central knows what the settings mean. Each component validates its own
+([`ConfigurationReport`](../RaindropServer/Configuration/ConfigurationReport.cs) collects what they
+find, naming each problem by the setting path it lives at):
+
+| Checked by | Covers |
+|---|---|
+| `ServerConfig.Load` | the file itself: JSON that does not parse, settings this build does not have, values of the wrong kind, `RAINDROP_*` variables that are empty, malformed or misspelled |
+| `DatabaseOptions.Validate` | a driver that is installed, a connection string that parses |
+| `UserOptions.Validate` | session and retention windows, password length bounds that no password could satisfy |
+| `ChannelOptions.Validate` | message and history limits, and the pairs of them that contradict each other |
+| `RoleOptions.Validate` | an `everyone` role seeded with permissions that administer the server |
+| `VoiceOptions.Validate` | call size, join grace and reconcile interval |
+| `LiveKitOptions.Validate` | the media server's address and credentials — see [Voice](voice.md#what-is-checked-at-startup) |
+| `ServerHostOptions.Validate` | the listening addresses, and the certificate against the names they promise |
+
+A **misspelled setting is an error, not a shrug**. JSON deserialization ignores a name it does not
+know, which leaves a server running on a default nobody chose: `apisecrets` instead of `apiSecret`
+switches off no feature and prints no warning, it just never reaches LiveKit. The same goes for a
+`RAINDROP_*` variable this build does not read, which is a warning since the environment belongs to
+more than this server.
+
+### Going and looking
+
+Some things can only be found out by asking. After the services are registered and before the port
+opens, every registered
+[`IStartupCheck`](../RaindropServer/Configuration/IStartupCheck.cs) runs
+(`services.RunRaindropStartupChecksAsync()`), against a container built for the purpose and thrown
+away afterwards. The checks this build ships:
+
+- **the certificate** — without its private key (an error; nothing can serve TLS with it), or
+  expired, not yet valid (a clock problem), or not covering one of the addresses the server listens
+  on (warnings: clients pin the fingerprint and accept it, everything else validating it will not)
+- **the media server** — `LiveKitStartupCheck`: the host resolves, something answers, it is LiveKit's
+  API, it accepts this server's key and secret, and its clock agrees with this one's
+- **the key files** — `raindrop.pfx` and `server-identity.key` readable, creatable where they are
+  expected to be generated, and not left readable by every account on the machine
+
+A plugin adds its own with `services.AddStartupCheck<T>()`; a plugin's options validate themselves by
+taking a `ConfigurationReport` the same way the built-in ones do.
 
 ## The owner console
 
@@ -185,6 +313,7 @@ an interactive console on the main thread:
 | `revoke <user> <role>` | Takes a role away from a member |
 | `events` | Shows how many clients have the [event stream](events.md) open |
 | `voice` | Lists who is in which [voice call](voice.md), and whether they are connecting, muted or deafened |
+| `attachments` | Shows the [attachment](attachments.md) folder, how many files are stored and how much room they take, and uploads waiting to be sent |
 | `quit` | Shuts the server down gracefully |
 
 `grant`/`revoke` go through the **running server's own `RoleService`** rather than writing to the
