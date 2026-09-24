@@ -80,6 +80,9 @@ fingerprint pinning).
 - `identityKeyPath` — the server's long-lived identity key, generated on first start. It signs the
   certificate's fingerprint, so you can replace the certificate without clients refusing it. See
   [Transport security](transport-security.md#the-server-identity-key-changing-the-certificate-without-breaking-pins).
+  Relative paths resolve against the executable, which in a container is inside the container's own
+  layer and is lost when the container is recreated — so the Docker image sets
+  `RAINDROP_TLS_IDENTITY_KEY_PATH` to put it on the volume beside the certificate.
 - `allowTls12` — also accept TLS 1.2. Off by default (TLS 1.3 only, except on macOS; see Transport
   security).
 
@@ -229,6 +232,7 @@ Used by the Docker container instead of editing `raindrop.json` directly:
 | `RAINDROP_TLS_ENABLED` | `tls.enabled` |
 | `RAINDROP_TLS_CERTIFICATE_PATH` | `tls.certificatePath` |
 | `RAINDROP_TLS_CERTIFICATE_PASSWORD` | `tls.certificatePassword` |
+| `RAINDROP_TLS_IDENTITY_KEY_PATH` | `tls.identityKeyPath` — the Docker image and `docker-compose.yml` point it at `/app/data/server-identity.key`, on the mounted volume |
 | `RAINDROP_VOICE_PROVIDER` | `voice.provider` |
 | `RAINDROP_VOICE_STARTUP_CHECK` | `voice.startupCheck` |
 | `RAINDROP_LIVEKIT_API_URL` | `voice.livekit.apiUrl` |

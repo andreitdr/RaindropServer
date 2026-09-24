@@ -104,6 +104,12 @@ repo root as context since it references `../.dockerignore`:
 docker build -f ServerCli/Dockerfile -t raindrop-server .
 ```
 
+Deploying to the owner's own Docker server is `./deploy.sh` (reference: [`docs/deployment.md`](docs/deployment.md)):
+it exports the committed `HEAD` (or `--ref`) with `git archive`, builds the image on the server, restarts
+`server`, and checks that the server's identity key did not change. `--dry-run` changes nothing, and
+deploying an older ref is the rollback. State (`data/`, `.env`) lives outside the build context on the
+server and is never touched.
+
 ## Architecture
 
 A solution of seven projects targeting `net10.0` (the seventh, `RaindropServer.Tests`, is the xUnit
@@ -809,8 +815,8 @@ Attachment error codes: `attachments_disabled`, `invalid_attachment`, `file_type
 `voice` and `attachments`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
 `RAINDROP_DB_PROVIDER`, `RAINDROP_DB_CONNECTION_STRING`, `RAINDROP_DEV_WIPE_DATABASE`,
 `RAINDROP_TLS_ENABLED`,
-`RAINDROP_TLS_CERTIFICATE_PATH`, `RAINDROP_TLS_CERTIFICATE_PASSWORD`, `RAINDROP_VOICE_PROVIDER`,
-`RAINDROP_VOICE_STARTUP_CHECK`, `RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`,
+`RAINDROP_TLS_CERTIFICATE_PATH`, `RAINDROP_TLS_CERTIFICATE_PASSWORD`, `RAINDROP_TLS_IDENTITY_KEY_PATH`,
+`RAINDROP_VOICE_PROVIDER`, `RAINDROP_VOICE_STARTUP_CHECK`, `RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`,
 `RAINDROP_LIVEKIT_API_SECRET`, `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`, `RAINDROP_ATTACHMENTS_ENABLED`,
 `RAINDROP_ATTACHMENTS_PATH`, `RAINDROP_ATTACHMENTS_MAX_MB`.
 

@@ -27,6 +27,7 @@ with [Architecture overview](architecture-overview.md) if you're new to the code
 | [Database modules](database-modules.md) | `IDatabaseDriver`, the relational store family, schema, adding a driver |
 | [Configuration](configuration.md) | `raindrop.json`, environment variables, the owner console |
 | [Local development & Docker](local-development-and-docker.md) | Running the whole stack (server, database, LiveKit) with Docker Compose, developing against Postgres/SQL Server locally, the Docker image |
+| [Deploying to a server](deployment.md) | `deploy.sh`: putting the server on a Docker host over SSH — what a deploy does and refuses, the layout on the server, first deploy, rolling back, backups |
 
 ## Quick facts
 

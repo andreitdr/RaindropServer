@@ -35,6 +35,9 @@ services:
       # container even though `docker compose ps` and the port mapping look fine.
       RAINDROP_URLS: https://0.0.0.0:5001
       RAINDROP_TLS_CERTIFICATE_PATH: /app/data/raindrop.pfx
+      # The identity key too: without this it is written next to the executable, inside the container,
+      # and a new one is generated whenever the container is recreated.
+      RAINDROP_TLS_IDENTITY_KEY_PATH: /app/data/server-identity.key
       RAINDROP_DB_PROVIDER: postgres
       # Encrypted files members share, on the same mounted volume as the certificate and keys.
       RAINDROP_ATTACHMENTS_PATH: /app/data/attachments
@@ -66,7 +69,11 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-raindrop} -d $${POSTGRES_DB:-raindrop}"]
+      # -h 127.0.0.1 makes "healthy" mean "accepting TCP connections", which is how the server connects.
+      # Over the default unix socket the check also passes against the temporary server the image runs
+      # while it initialises a fresh data directory, which does not listen on TCP: on a slow first start
+      # (a busy disk, an SD card) the server was released early and could not connect.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER:-raindrop} -d $${POSTGRES_DB:-raindrop}"]
       interval: 5s
       timeout: 5s
       retries: 10

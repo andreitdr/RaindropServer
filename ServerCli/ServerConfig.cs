@@ -701,6 +701,7 @@ public sealed record ServerConfig
         ["RAINDROP_TLS_ENABLED"] = "tls.enabled",
         ["RAINDROP_TLS_CERTIFICATE_PATH"] = "tls.certificatePath",
         ["RAINDROP_TLS_CERTIFICATE_PASSWORD"] = "tls.certificatePassword",
+        ["RAINDROP_TLS_IDENTITY_KEY_PATH"] = "tls.identityKeyPath",
         ["RAINDROP_VOICE_PROVIDER"] = "voice.provider",
         ["RAINDROP_VOICE_STARTUP_CHECK"] = "voice.startupCheck",
         ["RAINDROP_LIVEKIT_API_URL"] = "voice.livekit.apiUrl",
@@ -733,7 +734,8 @@ public sealed record ServerConfig
             {
                 Enabled = Flag("RAINDROP_TLS_ENABLED", report) ?? Tls.Enabled,
                 CertificatePath = Text("RAINDROP_TLS_CERTIFICATE_PATH", report) ?? Tls.CertificatePath,
-                CertificatePassword = Text("RAINDROP_TLS_CERTIFICATE_PASSWORD", report) ?? Tls.CertificatePassword
+                CertificatePassword = Text("RAINDROP_TLS_CERTIFICATE_PASSWORD", report) ?? Tls.CertificatePassword,
+                IdentityKeyPath = Text("RAINDROP_TLS_IDENTITY_KEY_PATH", report) ?? Tls.IdentityKeyPath
             },
             Voice = Voice with
             {

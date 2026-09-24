@@ -26,11 +26,14 @@ FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
 
-# The TLS key and the SQLite file have to outlive the container. A regenerated certificate has a new
-# fingerprint, and every client that pinned the old one would refuse to connect — so keep both on a
-# volume mounted at /app/data.
+# The TLS certificate, the server identity key and the SQLite file have to outlive the container. A
+# regenerated certificate has a new fingerprint, and a regenerated identity key is a stranger to every
+# client that pinned the old one — so keep all of them on a volume mounted at /app/data. The identity
+# key needs its own setting: left alone it sits next to the executable, in the container's own layer,
+# and is lost the next time the container is recreated (a new image, a changed environment).
 ENV RAINDROP_URLS=https://0.0.0.0:5001 \
     RAINDROP_TLS_CERTIFICATE_PATH=/app/data/raindrop.pfx \
+    RAINDROP_TLS_IDENTITY_KEY_PATH=/app/data/server-identity.key \
     RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \
     RAINDROP_ATTACHMENTS_PATH=/app/data/attachments
 VOLUME /app/data
