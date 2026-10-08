@@ -7,7 +7,7 @@ namespace RaindropServer.Users;
 /// </summary>
 /// <param name="Token">The bearer token the client sends on every authenticated request.</param>
 /// <param name="UserId">The UUID of the logged-in user on this server.</param>
-/// <param name="Username">The user's current username, kept here so endpoints avoid a lookup.</param>
+/// <param name="Username">The user's current username, kept here so callers avoid a lookup.</param>
 /// <param name="CreatedAtUtc">When the session was opened.</param>
 /// <param name="ExpiresAtUtc">When the session lapses if the client stops making requests.</param>
 /// <param name="DeviceId">

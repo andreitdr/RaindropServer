@@ -5,17 +5,23 @@ WORKDIR /app
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIGURATION=Release
-WORKDIR /src
+# The same side-by-side layout as a checkout: the server in /src/RaindropServer, the wire protocol it
+# compiles in /src/RaindropProto. The protocol arrives as the named build context raindrop_proto —
+# docker-compose.yml supplies it; building by hand, pass --build-context raindrop_proto=../RaindropProto.
+WORKDIR /src/RaindropServer
+COPY --from=raindrop_proto raindrop /src/RaindropProto/raindrop
 # Every referenced project's file has to be here for the restore to resolve, and copying only the
 # project files keeps this layer cached until a dependency actually changes.
 COPY ["ServerCli/ServerCli.csproj", "ServerCli/"]
 COPY ["RaindropServer/RaindropServer.csproj", "RaindropServer/"]
+COPY ["RaindropServer.Grpc/RaindropServer.Grpc.csproj", "RaindropServer.Grpc/"]
+COPY ["RaindropServer.Voice.LiveKit/RaindropServer.Voice.LiveKit.csproj", "RaindropServer.Voice.LiveKit/"]
 COPY ["RaindropServer.Data.Sqlite/RaindropServer.Data.Sqlite.csproj", "RaindropServer.Data.Sqlite/"]
 COPY ["RaindropServer.Data.Postgres/RaindropServer.Data.Postgres.csproj", "RaindropServer.Data.Postgres/"]
 COPY ["RaindropServer.Data.SqlServer/RaindropServer.Data.SqlServer.csproj", "RaindropServer.Data.SqlServer/"]
 RUN dotnet restore "ServerCli/ServerCli.csproj"
 COPY . .
-WORKDIR "/src/ServerCli"
+WORKDIR "/src/RaindropServer/ServerCli"
 RUN dotnet build "./ServerCli.csproj" -c $BUILD_CONFIGURATION -o /app/build
 
 FROM build AS publish
@@ -31,7 +37,10 @@ COPY --from=publish /app/publish .
 # client that pinned the old one — so keep all of them on a volume mounted at /app/data. The identity
 # key needs its own setting: left alone it sits next to the executable, in the container's own layer,
 # and is lost the next time the container is recreated (a new image, a changed environment).
-ENV RAINDROP_URLS=https://0.0.0.0:5001 \
+# SERVERCLI_HAS_PROBE tells deploy.sh this image has `ServerCli probe`, which it runs inside the
+# container to read the server's identity key.
+ENV SERVERCLI_HAS_PROBE=1 \
+    RAINDROP_URLS=https://0.0.0.0:5001 \
     RAINDROP_TLS_CERTIFICATE_PATH=/app/data/raindrop.pfx \
     RAINDROP_TLS_IDENTITY_KEY_PATH=/app/data/server-identity.key \
     RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \

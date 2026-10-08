@@ -31,6 +31,7 @@
     <!-- The media server voice calls run on. Idle until raindrop.json's voice.provider names it. -->
     <ItemGroup>
       <ProjectReference Include="..\RaindropServer.Voice.LiveKit\RaindropServer.Voice.LiveKit.csproj" />
+      <ProjectReference Include="..\RaindropServer.Grpc\RaindropServer.Grpc.csproj" />
     </ItemGroup>
 
 </Project>

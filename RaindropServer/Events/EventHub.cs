@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using RaindropServer.Payloads;
 using RaindropServer.Users;
 
 namespace RaindropServer.Events;
@@ -20,7 +19,8 @@ namespace RaindropServer.Events;
 /// <para>
 /// Besides fanning events out, the registry owns what every transport would otherwise have to get
 /// right for itself: <see cref="ServerEventTypes.Ready"/> first, closing a connection whose session
-/// ends, keeping an open connection's session alive, and closing everything when the server stops.
+/// ends, keeping an open connection's session alive, telling <see cref="IEventStreamListener"/>s when a
+/// member starts or stops listening, and closing everything when the server stops.
 /// </para>
 /// </remarks>
 public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessionListener, IDisposable
@@ -28,6 +28,7 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
     private readonly ConcurrentDictionary<Guid, IEventConnection> _connections = new();
     private readonly ISessionStore _sessions;
     private readonly ServerIdentity _identity;
+    private readonly EventOptions _options;
     private readonly IServiceProvider _services;
     private readonly Timer _renewal;
     private readonly CancellationTokenRegistration _stopping;
@@ -43,6 +44,7 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
     {
         _sessions = sessions;
         _identity = identity;
+        _options = options;
         _services = services;
 
         // Renewing any less often than this would let an open connection's session lapse between two
@@ -70,8 +72,7 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
     public IDisposable Register(IEventConnection connection)
     {
         // Delivered before the connection is visible to publishers, so ready is always the first frame.
-        connection.Deliver(connection.Codec.Encode(new ServerEvent<ReadyEvent>(
-            ServerEventTypes.Ready, new ReadyEvent(connection.Session.UserId, _identity.ProtocolVersion))));
+        DeliverReady(connection);
 
         _connections[connection.Id] = connection;
 
@@ -81,8 +82,22 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
         else if (!_sessions.IsActive(connection.Session.Token))
             connection.Close(EventCloseReason.SessionEnded);
 
-        return new Registration(this, connection.Id);
+        if (CountFor(connection.Session.UserId) == 1)
+            NotifyStreamsChanged(connection.Session.UserId);
+
+        return new Registration(this, connection);
     }
+
+    /// <inheritdoc />
+    public void Resubscribe(IEventConnection connection)
+    {
+        if (_connections.ContainsKey(connection.Id))
+            DeliverReady(connection);
+    }
+
+    /// <inheritdoc />
+    public IReadOnlySet<Guid> ConnectedUserIds() =>
+        _connections.Values.Select(connection => connection.Session.UserId).ToHashSet();
 
     // ── ISessionListener ─────────────────────────────────────────────────────
 
@@ -110,8 +125,8 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
 
         try
         {
-            // Encoded once per wire format, however many connections hear it.
-            var frames = new Dictionary<IPayloadCodec, byte[]>();
+            // Encoded once per transport, however many connections hear it.
+            var frames = new Dictionary<IEventEncoder, object?>();
 
             foreach (var (userId, connections) in Recipients())
             {
@@ -150,7 +165,7 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
                 }
 
                 if (own is not null)
-                    Deliver(connections, new ServerEvent<T>(type, own), new Dictionary<IPayloadCodec, byte[]>());
+                    Deliver(connections, new ServerEvent<T>(type, own), new Dictionary<IEventEncoder, object?>());
             }
         }
         catch (Exception ex)
@@ -190,16 +205,65 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
     }
 
     private static void Deliver<T>(
-        List<IEventConnection> connections, ServerEvent<T> serverEvent, Dictionary<IPayloadCodec, byte[]> frames)
+        List<IEventConnection> connections, ServerEvent<T> serverEvent, Dictionary<IEventEncoder, object?> frames)
     {
         foreach (var connection in connections)
         {
-            if (!frames.TryGetValue(connection.Codec, out var frame))
-                frames[connection.Codec] = frame = connection.Codec.Encode(serverEvent);
+            if (!frames.TryGetValue(connection.Encoder, out var frame))
+                frames[connection.Encoder] = frame = connection.Encoder.Encode(serverEvent);
 
-            connection.Deliver(frame);
+            // A transport that cannot carry this event — a plugin's, with no encoding for its payload —
+            // simply does not hear it.
+            if (frame is not null)
+                connection.Deliver(frame);
         }
     }
+
+    private void DeliverReady(IEventConnection connection)
+    {
+        var ready = connection.Encoder.Encode(new ServerEvent<ReadyEvent>(ServerEventTypes.Ready,
+            new ReadyEvent(connection.Session.UserId, _identity.ProtocolVersion, _options.HeartbeatInterval)));
+
+        if (ready is not null)
+            connection.Deliver(ready);
+    }
+
+    private int CountFor(Guid userId) =>
+        _connections.Values.Count(connection => connection.Session.UserId == userId);
+
+    /// <summary>
+    /// Tells every <see cref="IEventStreamListener"/> that a member started or stopped listening. Not
+    /// awaited: it runs from inside a registration or a disposal, neither of which may wait on whatever
+    /// a listener does (publishing presence, for one).
+    /// </summary>
+    private void NotifyStreamsChanged(Guid userId) => _ = Task.Run(async () =>
+    {
+        IEnumerable<IEventStreamListener> listeners;
+
+        try
+        {
+            // Resolved late: presence listens here and publishes through this hub, so taking the
+            // listeners in the constructor would be a cycle.
+            listeners = _services.GetServices<IEventStreamListener>();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[raindrop] Could not find event stream listeners: {ex.Message}");
+            return;
+        }
+
+        foreach (var listener in listeners)
+        {
+            try
+            {
+                await listener.OnEventStreamsChangedAsync(userId, CancellationToken.None);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                Console.Error.WriteLine($"[raindrop] {listener.GetType().Name} failed: {ex.Message}");
+            }
+        }
+    });
 
     private static async ValueTask<bool> IncludesAsync(EventAudience audience, Guid userId)
     {
@@ -273,8 +337,12 @@ public sealed class EventHub : IEventPublisher, IEventConnectionRegistry, ISessi
         _stopping.Dispose();
     }
 
-    private sealed class Registration(EventHub hub, Guid id) : IDisposable
+    private sealed class Registration(EventHub hub, IEventConnection connection) : IDisposable
     {
-        public void Dispose() => hub._connections.TryRemove(id, out _);
+        public void Dispose()
+        {
+            if (hub._connections.TryRemove(connection.Id, out _) && hub.CountFor(connection.Session.UserId) == 0)
+                hub.NotifyStreamsChanged(connection.Session.UserId);
+        }
     }
 }

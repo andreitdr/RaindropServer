@@ -3,6 +3,11 @@ name: CI/CD
 # On every push to main: build, then test. Releases are not made here; tag them
 # with release.sh in the Raindrop root folder, which triggers release.yml.
 
+# REQUIRED SETUP: the server compiles the wire protocol from the sibling RaindropProto repo
+# (RaindropServer.Grpc reads ../../RaindropProto). If that repo is private, add a repository secret
+# PROTO_REPO_TOKEN: a fine-grained personal access token with read-only "Contents" access to
+# andreitdr/RaindropProto. The default GITHUB_TOKEN cannot read other repositories.
+
 on:
   push:
     branches: [main]
@@ -20,13 +25,25 @@ env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   SOLUTION: RaindropServer.sln
+  PROTO_REPO: andreitdr/RaindropProto
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    # The workspace mirrors the local layout: <workspace>/RaindropServer next to <workspace>/RaindropProto.
+    defaults:
+      run:
+        working-directory: RaindropServer
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: RaindropServer
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PROTO_REPO }}
+          token: ${{ secrets.PROTO_REPO_TOKEN || github.token }}
+          path: RaindropProto
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -42,8 +59,19 @@ jobs:
     name: Test
     needs: build
     runs-on: ubuntu-latest
+    # The workspace mirrors the local layout: <workspace>/RaindropServer next to <workspace>/RaindropProto.
+    defaults:
+      run:
+        working-directory: RaindropServer
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: RaindropServer
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PROTO_REPO }}
+          token: ${{ secrets.PROTO_REPO_TOKEN || github.token }}
+          path: RaindropProto
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -57,4 +85,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: test-results
+          path: RaindropServer/test-results

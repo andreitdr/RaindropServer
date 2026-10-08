@@ -8,14 +8,14 @@ namespace RaindropServer;
 public sealed class ServerHostOptions
 {
     /// <summary>
-    /// The URLs to listen on, e.g. <c>https://0.0.0.0:5001</c>. An <c>https</c> URL requires
-    /// <see cref="Certificate"/>.
+    /// The URLs to listen on, e.g. <c>https://0.0.0.0:5001</c>. Every one must be <c>https</c>.
     /// </summary>
     public string[] Urls { get; set; } = ["https://localhost:5001"];
 
     /// <summary>
-    /// The certificate presented to clients. Leave null only when the server is behind a reverse
-    /// proxy that terminates TLS, or for local development over plain HTTP.
+    /// The certificate presented to clients, which they pin. Required: clients speak gRPC to this server
+    /// over TLS and trust exactly this certificate (or one its identity key vouches for), so there is no
+    /// plain-HTTP mode and no reverse proxy may terminate TLS in front of it.
     /// </summary>
     public X509Certificate2? Certificate { get; set; }
 
@@ -70,33 +70,29 @@ public sealed class ServerHostOptions
         {
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             {
-                report.Error("urls", $"'{url}' is not an http:// or https:// address.",
+                report.Error("urls", $"'{url}' is not an https:// address.",
                     "Write the scheme, host and port together, as in https://0.0.0.0:5001.");
                 continue;
             }
 
-            hosts.Add(uri.Host);
+            if (uri.Scheme == "http")
+            {
+                report.Error("urls",
+                    $"'{url}' listens without TLS. Clients speak gRPC to this server only over TLS, pinning its certificate.",
+                    "Use https:// with the same host and port.");
+                continue;
+            }
 
-            if (uri.Scheme == "http" && !uri.IsLoopback)
-                report.Warn("urls",
-                    $"'{url}' listens without TLS on an address other clients can reach, so every message, password and " +
-                    "token crosses the network readable.",
-                    "Only correct when a reverse proxy in front of this server terminates TLS.");
+            hosts.Add(uri.Host);
         }
 
         if (Urls.Length != Urls.Distinct(StringComparer.OrdinalIgnoreCase).Count())
             report.Warn("urls", "lists the same address more than once.");
 
-        var https = Urls.Any(url => url.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
-
-        if (https && Certificate is null)
-            report.Error("tls.enabled",
-                "is off, but the server is asked to listen on an https:// address.",
-                "Enable TLS, or listen on http:// only when a reverse proxy is terminating TLS for you.");
-
-        if (!https && Certificate is not null)
-            report.Warn("tls.enabled",
-                "is on, but no address listens on https://, so the certificate is never presented.");
+        if (Certificate is null)
+            report.Error("tls.certificatePath",
+                "names no certificate, and this server cannot listen without one.",
+                "Leave certificatePath at its default to have a self-signed certificate generated on first start.");
 
         if ((SslProtocols & ~(SslProtocols.Tls12 | SslProtocols.Tls13)) != 0 || SslProtocols == SslProtocols.None)
             report.Error("tls.allowTls12", "leaves a TLS version enabled that this server does not serve; only 1.2 and 1.3 may be.");

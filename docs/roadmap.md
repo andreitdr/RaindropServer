@@ -14,21 +14,22 @@ useful end to end:
 
 | Area | What works | Doc |
 |---|---|---|
-| Hosting | ASP.NET Core on Kestrel hosted in-process by a console app, auto-discovered endpoints, the owner console, bounded shutdown | [Architecture](architecture-overview.md), [Endpoint model](endpoint-model.md) |
+| Hosting | ASP.NET Core on Kestrel hosted in-process by a console app, the owner console, bounded shutdown | [Architecture](architecture-overview.md) |
+| API | Every client call over gRPC (`raindrop.v1`, defined in RaindropProto): interceptor-resolved sessions, error statuses with `ErrorInfo` reasons, streamed uploads and downloads | [gRPC services](grpc-services.md) |
 | Accounts | Registration, login, logout, sessions, username/password changes, username availability, user lookup, leaving and rejoining, PBKDF2 hashing, retention cleanup of left accounts | [Users](users.md) |
-| Roster | Members with presence (online/idle/offline), presence broadcast | [Members](members.md) |
+| Roster | Members with presence (online while an event stream is open, offline a minute after its heartbeats stop), presence broadcast | [Members](members.md) |
 | Roles | Role CRUD, assignment, the 12-permission catalogue, built-in `everyone`/`owner`, permission rollouts, the in-memory permission cache | [Roles & permissions](roles-and-permissions.md) |
 | Channels | Text and voice channels, create/rename/delete, `IChannelModule` dispatch, name policy | [Channels](channels.md) |
 | Messages | Send, history paging by cursor, deletion with tombstones, moderator deletion, archived copies | [Messages](messages.md) |
-| Encrypted messages | `POST /api/channels/text/messages/encrypted` for MLS ciphertext, plus the report path that proves a reported message's text with the author's attestation | [Messages](messages.md#reporting-an-encrypted-message) |
-| Attachments | Chunked uploads, owner-set size/type rules, local-folder storage, orphan cleanup, encrypted thumbnails, cancel | [Attachments](attachments.md) |
+| Encrypted messages | `SendEncryptedMessage` for MLS ciphertext, plus the report path that proves a reported message's text with the author's attestation | [Messages](messages.md#reporting-an-encrypted-message) |
+| Attachments | Streamed, resumable uploads and downloads, owner-set size/type rules, local-folder storage, orphan cleanup, encrypted thumbnails, cancel | [Attachments](attachments.md) |
 | Voice | Group calls on a LiveKit sidecar, join/leave, mute/deafen, server-wide mute for everyone, the signalling relay, permission watching, startup/shutdown reconciliation, SFrame-encrypted media (`e2ee.voice.v1`) | [Voice](voice.md) |
 | E2EE, identity | Identity keys, device certificates, device registration/listing/revocation, identity reset, session binding, sealed key backup, the device-link relay (`e2ee.devices.v1`) | [E2EE](e2ee.md) |
 | E2EE, delivery | The MLS delivery service: groups, one-commit-per-epoch, group info, key packages, Welcomes, roster, sync (`e2ee.delivery.v1`) | [E2EE](e2ee.md#the-delivery-service) |
-| Push | `GET /api/events` WebSocket with every event a member may see, publisher/transport/handler seams | [Events](events.md) |
+| Push | The bidirectional `EventService.Connect` stream with every event a member may see, heartbeats, resubscribe, plugin events, publisher/transport/handler seams | [Events](events.md) |
 | Databases | SQLite, PostgreSQL and SQL Server as separately loaded driver assemblies, schema creation on startup | [Database modules](database-modules.md) |
-| Wire formats | JSON and MessagePack, negotiated per request | [Wire formats](wire-formats.md) |
-| Transport | HTTPS only, self-signed by default, fingerprint pinning, an Ed25519 server identity key | [Transport security](transport-security.md) |
+| Wire format | Protobuf only; the LiveKit room API is binary Twirp too | [Wire format](wire-formats.md) |
+| Transport | TLS always (no plain-HTTP mode), self-signed by default, fingerprint pinning, a P-256 server identity key | [Transport security](transport-security.md) |
 | Configuration | `raindrop.json`, `RAINDROP_*` overrides, startup checks, the owner console | [Configuration](configuration.md) |
 | Deployment | Docker image, Compose stack with Postgres/SQL Server and LiveKit, `deploy.sh` over SSH with backups and rollback | [Local development & Docker](local-development-and-docker.md), [Deployment](deployment.md) |
 | CI | Build + test on every push to `main`, self-contained packages for Linux/macOS/Windows on a version tag | [CI & releases](ci-and-releases.md) |
@@ -74,8 +75,9 @@ each channel's MLS group through this delivery service. See
   would be a new implementation.
 
 ### Operations
-- **Rate limiting, metrics and a health endpoint.** None of these exist; a reverse proxy in front of
-  the server is the current answer.
+- **Rate limiting, metrics and a health check.** None of these exist. A reverse proxy cannot add them
+  either, since it has to pass TLS through untouched. `ServerCli probe` is the nearest thing to a health
+  check. A gRPC health service (`grpc.health.v1`) would be the natural one.
 - **Automated backups.** `deploy.sh` snapshots before a deploy; scheduled backups are the owner's
   job. [Deployment](deployment.md)
 

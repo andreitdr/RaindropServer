@@ -4,7 +4,6 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -30,33 +29,19 @@ public sealed class ServerHost : IAsyncDisposable
 
     /// <summary>
     /// The running server's services, so the process hosting it can reach the same instances its
-    /// endpoints use. This is how the owner's console acts on the live server — granting a role from
+    /// services use. This is how the owner's console acts on the live server — granting a role from
     /// the terminal has to go through the very <see cref="Roles.RoleService"/> that is answering
     /// requests, or it would be writing behind the running server's back.
     /// </summary>
     public IServiceProvider Services => _app.Services;
 
     /// <summary>
-    /// Builds and starts the server on a background thread, listening without TLS.
-    /// </summary>
-    /// <param name="services">
-    /// A configured <see cref="IServiceCollection"/> containing one or more <see cref="IEndpoint"/> registrations
-    /// (use <see cref="ServiceCollectionExtensions.AddRaindropServer"/> and
-    /// <see cref="ServiceCollectionExtensions.AddEndpoint{T}"/> to set it up).
-    /// </param>
-    /// <param name="urls">
-    /// One or more URLs the server will listen on, e.g. <c>"http://localhost:5000"</c>.
-    /// Defaults to <c>"http://localhost:5000"</c> when not specified.
-    /// </param>
-    /// <returns>A running <see cref="ServerHost"/> instance.</returns>
-    public static ServerHost Start(IServiceCollection services, params string[] urls) =>
-        Start(services, new ServerHostOptions { Urls = urls.Length == 0 ? ["http://localhost:5000"] : urls });
-
-    /// <summary>
     /// Builds and starts the server on a background thread.
     /// </summary>
     /// <param name="services">
-    /// A configured <see cref="IServiceCollection"/> containing one or more <see cref="IEndpoint"/> registrations.
+    /// A configured <see cref="IServiceCollection"/>: the domain from
+    /// <see cref="ServiceCollectionExtensions.AddRaindropServer"/>, and at least one
+    /// <see cref="IRouteContributor"/> to serve it (the gRPC module's <c>AddRaindropGrpc</c>).
     /// </param>
     /// <param name="options">The addresses to listen on and the certificate to present.</param>
     /// <returns>A running <see cref="ServerHost"/> instance.</returns>
@@ -64,6 +49,24 @@ public sealed class ServerHost : IAsyncDisposable
     {
         options.Validate();
 
+        var host = new ServerHost(Build(services, options));
+        host.StartBackground();
+        return host;
+    }
+
+    /// <summary>
+    /// Builds the application without starting it: Kestrel configured from <paramref name="options"/>,
+    /// every registered service copied in, and every <see cref="IRouteContributor"/> mapped.
+    /// </summary>
+    /// <param name="services">The services to run, as for <see cref="Start"/>.</param>
+    /// <param name="options">The addresses to listen on and the certificate to present.</param>
+    /// <param name="configure">
+    /// A last word on the builder — how a test swaps Kestrel for an in-memory server. The options are
+    /// not validated here, so a test needs no certificate.
+    /// </param>
+    public static WebApplication Build(
+        IServiceCollection services, ServerHostOptions options, Action<WebApplicationBuilder>? configure = null)
+    {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls(options.Urls);
 
@@ -73,8 +76,9 @@ public sealed class ServerHost : IAsyncDisposable
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
-            // HTTP/2 multiplexes every call over one connection and compresses headers, which for a
-            // chat client making many small requests is a bigger win than the payload format itself.
+            // HTTP/2 carries gRPC — every call and stream multiplexed over one connection. HTTP/1.1 stays
+            // for the one thing that needs it: the voice signalling relay's WebSocket, which LiveKit's
+            // client SDK opens as an ordinary upgrade. ALPN picks per connection.
             kestrel.ConfigureEndpointDefaults(endpoint => endpoint.Protocols = HttpProtocols.Http1AndHttp2);
 
             if (options.Certificate is { } certificate)
@@ -100,36 +104,14 @@ public sealed class ServerHost : IAsyncDisposable
             builder.Services.Add(descriptor);
 
         builder.Logging.ClearProviders();
+        configure?.Invoke(builder);
 
         var app = builder.Build();
 
-        // The event stream is a WebSocket; the middleware pings idle ones so that proxies and NAT
-        // boxes do not quietly drop them.
-        var events = app.Services.GetService<Events.EventOptions>() ?? new Events.EventOptions();
-        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = events.KeepAliveInterval });
+        foreach (var contributor in app.Services.GetServices<IRouteContributor>())
+            contributor.Map(app);
 
-        // Map every registered IEndpoint implementation.
-        var endpoints = app.Services.GetServices<IEndpoint>();
-        foreach (var endpoint in endpoints)
-        {
-            var captured = endpoint;
-
-            // Over HTTP/2 a WebSocket is opened with an extended CONNECT rather than a GET upgrade, so
-            // a GET route answers both — which is what lets the event stream share the one multiplexed
-            // connection a client already has open for everything else.
-            string[] methods = captured.Method == HttpMethod.Get
-                ? [HttpMethod.Get.Method, HttpMethod.Connect.Method]
-                : [captured.Method.Method];
-
-            app.MapMethods(
-                captured.Route,
-                methods,
-                (HttpContext ctx, CancellationToken ct) => captured.HandleAsync(ctx, ct));
-        }
-
-        var host = new ServerHost(app);
-        host.StartBackground();
-        return host;
+        return app;
     }
 
     [SupportedOSPlatform("linux")]

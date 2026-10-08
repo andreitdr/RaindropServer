@@ -2,8 +2,10 @@
 
 Domain code: [`RaindropServer/Channels/`](../RaindropServer/Channels/), with
 [`Channels/Text/`](../RaindropServer/Channels/Text/) and [`Channels/Voice/`](../RaindropServer/Channels/Voice/)
-for what's specific to each type. HTTP surface: [`ServerCli/Endpoints/Channels/`](../ServerCli/Endpoints/Channels/),
-with nested `Text/` and `Voice/` folders mirroring the same split.
+for what's specific to each type. Wire surface: `raindrop.v1.ChannelService`
+([`channels.proto`](../../RaindropProto/raindrop/v1/channels.proto)) for the shared lifecycle, with
+`TextChannelService` and `VoiceService` for each type, all in
+[`RaindropServer.Grpc/Services/`](../RaindropServer.Grpc/Services/CommunityServices.cs).
 
 Channels are how members talk to each other. There are two kinds, and the split runs all the way down
 the code:
@@ -44,7 +46,7 @@ destroy while the channel's name still exists to describe it. `TextChannelModule
 a deleted channel end up in the [deleted-message archive](messages.md#the-deleted-message-archive)) and
 only then delete them.
 
-Registered modules today (see [Endpoint model & DI wiring](endpoint-model.md#addraindropchannelsconfigure)):
+Registered modules today (see [gRPC services & DI wiring](grpc-services.md#addraindropchannelsconfigure)):
 `TextChannelModule`, and `VoiceChannelModule` (registered by `AddRaindropVoice`, whether or not a media
 server is configured, so voice channels can always be deleted). Deleting a voice channel ends its call,
 best-effort against the media server — an outage there must not block the delete.
@@ -83,27 +85,23 @@ used to enumerate channels somebody has been kept out of.
 
 ## Channel API
 
-All authenticated. Ids travel in the request body rather than the URL path — same reasoning as
-usernames; see [Transport security](transport-security.md).
+All authenticated. `raindrop.v1.ChannelService`:
 
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/channels` | Every channel the caller may see, with `yourPermissions` for each |
-| POST | `/api/channels/create` | Create a channel of a given type: `text` or `voice` |
-| POST | `/api/channels/get` | One channel, and what the caller may do in it |
-| POST | `/api/channels/rename` | Rename it — needs `RenameChannels`, or having created it |
-| POST | `/api/channels/delete` | Delete it and everything in it — needs `DeleteChannels`, or having created it. The messages are [copied to the archive](messages.md#the-deleted-message-archive) first |
+| RPC | Purpose |
+|---|---|
+| `ListChannels` | Every channel the caller may see, with `your_permissions` for each |
+| `CreateChannel` | Create a channel of a given type: `text` or `voice` |
+| `GetChannel` | One channel, and what the caller may do in it |
+| `RenameChannel` | Rename it — needs `RenameChannels`, or having created it |
+| `DeleteChannel` | Delete it and everything in it — needs `DeleteChannels`, or having created it. The messages are [copied to the archive](messages.md#the-deleted-message-archive) first |
 
-Message endpoints (`/api/channels/text/messages/*`) are documented in [Messages](messages.md), and
-voice endpoints (`/api/channels/voice/*`) in [Voice](voice.md).
+Messages (`TextChannelService`) are documented in [Messages](messages.md), and calls (`VoiceService`)
+in [Voice](voice.md).
 
-Endpoint implementations: [`ServerCli/Endpoints/Channels/`](../ServerCli/Endpoints/Channels/)
-(`ListChannelsEndpoint.cs`, `CreateChannelEndpoint.cs`, `GetChannelEndpoint.cs`,
-`RenameChannelEndpoint.cs`, `DeleteChannelEndpoint.cs`).
+### Domain contracts
 
-### Request/response shapes
-
-Defined in [`RaindropServer/Channels/ChannelContracts.cs`](../RaindropServer/Channels/ChannelContracts.cs):
+Defined in [`RaindropServer/Channels/ChannelContracts.cs`](../RaindropServer/Channels/ChannelContracts.cs);
+on the wire a channel is `raindrop.v1.Channel`, its type an open string:
 
 - `ChannelSummary(ChannelId, Type, Name, CreatedBy, CreatedAtUtc, YourPermissions)` — `Type` is `text`
   or `voice`.

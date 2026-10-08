@@ -1,7 +1,9 @@
 # Deploying to a server
 
 [`deploy.sh`](../deploy.sh) puts the server on a machine you reach over SSH that runs Docker. It exports
-a git ref, builds the image **on that machine** with the same `docker-compose.yml` you use locally
+a git ref of this repository and one of the sibling [RaindropProto](../../RaindropProto/README.md) (the
+wire protocol the server compiles), builds the image **on that machine** with the same
+`docker-compose.yml` you use locally
 ([Local development & Docker](local-development-and-docker.md)), restarts the `server` service, and
 checks that the server came back as the same server.
 
@@ -10,17 +12,19 @@ checks that the server came back as the same server.
 ./deploy.sh --ref v1.0.2     # any tag, branch or commit; deploying an older one is the rollback
 ./deploy.sh --dry-run        # check the server and print the plan, change nothing
 ./deploy.sh --yes            # no confirmation prompt
+./deploy.sh --proto-ref v2   # build against another RaindropProto commit than its HEAD
 ```
 
 The target defaults to `andrei@192.168.0.106`, directory `raindrop` in that user's home. Change it with
 `--host`, `--user`, `--dir` or the environment variables `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_DIR`.
-`--host` may be a name from `~/.ssh/config`.
+`--host` may be a name from `~/.ssh/config`. RaindropProto is read from `../RaindropProto` (`--proto-dir`
+or `DEPLOY_PROTO_DIR` to point elsewhere), at its `HEAD` unless `--proto-ref` says otherwise.
 
 ## What a deploy does
 
-1. **Exports the ref** with `git archive`. Only committed files travel, so no `.env`, `data/` or build
-   output can leak in, and what runs is always traceable to a commit. Uncommitted changes are **not**
-   deployed; the script warns when there are some.
+1. **Exports the ref**, and the RaindropProto ref, with `git archive`. Only committed files travel, so no
+   `.env`, `data/` or build output can leak in, and what runs is always traceable to a pair of commits.
+   Uncommitted changes in either repository are **not** deployed; the script warns when there are some.
 2. **Checks the server** (read-only): Docker usable without `sudo`, Compose v2 present, disk space,
    what is deployed now, whether it answers.
 3. **Refuses**, before anything live is touched, a configuration that would do harm — see below.
@@ -30,7 +34,9 @@ The target defaults to `andrei@192.168.0.106`, directory `raindrop` in that user
 5. **Restarts** with `docker compose up -d server`, which also keeps `postgres` and `livekit` up as the
    compose file describes. A service whose configuration did not change is not recreated, so a deploy
    restarts the server and nothing else.
-6. **Waits** (up to 120 s) for `GET /api/server/info` to answer from this machine, giving up early once
+6. **Waits** (up to 120 s) for the new server to answer its handshake. Over SSH it runs `ServerCli probe`
+   inside the container: a gRPC `GetServerInfo` call that prints the protocol version, fingerprint and
+   identity key as `key=value` lines, so this machine needs nothing but `git`, `ssh` and `sed`. It gives up early once
    the container has kept restarting for 20 s (the server exits when it cannot reach its database and
    leaves the retrying to Docker, so a restart or two on a first start is normal), and prints the
    server's log if it never comes up.
@@ -38,6 +44,11 @@ The target defaults to `andrei@192.168.0.106`, directory `raindrop` in that user
    ([Transport security](transport-security.md#the-server-identity-key-changing-the-certificate-without-breaking-pins)),
    so a different one means `data/server` was empty or not mounted; the deploy is reported as failed
    and is not recorded. A replaced certificate with the same key is only a warning.
+
+   The first deploy after the move to gRPC replaces a server that has no `probe` command. The image
+   marks that it has one (`SERVERCLI_HAS_PROBE`), so the script does not run it in an older container.
+   It cannot learn the old key this way either, so it warns that the identity check is skipped this
+   once. Compare the `Server identity` line in the log by hand afterwards.
 
 ### What is refused
 
@@ -59,9 +70,10 @@ Everything found is reported together, and nothing on the server has changed whe
 | `.env` | Passwords and settings, mode 600 | Created once, never overwritten, never copied off the machine |
 | `data/` | The database, the TLS certificate and identity key, the encrypted attachments | **Never touched** |
 | `src/` | The exported source; the Docker build context | Replaced wholesale |
+| `proto/` | The exported RaindropProto; the build's second context (`raindrop_proto`) | Replaced wholesale |
 | `docker-compose.yml`, `livekit.yaml` | Copied from the export | Replaced |
-| `docker-compose.override.yml` | Written by the script; points the build at `src/` | Rewritten |
-| `.deployed`, `deploy.log` | The last release that came up healthy, and the history of them | Updated only after a healthy deploy |
+| `docker-compose.override.yml` | Written by the script; points the build at `src/` and `proto/` | Rewritten |
+| `.deployed`, `deploy.log` | The last release that came up healthy (server and protocol commits), and the history of them | Updated only after a healthy deploy |
 
 `src/` is deliberately not the directory that holds `data/`. On Linux, Postgres's data directory is
 unreadable to ordinary users, and a `docker build` whose context contains it fails with *permission

@@ -9,9 +9,7 @@ using RaindropServer.Configuration;
 using RaindropServer.Data;
 using RaindropServer.E2ee;
 using RaindropServer.Events;
-using RaindropServer.Events.WebSockets;
 using RaindropServer.Members;
-using RaindropServer.Payloads;
 using RaindropServer.Roles;
 using RaindropServer.Users;
 
@@ -23,9 +21,10 @@ namespace RaindropServer;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the core RaindropServer infrastructure — the user subsystem plus automatic discovery
-    /// of every endpoint implementation found in all currently-loaded assemblies. Just implement one
-    /// of the endpoint interfaces; no manual registration is needed.
+    /// Registers the whole domain layer: users and sessions, the roster, roles, channels and every kind
+    /// of channel this server can host, attachments, voice, end-to-end encryption and the event system.
+    /// No transport: a host adds one — <c>AddRaindropGrpc</c> from <c>RaindropServer.Grpc</c> — and it
+    /// maps its routes through <see cref="IRouteContributor"/>.
     /// </summary>
     /// <param name="services">The container to add to.</param>
     /// <param name="configureUsers">Optionally adjusts account, session and retention rules.</param>
@@ -48,7 +47,6 @@ public static class ServiceCollectionExtensions
         Action<AttachmentOptions>? configureAttachments = null)
     {
         services.AddRouting();
-        services.AddRaindropPayloads();
         services.AddRaindropEvents(configureEvents);
         services.AddRaindropUsers(configureUsers);
         services.AddRaindropRoles(configureRoles);
@@ -60,32 +58,15 @@ public static class ServiceCollectionExtensions
         services.AddRaindropChannels(configureChannels);
         services.AddRaindropVoice(configureVoice);
         services.AddRaindropE2ee();
-        services.AddDiscoveredEndpoints();
 
         return services;
     }
 
     /// <summary>
-    /// Registers the wire formats the server can speak. JSON is the default so that a request can be
-    /// made by hand; a client that wants the bytes asks for MessagePack per request.
-    /// </summary>
-    public static IServiceCollection AddRaindropPayloads(this IServiceCollection services)
-    {
-        services.TryAddEnumerable(ServiceDescriptor.Singleton<IPayloadCodec, JsonPayloadCodec>());
-        services.TryAddEnumerable(ServiceDescriptor.Singleton<IPayloadCodec, MessagePackPayloadCodec>());
-        services.TryAddSingleton<PayloadCodecs>();
-
-        // A placeholder identity so the library stands on its own; the host registers the real one,
-        // with its certificate fingerprint, afterwards.
-        services.TryAddSingleton(new ServerIdentity(ServerIdentity.CurrentProtocolVersion, null));
-
-        return services;
-    }
-
-    /// <summary>
-    /// Registers the event system: the publisher every subsystem announces its changes through, the
-    /// registry transports hand their connections to, and the WebSocket transport this server ships.
-    /// Called for you by <see cref="AddRaindropServer"/>, and by every subsystem that publishes.
+    /// Registers the event system: the publisher every subsystem announces its changes through, and the
+    /// registry transports hand their connections to. The transport itself — the gRPC event stream —
+    /// is registered by the module that carries it. Called for you by <see cref="AddRaindropServer"/>,
+    /// and by every subsystem that publishes.
     /// </summary>
     /// <remarks>
     /// Each seam is its own registration so a plugin can replace one without the others: register an
@@ -102,8 +83,11 @@ public static class ServiceCollectionExtensions
         var options = services.FindInstance<EventOptions>() ?? new EventOptions();
         configure?.Invoke(options);
 
-        services.AddRaindropPayloads();
         services.TryAddSingleton(options);
+
+        // A placeholder identity so the library stands on its own; the host registers the real one,
+        // with its certificate fingerprint, afterwards.
+        services.TryAddSingleton(new ServerIdentity(ServerIdentity.CurrentProtocolVersion, null));
 
         services.TryAddSingleton<EventHub>();
         services.TryAddSingleton<IEventPublisher>(sp => sp.GetRequiredService<EventHub>());
@@ -112,9 +96,6 @@ public static class ServiceCollectionExtensions
         // The hub closes a connection whose session has just been revoked, so it has to hear about it.
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<ISessionListener, EventHub>(sp => sp.GetRequiredService<EventHub>()));
-
-        // Transports.
-        services.TryAddSingleton<WebSocketEventStream>();
 
         return services;
     }
@@ -149,6 +130,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<ISessionStore, InMemorySessionStore>();
         services.TryAddSingleton<UserService>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, RetentionCleanupService>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, SessionSweepService>());
 
         return services;
     }
@@ -186,19 +168,22 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Registers the roster and the presence behind it. Called for you by
+    /// Registers the roster and the presence behind it: a member is online while they have an event
+    /// stream open. Called for you by
     /// <see cref="AddRaindropServer"/>; call it directly only to swap in a different
     /// <see cref="IPresenceTracker"/> first — registering one before this runs wins, since this
     /// only fills in the default.
     /// </summary>
     public static IServiceCollection AddRaindropMembers(this IServiceCollection services)
     {
-        services.TryAddSingleton<IPresenceTracker, SessionPresenceTracker>();
+        services.AddRaindropEvents();
+        services.TryAddSingleton<IPresenceTracker, StreamPresenceTracker>();
         services.TryAddSingleton<MemberService>();
 
-        // Presence is derived from sessions, so a change to them is what a roster needs to hear about.
-        services.AddRaindropEvents();
+        // Presence is derived from event streams, which close when their session ends, so a change to
+        // either is what a roster needs to hear about.
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ISessionListener, PresenceBroadcaster>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IEventStreamListener, PresenceBroadcaster>());
 
         return services;
     }
@@ -311,6 +296,9 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<VoiceWorkQueue>();
         services.TryAddSingleton<VoiceService>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IChannelModule, VoiceChannelModule>());
+
+        // The transport's signalling relay, when it has one, is served on the same port as everything else.
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IRouteContributor, VoiceSignalRoutes>());
 
         // Keeping calls in step with sessions, permissions and the media server.
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ISessionListener, VoiceSessionListener>());
@@ -457,89 +445,6 @@ public static class ServiceCollectionExtensions
 
         await RoleService.EnsureBuiltInRolesAsync(
             store, options, services.FindInstance<TimeProvider>(), cancellationToken);
-    }
-
-    /// <summary>
-    /// Manually registers a single <see cref="IEndpoint"/> implementation.
-    /// Only needed when auto-discovery cannot find the type (e.g. the assembly hasn't been loaded yet).
-    /// </summary>
-    public static IServiceCollection AddEndpoint<T>(this IServiceCollection services)
-        where T : class, IEndpoint
-    {
-        services.AddTransient<IEndpoint, T>();
-        return services;
-    }
-
-    // ── Discovery ────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Scans every loaded assembly for the four endpoint interfaces and registers each implementation
-    /// as an <see cref="IEndpoint"/> — wrapping the typed and authenticated ones in the adapter that
-    /// gives them JSON handling and session resolution.
-    /// </summary>
-    private static void AddDiscoveredEndpoints(this IServiceCollection services)
-    {
-        var endpointType = typeof(IEndpoint);
-
-        var candidates = AppDomain.CurrentDomain
-            .GetAssemblies()
-            .SelectMany(a =>
-            {
-                try { return a.GetTypes(); }
-                catch { return []; }
-            })
-            .Where(t => t.IsClass && !t.IsAbstract && !t.IsGenericTypeDefinition)
-            .Where(t => !t.IsDefined(typeof(SkipEndpointDiscoveryAttribute), inherit: false))
-            .ToList();
-
-        foreach (var type in candidates)
-        {
-            // Plain endpoints are mapped as they are.
-            if (endpointType.IsAssignableFrom(type))
-                services.AddTransient(endpointType, type);
-
-            if (typeof(IAuthenticatedEndpoint).IsAssignableFrom(type))
-                services.AddAdapted(type, sp => new AuthenticatedEndpointAdapter(
-                    (IAuthenticatedEndpoint)sp.GetRequiredService(type),
-                    sp.GetRequiredService<ISessionStore>()));
-
-            if (ClosedInterface(type, typeof(ITypedEndpoint<,>)) is { } typed)
-            {
-                var adapterType = typeof(TypedEndpointAdapter<,>).MakeGenericType(typed.GetGenericArguments());
-
-                services.AddAdapted(type, sp => (IEndpoint)Activator.CreateInstance(
-                    adapterType,
-                    sp.GetRequiredService(type),
-                    sp.GetRequiredService<PayloadCodecs>())!);
-            }
-
-            if (ClosedInterface(type, typeof(IAuthenticatedTypedEndpoint<,>)) is { } authenticatedTyped)
-            {
-                var adapterType = typeof(AuthenticatedTypedEndpointAdapter<,>)
-                    .MakeGenericType(authenticatedTyped.GetGenericArguments());
-
-                services.AddAdapted(type, sp => (IEndpoint)Activator.CreateInstance(
-                    adapterType,
-                    sp.GetRequiredService(type),
-                    sp.GetRequiredService<ISessionStore>(),
-                    sp.GetRequiredService<PayloadCodecs>())!);
-            }
-        }
-    }
-
-    private static Type? ClosedInterface(Type type, Type openGeneric) =>
-        type.GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == openGeneric);
-
-    /// <summary>
-    /// Registers the endpoint under its own concrete type — so each adapter resolves exactly the
-    /// implementation it wraps, even when two endpoints share a request/response pair — and the
-    /// adapter around it as an <see cref="IEndpoint"/>.
-    /// </summary>
-    private static void AddAdapted(
-        this IServiceCollection services, Type endpointType, Func<IServiceProvider, IEndpoint> adapter)
-    {
-        services.TryAddTransient(endpointType);
-        services.AddTransient(typeof(IEndpoint), adapter);
     }
 
     /// <summary>

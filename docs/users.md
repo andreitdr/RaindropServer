@@ -1,10 +1,11 @@
 # Users
 
-Domain code: [`RaindropServer/Users/`](../RaindropServer/Users/). HTTP surface:
-[`ServerCli/Endpoints/Users/`](../ServerCli/Endpoints/Users/). `UserService` owns every rule, so
-endpoints stay thin and database drivers stay dumb. Request/response contracts live in the library
-next to `UserService` (in [`Contracts.cs`](../RaindropServer/Users/Contracts.cs)) since the library
-returns them and cannot depend on `ServerCli`.
+Domain code: [`RaindropServer/Users/`](../RaindropServer/Users/). Wire surface: `raindrop.v1.UserService`
+([`users.proto`](../../RaindropProto/raindrop/v1/users.proto)), served by
+[`UserGrpcService`](../RaindropServer.Grpc/Services/AccountServices.cs). `UserService` owns every rule, so
+the gRPC service stays thin and database drivers stay dumb. The domain's contracts live in the library
+next to `UserService` (in [`Contracts.cs`](../RaindropServer/Users/Contracts.cs)); the gRPC layer maps
+them to protobuf (see [gRPC services](grpc-services.md)).
 
 ## Lifecycle
 
@@ -19,7 +20,9 @@ The state machine to keep straight is [`UserStatus`](../RaindropServer/Users/Use
   unique index. The same person can be `alice` on one server and `alice42` on another.
 - **Sessions live in memory only** ([`InMemorySessionStore`](../RaindropServer/Users/InMemorySessionStore.cs))
   and are deliberately never persisted — a server restart logs everyone out. Clients log out when they
-  close; a 12-hour idle timeout is the backstop (`UserOptions.SessionIdleTimeout`).
+  close; a 12-hour idle timeout is the backstop (`UserOptions.SessionIdleTimeout`). An open event
+  stream renews its session; a lapsed one is forgotten when its token is next used, or by
+  `SessionSweepService` within ten minutes (`ISessionStore.RemoveExpired`).
 - **Leaving preserves or erases**, the caller's choice (`LeaveRequest.PreserveData`):
   - `LeftDataPreserved` keeps the username (still reserved, nobody else can claim it) and password
     hash until `data_expires_at`, capped at two years by `UserOptions.MaximumDataRetention`.
@@ -53,33 +56,29 @@ invalidating every existing password.
 
 ## User API
 
-All routes are under `/api/users` (plus one under `/api/server`). Authenticated routes take
-`Authorization: Bearer <token>`.
+`raindrop.v1.UserService`, plus the handshake in `raindrop.v1.ServerService`. Authenticated RPCs take
+`authorization: Bearer <token>` metadata.
 
-| Method | Route | Auth | Purpose |
-|---|---|---|---|
-| GET | `/api/server/info` | – | Handshake: protocol version, TLS fingerprint to pin, supported wire formats |
-| POST | `/api/users/status` | – | What this UUID means here: `unregistered`, `active`, `left_preserved`, `erased` |
-| POST | `/api/users/username-available` | – | Uniqueness pre-check for the registration screen |
-| POST | `/api/users/register` | – | First login: claim a username and password, get a session |
-| POST | `/api/users/login` | – | UUID (or username) + password → session |
-| POST | `/api/users/rejoin` | – | Restore a preserved account, by UUID or username |
-| POST | `/api/users/logout` | ✓ | End this session |
-| GET | `/api/users/me` | ✓ | Own profile |
-| POST | `/api/users/lookup` | ✓ | Resolve a UUID to a display name, e.g. for a message author |
-| POST | `/api/users/me/password` | ✓ | Change password; revokes all sessions and returns a new token |
-| POST | `/api/users/me/username` | ✓ | Claim a different username |
-| POST | `/api/users/me/leave` | ✓ | Leave the server, preserving or erasing data |
+| RPC | Auth | Purpose |
+|---|---|---|
+| `ServerService.GetServerInfo` | – | Handshake: protocol version, TLS fingerprint to pin, identity key, capabilities |
+| `GetUserStatus` | – | What this UUID means here: `USER_STATE_UNREGISTERED`, `_ACTIVE`, `_LEFT_PRESERVED`, `_ERASED` |
+| `CheckUsername` | – | Uniqueness pre-check for the registration screen |
+| `Register` | – | First login: claim a username and password, get a session |
+| `Login` | – | UUID (or username) + password → session |
+| `Rejoin` | – | Restore a preserved account, by UUID or username |
+| `Logout` | ✓ | End this session |
+| `GetMe` | ✓ | Own profile |
+| `LookupUser` | ✓ | Resolve a UUID to a display name, e.g. for a message author |
+| `ChangePassword` | ✓ | Change password; revokes all sessions and returns a new token |
+| `ChangeUsername` | ✓ | Claim a different username |
+| `LeaveServer` | ✓ | Leave the server, preserving or erasing data |
 
-Endpoint implementations: [`ServerCli/Endpoints/Users/`](../ServerCli/Endpoints/Users/) — one file per
-route (`RegisterEndpoint.cs`, `LoginEndpoint.cs`, `RejoinEndpoint.cs`, `LogoutEndpoint.cs`,
-`CurrentUserEndpoint.cs`, `LookupUserEndpoint.cs`, `ChangePasswordEndpoint.cs`,
-`ChangeUsernameEndpoint.cs`, `LeaveServerEndpoint.cs`, `UserStateEndpoint.cs`,
-`UsernameAvailabilityEndpoint.cs`).
+### Domain contracts
 
-### Request/response shapes
-
-Defined in [`RaindropServer/Users/Contracts.cs`](../RaindropServer/Users/Contracts.cs):
+Defined in [`RaindropServer/Users/Contracts.cs`](../RaindropServer/Users/Contracts.cs); their protobuf
+counterparts are `UserProfile`, `PublicUserProfile`, `Session` and each RPC's request and response in
+`users.proto`:
 
 - `UserProfile(UserId, Username, State, CreatedAtUtc, LastLoginAtUtc)` — the caller's own account.
 - `PublicUserProfile(UserId, Username?, State)` — what another member may see about a UUID (e.g. to
@@ -97,10 +96,11 @@ Defined in [`RaindropServer/Users/Contracts.cs`](../RaindropServer/Users/Contrac
 
 ### Error codes
 
-`{ "error": "<code>", "message": "<text>" }`. Codes a client branches on: `username_taken`,
-`already_registered`, `account_preserved`, `account_left`, `invalid_credentials`, `invalid_session`,
-`no_preserved_account`, `missing_identifier`, `last_owner`, `weak_password`, `invalid_username`,
-`invalid_payload`, `unsupported_media_type`.
+A refusal is a gRPC status whose `ErrorInfo.reason` is the code (see
+[gRPC services](grpc-services.md#errors)). Codes a client branches on: `username_taken`,
+`already_registered`, `account_preserved`, `account_left`, `invalid_credentials`, `missing_token`,
+`invalid_session`, `no_preserved_account`, `missing_identifier`, `last_owner`, `weak_password`,
+`invalid_username`, `invalid_payload`.
 
 Login deliberately answers `invalid_credentials` for both an unknown UUID and a wrong password, so the
 API cannot be used to enumerate who is registered on the server.

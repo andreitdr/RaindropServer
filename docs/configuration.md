@@ -11,7 +11,6 @@ is how the Docker container is configured without editing the file.
   "urls": [ "https://localhost:5001" ],
 
   "tls": {
-    "enabled": true,
     "certificatePath": "raindrop.pfx",
     "certificatePassword": null,
     "hostNames": null,
@@ -69,9 +68,10 @@ directory; the SQLite database path resolves against the working directory.
 See [Transport security](transport-security.md) for the full model (self-signed certificates,
 fingerprint pinning).
 
-- `enabled` — set to `false` only when a reverse proxy terminates TLS in front of the server, and use
-  an `http://` URL in that case. An `https://` URL with TLS disabled is a startup error rather than a
-  silent downgrade to plaintext.
+- `enabled` — must be `true` (the default; leave it out). It is still read so an older `raindrop.json`
+  loads, and `false` is a startup error: clients pin this server's own certificate and speak gRPC over
+  HTTP/2 to it, so TLS always ends here. Every address in `urls` must be `https://` too. A reverse proxy
+  in front of the server has to pass TLS through rather than terminate it.
 - `certificatePath` — a self-signed certificate is generated here on first start if nothing exists yet
   (see [`ServerCertificate`](../RaindropServer/Security/ServerCertificate.cs)); point this at a
   CA-issued PFX instead to skip client-side pinning entirely.
@@ -190,7 +190,7 @@ ciphertext length that fixes the plaintext length exactly — and never sees a n
 }
 ```
 
-- `enabled` — whether members may add files at all. Off, the upload endpoints answer
+- `enabled` — whether members may add files at all. Off, the upload calls answer
   `attachments_disabled`, a message naming a file is refused, and `attachments.v1` is not advertised.
 - `storagePath` — the folder encrypted files are kept in, relative to the executable
   (`/app/data/attachments` in Docker). **Back it up with the database.** Checked for writability at
@@ -229,7 +229,7 @@ Used by the Docker container instead of editing `raindrop.json` directly:
 | `RAINDROP_DB_PROVIDER` | `database.provider` |
 | `RAINDROP_DB_CONNECTION_STRING` | `database.connectionString` |
 | `RAINDROP_DEV_WIPE_DATABASE` | `database.wipeOnStartup` — **development only**, drops every table on startup |
-| `RAINDROP_TLS_ENABLED` | `tls.enabled` |
+| `RAINDROP_TLS_ENABLED` | `tls.enabled` — only `true` is accepted |
 | `RAINDROP_TLS_CERTIFICATE_PATH` | `tls.certificatePath` |
 | `RAINDROP_TLS_CERTIFICATE_PASSWORD` | `tls.certificatePassword` |
 | `RAINDROP_TLS_IDENTITY_KEY_PATH` | `tls.identityKeyPath` — the Docker image and `docker-compose.yml` point it at `/app/data/server-identity.key`, on the mounted volume |

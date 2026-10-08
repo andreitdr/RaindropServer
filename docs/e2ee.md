@@ -25,8 +25,10 @@ exact size, which is what the owner's attachment rules are enforced on. A messag
 attested under `raindrop/message-attestation/v2`, which also binds each file's id and ciphertext hash
 ([Messages](messages.md#reporting-an-encrypted-message)).
 
-Code: [`RaindropServer/E2ee/`](../RaindropServer/E2ee), endpoints in
-[`ServerCli/Endpoints/E2ee/`](../ServerCli/Endpoints/E2ee). Capabilities in `GET /api/server/info`:
+Code: [`RaindropServer/E2ee/`](../RaindropServer/E2ee); on the wire `raindrop.v1.DeviceService` and
+`raindrop.v1.DeliveryService` ([`devices.proto`](../../RaindropProto/raindrop/v1/devices.proto),
+[`delivery.proto`](../../RaindropProto/raindrop/v1/delivery.proto)), served by
+[`E2eeServices.cs`](../RaindropServer.Grpc/Services/E2eeServices.cs). Capabilities in `GetServerInfo`:
 `e2ee.devices.v1` (identities), `e2ee.delivery.v1` (the delivery service) and `e2ee.voice.v1` (calls
 are end-to-end encrypted, so clients refuse to join one they cannot encrypt).
 
@@ -78,45 +80,48 @@ Links live in memory (`IDeviceLinkRelay`, default `InMemoryDeviceLinkRelay`) for
 
 ## Key backup
 
-`backup/put` stores one sealed blob per user, up to 64 KiB, sealed under a 24-word recovery key or an
-Argon2id passphrase. It needs a bound session. `GET /api/e2ee/backup` returns it to any password
+`PutKeyBackup` stores one sealed blob per user, up to 64 KiB, sealed under a 24-word recovery key or an
+Argon2id passphrase. It needs a bound session. `GetKeyBackup` returns it to any password
 session, because a device restoring from it has no key to bind with yet, and the blob is useless
 without the recovery key.
 
 ## API
 
-All authenticated. Byte fields are base64 in JSON and binary in MessagePack.
+All authenticated. Every opaque blob (certificate, signature, nonce, backup, offer, approval, MLS
+message) is protobuf `bytes`; the server stores and relays them as it receives them.
 
-| Method | Route | Needs | Purpose |
-|---|---|---|---|
-| POST | `/api/e2ee/devices/register` | session | `{certificate}` registers a device. The first one sets the identity key. Idempotent. |
-| POST | `/api/e2ee/devices/list` | session | `{userIds}` (≤ 500) returns each user's `identityKey` and active `devices` (`deviceId`, `certificate`, `createdAtUtc`) |
-| POST | `/api/e2ee/devices/revoke` | bound, unless revoking this session's own device | `{deviceId}` revokes it and ends its sessions |
-| POST | `/api/e2ee/identity/reset` | session + `{password}` | forgets the identity key and backup and revokes every device |
-| POST | `/api/e2ee/session/challenge` | session | returns `{nonce, expiresAtUtc}`: 32 bytes, 2 minutes, single use |
-| POST | `/api/e2ee/session/bind` | session | `{deviceId, signature}`: Ed25519 by the device key over `"raindrop/session-binding/v1\n" ‖ nonce` |
-| GET | `/api/e2ee/backup` | session | returns `{blob, updatedAtUtc}`, `blob` null when there is none |
-| POST | `/api/e2ee/backup/put` | bound | `{blob}` replaces the backup |
-| POST | `/api/e2ee/device-link/start` | session | `{offer}` (≤ 4 KiB) returns `{linkId, expiresAtUtc}` |
-| POST | `/api/e2ee/device-link/offer` | bound | `{linkId}` returns `{offer}` |
-| POST | `/api/e2ee/device-link/approve` | bound | `{linkId, approval}` (≤ 8 KiB) |
-| POST | `/api/e2ee/device-link/approval` | the session that started the link | `{linkId}` returns `{approval}`, null until approved, delivered once |
+`raindrop.v1.DeviceService`:
 
-**The delivery service.** All need a bound session.
-
-| Method | Route | Purpose |
+| RPC | Needs | Purpose |
 |---|---|---|
-| POST | `/api/e2ee/groups/create` | `{channelId, groupInfo}` starts the channel's group (`group_exists` if it has one) |
-| POST | `/api/e2ee/groups/state` | `{channelId}` returns `{epoch, groupInfo, groupInfoEpoch}` (`group_not_found` before creation) |
-| POST | `/api/e2ee/groups/commit` | `{channelId, commit, welcome?, welcomeRecipients?}` returns the new `{epoch}`, or `epoch_conflict` |
-| POST | `/api/e2ee/groups/info` | `{channelId, groupInfo}` publishes the group info for the current epoch |
-| POST | `/api/e2ee/groups/sync` | `{channelId, fromEpoch}` returns `{epoch, commits: [{epoch, message}], resyncRequired}` (≤ 500 per page) |
-| POST | `/api/e2ee/groups/roster` | `{channelId}` returns `{devices: [{userId, deviceId}]}`, who should be in the group |
-| POST | `/api/e2ee/keypackages/upload` | `{keyPackages, lastResort?}` returns `{oneTime}` |
-| GET | `/api/e2ee/keypackages/count` | returns `{oneTime}` for this device |
-| POST | `/api/e2ee/keypackages/claim` | `{channelId, devices}` returns one `{userId, deviceId, keyPackage}` per device that has one and belongs in the group; others are skipped |
-| GET | `/api/e2ee/welcomes` | Welcomes for this device: `{welcomeId, channelId, epoch, welcome}` |
-| POST | `/api/e2ee/welcomes/ack` | `{welcomeIds}` forgets processed Welcomes |
+| `RegisterDevice` | session | `{certificate}` registers a device. The first one sets the identity key. Idempotent. |
+| `ListDevices` | session | `{user_ids}` (≤ 500) returns each user's `identity_key` and active `devices` (`device_id`, `certificate`, `created_at`) |
+| `RevokeDevice` | bound, unless revoking this session's own device | `{device_id}` revokes it and ends its sessions |
+| `ResetIdentity` | session + `{password}` | forgets the identity key and backup and revokes every device |
+| `CreateSessionChallenge` | session | returns `{nonce, expires_at}`: 32 bytes, 2 minutes, single use |
+| `BindSession` | session | `{device_id, signature}`: Ed25519 by the device key over `"raindrop/session-binding/v1\n" ‖ nonce` |
+| `GetKeyBackup` | session | returns `{blob, updated_at}`, both absent when there is none |
+| `PutKeyBackup` | bound | `{blob}` replaces the backup |
+| `StartDeviceLink` | session | `{offer}` (≤ 4 KiB) returns `{link_id, expires_at}` |
+| `GetDeviceLinkOffer` | bound | `{link_id}` returns `{offer}` |
+| `ApproveDeviceLink` | bound | `{link_id, approval}` (≤ 8 KiB) |
+| `TakeDeviceLinkApproval` | the session that started the link | `{link_id}` returns `{approval}`, absent until approved, delivered once |
+
+**The delivery service**, `raindrop.v1.DeliveryService`. All need a bound session.
+
+| RPC | Purpose |
+|---|---|
+| `CreateGroup` | `{channel_id, group_info}` starts the channel's group (`group_exists` if it has one) |
+| `GetGroupState` | `{channel_id}` returns a `GroupState {epoch, group_info, group_info_epoch}` (`group_not_found` before creation) |
+| `SubmitCommit` | `{channel_id, commit, welcome?, welcome_recipients}` returns the new `{epoch}`, or `epoch_conflict` |
+| `PutGroupInfo` | `{channel_id, group_info}` publishes the group info for the current epoch |
+| `SyncGroup` | `{channel_id, from_epoch}` returns `{epoch, commits: [{epoch, message}], resync_required}` (≤ 500 per page) |
+| `GetGroupRoster` | `{channel_id}` returns `{devices: [{user_id, device_id}]}`, who should be in the group |
+| `UploadKeyPackages` | `{key_packages, last_resort?}` returns `{one_time}` |
+| `GetKeyPackageCount` | returns `{one_time}` for this device |
+| `ClaimKeyPackages` | `{channel_id, devices}` returns one `{user_id, device_id, key_package}` per device that has one and belongs in the group; others are skipped |
+| `ListWelcomes` | Welcomes for this device: `{welcome_id, channel_id, epoch, welcome}` |
+| `AckWelcomes` | `{welcome_ids}` forgets processed Welcomes |
 
 **Error codes:**
 - certificates and identity: `invalid_certificate`, `certificate_mismatch`, `identity_mismatch`
@@ -240,7 +245,7 @@ consumed. Below 10 left, the owner gets `e2ee.keypackages.low`.
   reset. The MLS delivery service will use it to remove revoked devices from groups.
 - `ISessionStore.BindDevice` / `RemoveAllForDevice` have refusing defaults, so an older session store
   still loads.
-- `UserSession.DeviceId` is how any endpoint can tell whether its caller is bound.
+- `UserSession.DeviceId` is how any service can tell whether its caller is bound.
 - `IE2eeMembershipPolicy` (`TryAdd`) decides who belongs in a channel's group.
 - `IMlsGroupStore`, `IKeyPackageStore` and `IWelcomeStore` are driver factories with refusing defaults.
 - `E2eeOptions`:

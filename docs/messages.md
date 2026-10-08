@@ -1,12 +1,13 @@
 # Messages
 
-Domain code: [`RaindropServer/Channels/Text/`](../RaindropServer/Channels/Text/). HTTP surface:
-[`ServerCli/Endpoints/Channels/Text/`](../ServerCli/Endpoints/Channels/Text/). Depends on
+Domain code: [`RaindropServer/Channels/Text/`](../RaindropServer/Channels/Text/). Wire surface:
+`raindrop.v1.TextChannelService` ([`text.proto`](../../RaindropProto/raindrop/v1/text.proto)), served by
+[`TextChannelGrpcService`](../RaindropServer.Grpc/Services/CommunityServices.cs). Depends on
 [Channels](channels.md) for the channel itself and [Roles & permissions](roles-and-permissions.md) for
 every access check.
 
 A message belongs to a channel and is tied to the author's **UUID** — never to their account, which
-may be erased, and never to their username, which may change. `POST /api/users/lookup` (see
+may be erased, and never to their username, which may change. `UserService.LookupUser` (see
 [Users](users.md)) is how a client turns that UUID into a display name.
 
 ## End-to-end encryption
@@ -61,7 +62,7 @@ proves who wrote it. `MessageReportService` does this.
   `"raindrop/message-attestation/v1\n"` followed by the channel id (lower case), the client message
   id, the client's send time in ms, the type and the body. Each text field is a 4-byte big-endian
   length and its UTF-8.
-- **Reporting.** A member who reports the message (`POST .../report`) reveals those fields and the
+- **Reporting.** A member who reports the message (`ReportMessage`) reveals those fields and the
   attestation. The server recomputes the bytes and verifies the signature against the key of the
   device the stored message came from (`SenderDeviceId`, in `raindrop_devices`; a revoked device
   still counts, since it held that key when it wrote). A reporter can therefore reveal a message, but
@@ -69,7 +70,7 @@ proves who wrote it. `MessageReportService` does this.
 - **Where reports go.** Accepted reports are stored in `raindrop_message_reports`, the only place the
   server holds encrypted-message text, and only what a member chose to reveal. They are sent as
   `message.reported` to members with `manage_messages` in the channel, who can list them with
-  `POST .../reports`. The owner console's `reports` command shows the latest 20.
+  `ListReports`. The owner console's `reports` command shows the latest 20.
 - **What it proves** is authorship: that device wrote those words in that channel. It does not bind
   them to the exact stored ciphertext, which only group members can decrypt. A reporter could present
   a different message the same device genuinely sent in the same channel.
@@ -109,7 +110,7 @@ deleted message *and* for every message in a channel that is deleted (`reason` i
 
 What the archive is, and is not:
 
-- **It is for the server owner, in the database, and nowhere else.** No endpoint reads it, no
+- **It is for the server owner, in the database, and nowhere else.** No call reads it, no
   permission grants it, no event carries it and no client is ever sent it. A deleted message stays
   invisible in every client, exactly as before; the owner reads the table directly.
 - **It is not erasure.** Deleting a message hides it from everybody but the owner. It also outlives its
@@ -157,27 +158,22 @@ and the id is what breaks the tie — so a page boundary always falls between tw
 paging can neither repeat nor skip a message.
 
 Each page itself arrives in **chronological order** (the order it should be rendered in);
-`nextCursor` leads further into the past, and comes back `null` at the beginning of the channel.
+`next_cursor` leads further into the past, and is absent at the beginning of the channel.
 
 ## Message API
 
-All authenticated, all under `/api/channels/text/messages`.
+All authenticated. `raindrop.v1.TextChannelService`:
 
-| Method | Route | Purpose |
-|---|---|---|
-| POST | `/api/channels/text/messages/send-encrypted` | Post an end-to-end encrypted message (`{channelId, message, attachmentIds?}`) — needs `SendMessages` and a bound session, and `AttachFiles` to carry files |
-| POST | `/api/channels/text/messages/send` | Post a plaintext message — refused with `encryption_required` unless `allowPlaintextMessages` |
-| POST | `/api/channels/text/messages/history` | One page of history, newest page first; follow `nextCursor` |
-| POST | `/api/channels/text/messages/delete` | Delete a message: your own always, anyone else's with `ManageMessages` |
-| POST | `/api/channels/text/messages/report` | Report an encrypted message: `{messageId, body, clientMessageId, clientSentAtUnixMs, type, attestation, reason?, attachments?}` |
-| POST | `/api/channels/text/messages/reports` | A channel's reports, newest first — needs `ManageMessages` there |
+| RPC | Purpose |
+|---|---|
+| `SendEncryptedMessage` | Post an end-to-end encrypted message (`channel_id`, `message`, `attachment_ids`) — needs `SendMessages` and a bound session, and `AttachFiles` to carry files |
+| `SendMessage` | Post a plaintext message — refused with `encryption_required` unless `allowPlaintextMessages` |
+| `GetHistory` | One page of history, newest page first; follow `next_cursor` |
+| `DeleteMessage` | Delete a message: your own always, anyone else's with `ManageMessages` |
+| `ReportMessage` | Report an encrypted message: `message_id`, `body`, `client_message_id`, `client_sent_at_unix_ms`, `type`, `attestation`, `reason`, and `attested_files` for a message with files — its presence, even empty, is what makes the attestation a v2 one |
+| `ListReports` | A channel's reports, newest first — needs `ManageMessages` there |
 
-Endpoint implementations:
-[`ServerCli/Endpoints/Channels/Text/`](../ServerCli/Endpoints/Channels/Text/)
-(`SendEncryptedMessageEndpoint.cs`, `SendMessageEndpoint.cs`, `MessageHistoryEndpoint.cs`,
-`DeleteMessageEndpoint.cs`).
-
-### Request/response shapes
+### Domain contracts
 
 Defined in
 [`RaindropServer/Channels/Text/TextChannelContracts.cs`](../RaindropServer/Channels/Text/TextChannelContracts.cs):

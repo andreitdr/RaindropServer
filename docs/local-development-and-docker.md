@@ -29,23 +29,27 @@ Store tests run on SQLite, and also on PostgreSQL and SQL Server when `RAINDROP_
 tests against a running server, with the real Rust core, are in the client:
 `RaindropClient/test/integration/`.
 
-The server presents a self-signed certificate by default (see
-[Transport security](transport-security.md)), so `curl` needs `-k` until you trust it:
+The server builds against the wire protocol in the sibling RaindropProto checkout: keep
+`../RaindropProto` next to this repository. `dotnet build` fails with a message saying so when it is
+missing.
+
+Everything a client says is gRPC (see [gRPC services](grpc-services.md)), so call the server by hand
+with [`grpcurl`](https://github.com/fullstorydev/grpcurl) (`brew install grpcurl`). It presents a
+self-signed certificate by default (see [Transport security](transport-security.md)), so pass
+`-insecure`, and point `grpcurl` at the protos, because the server serves no reflection:
 
 ```bash
-curl -k https://localhost:5001/api/server/info
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/server.proto localhost:5001 raindrop.v1.ServerService/GetServerInfo
 ```
 
 ```bash
-curl -k -X POST https://localhost:5001/api/users/register \
-  -H "Content-Type: application/json" \
-  -d '{"userId":"<uuid>","username":"alice","password":"correct horse"}'
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/users.proto -d '{"user_id":"<uuid>","username":"alice","password":"correct horse"}' localhost:5001 raindrop.v1.UserService/Register
 ```
 
 Authenticated calls carry the token returned by registering or logging in:
 
 ```bash
-curl -k https://localhost:5001/api/members -H "Authorization: Bearer <token>"
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/members.proto -H "authorization: Bearer <token>" localhost:5001 raindrop.v1.MemberService/ListMembers
 ```
 
 The first UUID to register owns the server (see
@@ -53,12 +57,20 @@ The first UUID to register owns the server (see
 can create roles:
 
 ```bash
-curl -k -X POST https://localhost:5001/api/roles/create \
-  -H "Content-Type: application/json" -H "Authorization: Bearer <owner token>" \
-  -d '{"name":"Moderator","permissions":["manage_messages","rename_channels"]}'
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/roles.proto -H "authorization: Bearer <owner token>" -d '{"name":"Moderator","permissions":["manage_messages","rename_channels"]}' localhost:5001 raindrop.v1.RoleService/CreateRole
 ```
 
-See [Users](users.md), [Channels](channels.md) and [Messages](messages.md) for more example calls, and
+The event stream is bidirectional. `-d @` reads frames from stdin, so a heartbeat followed by a pause
+keeps it open long enough to watch events arrive:
+
+```bash
+(echo '{"heartbeat":{}}'; sleep 30) | grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/events.proto -H "authorization: Bearer <token>" -d @ localhost:5001 raindrop.v1.EventService/Connect
+```
+
+A refusal shows its status and a details entry. Its `ErrorInfo.reason` is the code (`grpcurl` prints
+it as raw bytes unless googleapis' `google/rpc/error_details.proto` is on its import path).
+
+See [Users](users.md), [Channels](channels.md) and [Messages](messages.md) for every RPC, and
 [Configuration](configuration.md#the-owner-console) for the console commands available once it's
 running.
 
@@ -202,10 +214,12 @@ Raindrop's reconciler compares itself with.
 
 `docker compose build server` does this for you (see above). Built directly,
 [`ServerCli/Dockerfile`](../ServerCli/Dockerfile) is built from the **repository root** as context,
-since it references `../.dockerignore`:
+since it references `../.dockerignore`. It also needs the wire protocol as a second, named build
+context, `raindrop_proto`, which `docker-compose.yml` passes as `additional_contexts` (Compose 2.17 or
+newer):
 
 ```bash
-docker build -f ServerCli/Dockerfile -t raindrop-server .
+docker build -f ServerCli/Dockerfile --build-context raindrop_proto=../RaindropProto -t raindrop-server .
 ```
 
 Configure the running container entirely through the `RAINDROP_*` environment variables in

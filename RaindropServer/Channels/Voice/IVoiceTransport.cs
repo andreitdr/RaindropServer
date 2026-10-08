@@ -58,8 +58,8 @@ public interface IVoiceTransport
 /// <summary>
 /// Optionally implemented by an <see cref="IVoiceTransport"/> whose clients open their media
 /// connection through this server rather than straight to the media server. Raindrop then serves
-/// <c>/api/channels/voice/signal/{path}</c> by handing the request here, so that connection rides the
-/// same pinned TLS certificate as everything else.
+/// <c>/api/channels/voice/signal/{path}</c> (<see cref="VoiceSignalRoutes"/>) by handing the request here,
+/// so that connection rides the same pinned TLS certificate as everything else.
 /// </summary>
 public interface IVoiceSignalRelay
 {

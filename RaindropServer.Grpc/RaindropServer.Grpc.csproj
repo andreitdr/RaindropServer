@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+  </ItemGroup>
+
+  <!-- The wire protocol lives in the sibling RaindropProto repo, checked out next to this one (the same
+       side-by-side layout the client uses for RaindropCrypto). The C# is generated on every build into
+       obj/ and never committed. Clients are generated too: the CLI's `probe` and the tests call the
+       server the way a client does. -->
+  <PropertyGroup>
+    <RaindropProtoRoot>$(MSBuildThisFileDirectory)..\..\RaindropProto</RaindropProtoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Protobuf Include="$(RaindropProtoRoot)\raindrop\v1\*.proto" ProtoRoot="$(RaindropProtoRoot)" GrpcServices="Both" Access="Public" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.84.0" />
+    <PackageReference Include="Grpc.StatusProto" Version="2.84.0" />
+  </ItemGroup>
+
+  <Target Name="RequireRaindropProto" BeforeTargets="BeforeBuild;Protobuf_BeforeCompile">
+    <Error Condition="!Exists('$(RaindropProtoRoot)\raindrop\v1\server.proto')" Text="RaindropProto was not found at $(RaindropProtoRoot). Check it out next to RaindropServer (the two repos are siblings)." />
+  </Target>
+
+</Project>

@@ -1,0 +1,93 @@
+// Copyright 2023 LiveKit, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// A trimmed copy of the RoomService messages Raindrop calls, from github.com/livekit/protocol at commit
+// a4f4b5c0c23f (protobufs/livekit_room.proto and protobufs/livekit_models.proto) — the protocol
+// livekit-server v1.13.7, the image docker-compose.yml pins, is built against. Only the fields Raindrop
+// reads or sets are here; their numbers and types are copied exactly, and everything left out is simply
+// skipped as an unknown field when LiveKit sends it. Update both together: a newer image may add fields,
+// but LiveKit never renumbers one.
+
+syntax = "proto3";
+
+package livekit;
+
+option csharp_namespace = "RaindropServer.Voice.LiveKit.Protocol";
+
+enum TrackSource {
+  UNKNOWN = 0;
+  CAMERA = 1;
+  MICROPHONE = 2;
+  SCREEN_SHARE = 3;
+  SCREEN_SHARE_AUDIO = 4;
+}
+
+message Room {
+  string name = 2;
+}
+
+message ParticipantPermission {
+  bool can_subscribe = 1;
+  bool can_publish = 2;
+  bool can_publish_data = 3;
+  repeated TrackSource can_publish_sources = 9;
+  bool can_update_metadata = 10;
+}
+
+message ParticipantInfo {
+  enum State {
+    JOINING = 0;
+    JOINED = 1;
+    ACTIVE = 2;
+    DISCONNECTED = 3;
+  }
+
+  string identity = 2;
+  State state = 3;
+  ParticipantPermission permission = 11;
+}
+
+message ListRoomsRequest {}
+
+message ListRoomsResponse {
+  repeated Room rooms = 1;
+}
+
+message ListParticipantsRequest {
+  string room = 1;
+}
+
+message ListParticipantsResponse {
+  repeated ParticipantInfo participants = 1;
+}
+
+// RemoveParticipant's request.
+message RoomParticipantIdentity {
+  string room = 1;
+  string identity = 2;
+}
+
+message UpdateParticipantRequest {
+  string room = 1;
+  string identity = 2;
+  ParticipantPermission permission = 4;
+}
+
+message DeleteRoomRequest {
+  string room = 1;
+}
+
+// Stands in for the responses Raindrop does not read (RemoveParticipantResponse, DeleteRoomResponse):
+// empty, so whatever LiveKit sends parses as unknown fields.
+message Ignored {}

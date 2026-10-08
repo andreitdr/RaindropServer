@@ -6,7 +6,6 @@ using RaindropServer.Configuration;
 using RaindropServer.Roles;
 using RaindropServer.Users;
 using ServerCli;
-using ServerCli.Endpoints.Attachments;
 
 namespace RaindropServer.Tests;
 
@@ -190,26 +189,6 @@ public class AttachmentConfigurationTests : IDisposable
 
         none.ApplyTo(options);
         Assert.True(options.IsTypeAllowed("exe"));
-    }
-
-    [Fact]
-    public void A_single_range_is_read_and_anything_else_refused()
-    {
-        Assert.True(DownloadAttachmentEndpoint.TryParseRange("bytes=10-19", 100, out var start, out var end));
-        Assert.Equal((10, 19), (start, end));
-
-        Assert.True(DownloadAttachmentEndpoint.TryParseRange("bytes=90-", 100, out start, out end));
-        Assert.Equal((90, 99), (start, end));
-
-        Assert.True(DownloadAttachmentEndpoint.TryParseRange("bytes=-5", 100, out start, out end));
-        Assert.Equal((95, 99), (start, end));
-
-        Assert.True(DownloadAttachmentEndpoint.TryParseRange("bytes=50-1000", 100, out start, out end));
-        Assert.Equal((50, 99), (start, end));
-
-        Assert.False(DownloadAttachmentEndpoint.TryParseRange("bytes=100-", 100, out _, out _));
-        Assert.False(DownloadAttachmentEndpoint.TryParseRange("bytes=0-1,5-6", 100, out _, out _));
-        Assert.False(DownloadAttachmentEndpoint.TryParseRange("items=0-1", 100, out _, out _));
     }
 }
 

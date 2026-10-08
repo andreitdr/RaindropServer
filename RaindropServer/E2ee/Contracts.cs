@@ -1,6 +1,6 @@
 namespace RaindropServer.E2ee;
 
-// Byte arrays travel as base64 in JSON and as binary in MessagePack.
+// Byte arrays travel as protobuf `bytes`; the gRPC layer (RaindropServer.Grpc) maps these records.
 
 // ── Devices and identity keys ────────────────────────────────────────────────
 

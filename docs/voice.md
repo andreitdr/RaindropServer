@@ -6,7 +6,9 @@ and a moderator can **mute somebody for everyone**. Per-member volume and "mute 
 client-side and never reach the server.
 
 Code: `RaindropServer/Channels/Voice/` (transport-agnostic), `RaindropServer.Voice.LiveKit/` (the
-media transport), `ServerCli/Endpoints/Channels/Voice/` (HTTP surface).
+media transport), `raindrop.v1.VoiceService` ([`voice.proto`](../../RaindropProto/raindrop/v1/voice.proto),
+served by [`VoiceGrpcService`](../RaindropServer.Grpc/Services/CommunityServices.cs)) for call control,
+and [`VoiceSignalRoutes`](../RaindropServer/Channels/Voice/VoiceSignalRoutes.cs) for the signalling relay.
 
 ## Who does what
 
@@ -20,11 +22,11 @@ Raindrop is the **authority**; a media server only **carries audio**.
 
 The media server shipped with Raindrop is **LiveKit**, running as a sidecar next to the server. It
 sits behind the `IVoiceTransport` seam, so nothing in `VoiceService` knows which one it is talking to.
-The join response names the transport (`"transport": "livekit"`), and a client picks its engine by
+The join response names the transport (`transport: "livekit"`), and a client picks its engine by
 that name.
 
 ```
-client ──REST + /api/events (pinned TLS)──────────▶ Raindrop ──Twirp JSON (private HTTP)──▶ LiveKit
+client ──gRPC: calls + event stream (pinned TLS)───▶ Raindrop ──Twirp protobuf (private HTTP)──▶ LiveKit
    │                                                    ▲  VoiceService: permissions, roster, mutes
    └──LiveKit signalling ──▶ /api/channels/voice/signal/rtc  (relayed by Raindrop, same pinned TLS)
    └──audio (DTLS-SRTP over UDP 7882, TCP 7881 fallback) ─────────────────────────────────▶ LiveKit
@@ -92,7 +94,7 @@ member). They survive restarts and rejoins, and can be lifted while the member i
 There are no webhooks. LiveKit's webhooks would have to call into Raindrop's self-signed HTTPS, which
 LiveKit does not trust without extra setup. Instead:
 
-- **Join and leave are REST calls**, so the roster changes the instant somebody clicks. A joined member
+- **Join and leave are gRPC calls**, so the roster changes the instant somebody clicks. A joined member
   is *pending* (`connected: false`) until LiveKit reports them.
 - **`VoiceMaintenanceService`** is a single background loop that does four things:
   - **At startup**, it deletes every Raindrop room left on LiveKit. A restart logged everybody out, so
@@ -141,9 +143,12 @@ pins>/api/channels/voice/signal`. LiveKit's SDK then opens `…/rtc` and, after 
 - **An enforcement point.** A connection is forwarded only for a token Raindrop signed (or LiveKit
   refreshed), naming a member Raindrop has admitted to *that* room on a session that is still active.
   Anything else gets `401` with a plain-text reason, which LiveKit's client shows.
-- The endpoint is a raw `IEndpoint` (`VoiceSignalRelayEndpoint`, route
-  `/api/channels/voice/signal/{**path}`), because the caller authenticates with LiveKit's token, not a
-  Raindrop session. GET routes also answer CONNECT, so it works over HTTP/2 too.
+- **The one route that is not gRPC.** It carries LiveKit's own protocol (a WebSocket with LiveKit's
+  protobuf inside), which its client SDK speaks and Raindrop forwards unread. `VoiceSignalRoutes` maps
+  `/api/channels/voice/signal/{**path}` only when a transport registers an `IVoiceSignalRelay`, and
+  none of Raindrop's own authentication runs there: the caller authenticates with LiveKit's token, not
+  a Raindrop session. The route answers GET and CONNECT, so a WebSocket works over HTTP/1.1 (what
+  dart:io uses) or HTTP/2.
 
 ## End-to-end encrypted calls
 
@@ -184,19 +189,21 @@ and moves the key on.
 
 ## Voice API
 
-All authenticated.
+All authenticated. `raindrop.v1.VoiceService`:
 
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/channels/voice` | `{available, transport, maximumParticipants, participants[]}`: whether voice works here, and everybody in every call the caller can see |
-| POST | `/api/channels/voice/join` | `{channelId, selfMute?, selfDeaf?}` → `{channelId, transport, url, path, token, expiresAtUtc, you, participants[]}`. Needs `connect`. Joining another call leaves the first; joining the same call from another device takes it over. |
-| POST | `/api/channels/voice/leave` | `{channelId}` → `{left}`. Idempotent, and only the session that joined can leave, so a late leave from one device cannot end another device's call. |
-| POST | `/api/channels/voice/state` | `{selfMute, selfDeaf}` → `VoiceParticipant`. Deafening always mutes too. |
-| POST | `/api/channels/voice/mute` | `{userId, muted}` → `{userId, muted, changed}`. Mute or unmute for everyone; needs server-wide `mute_members`. |
-| GET | `/api/channels/voice/signal/{path}` | The LiveKit signalling relay (see above). Not a Raindrop-session endpoint. |
+| RPC | Purpose |
+|---|---|
+| `GetVoiceStatus` | → `{available, transport, maximum_participants, participants}`: whether voice works here, and everybody in every call the caller can see |
+| `JoinVoice` | `{channel_id, self_mute, self_deaf}` → `{channel_id, transport, url?, path?, token, expires_at, you, participants}`. Needs `connect`. Joining another call leaves the first; joining the same call from another device takes it over. |
+| `LeaveVoice` | `{channel_id}` → `{left}`. Idempotent, and only the session that joined can leave, so a late leave from one device cannot end another device's call. |
+| `SetVoiceSelfState` | `{self_mute, self_deaf}` → `{participant}`. Deafening always mutes too. |
+| `MuteVoiceMember` | `{user_id, muted}` → `{user_id, muted, changed}`. Mute or unmute for everyone; needs server-wide `mute_members`. |
 
-`VoiceParticipant` is `{channelId, userId, selfMute, selfDeaf, serverMute, suppressed, connected,
-joinedAtUtc}`: the whole state, merged by clients on `(channelId, userId)`. `url` is null in this
+The signalling relay at `/api/channels/voice/signal/{path}` (see above) is not part of this service and
+not a Raindrop-session route.
+
+`VoiceParticipant` is `{channel_id, user_id, self_mute, self_deaf, server_mute, suppressed, connected,
+joined_at}`: the whole state, merged by clients on `(channel_id, user_id)`. `url` is absent in this
 version (everything goes through the relay). It is in the contract so a transport can point clients
 at a media server with its own TLS later.
 
@@ -239,7 +246,7 @@ Environment overrides: `RAINDROP_VOICE_PROVIDER`, `RAINDROP_VOICE_STARTUP_CHECK`
 file.
 
 With `provider: null`, voice channels can still be created and deleted, but joining is refused with
-`voice_unavailable`, and `GET /api/channels/voice` reports `available: false`. `livekit` with a
+`voice_unavailable`, and `GetVoiceStatus` reports `available: false`. `livekit` with a
 missing key or secret is a startup error. The console's `voice` command lists who is in which call.
 
 **There is no default secret to forget to change.** Nothing here ships with one, and LiveKit's own
@@ -302,7 +309,18 @@ Waiting cannot fix a secret that does not match, which is why no setting makes t
 ### Running LiveKit
 
 `docker compose up -d livekit` runs `livekit/livekit-server` with the settings in
-[`livekit.yaml`](../livekit.yaml) and the key pair from `.env` — **not** `--dev`. Set that up once:
+[`livekit.yaml`](../livekit.yaml) and the key pair from `.env` — **not** `--dev`.
+
+The image is **pinned** (`v1.13.7` today), not `latest`. Raindrop drives LiveKit's room API (listing
+rooms and participants, updating permissions, removing participants, deleting rooms) as Twirp in its
+binary protobuf form. It uses a trimmed copy of LiveKit's own RoomService messages,
+[`RaindropServer.Voice.LiveKit/Protos/livekit_room_service.proto`](../RaindropServer.Voice.LiveKit/Protos/livekit_room_service.proto),
+taken from the `livekit/protocol` commit that release is built against. LiveKit never renumbers a
+field, so a newer image keeps working, but move the pin and that file together. The only JSON that
+crosses that link is a Twirp error, which the Twirp spec always writes as JSON. `LiveKitRoomClient`
+reads its `code` and `msg`.
+
+Set it up once:
 
 ```bash
 cp .env.example .env

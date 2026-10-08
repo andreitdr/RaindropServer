@@ -3,18 +3,20 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Google.Protobuf;
 using RaindropServer.Channels.Voice;
+using RaindropServer.Voice.LiveKit.Protocol;
 
 namespace RaindropServer.Voice.LiveKit;
 
 /// <summary>
-/// The slice of LiveKit's room API Raindrop uses: Twirp over JSON, one POST per call to
-/// <c>/twirp/livekit.RoomService/{Method}</c> with an admin token.
+/// The slice of LiveKit's room API Raindrop uses: Twirp in its binary form, one POST of a protobuf
+/// message per call to <c>/twirp/livekit.RoomService/{Method}</c> with an admin token. The messages are
+/// the few vendored in <c>Protos/livekit_room_service.proto</c>.
 /// </summary>
 /// <remarks>
-/// Responses are read loosely on purpose. Twirp's JSON is protojson, which may name fields in
-/// <c>snake_case</c> or <c>camelCase</c> depending on the server's settings, may leave out fields that
-/// hold their default, and writes 64-bit numbers as strings; every read here copes with all three.
+/// The one thing that is not protobuf is a refusal: Twirp always writes its errors as a small JSON object
+/// (<c>{"code", "msg"}</c>), whatever the request was encoded in, so that is how they are read.
 /// Anything that goes wrong reaching LiveKit becomes a <see cref="VoiceTransportException"/>, which the
 /// voice subsystem retries on its next pass rather than failing a request over.
 /// </remarks>
@@ -32,25 +34,23 @@ public sealed class LiveKitRoomClient : IDisposable
     /// <summary>The names of every room LiveKit currently has open.</summary>
     public async Task<IReadOnlyList<string>> ListRoomsAsync(CancellationToken cancellationToken)
     {
-        var response = await CallAsync("ListRooms", null, new JsonObject(), cancellationToken);
+        var response = await CallAsync("ListRooms", null, new ListRoomsRequest(), ListRoomsResponse.Parser, cancellationToken);
 
-        return Array(response, "rooms")
-            .Select(room => Text(room, "name"))
-            .OfType<string>()
-            .ToList();
+        return response.Rooms.Select(room => room.Name).Where(name => name.Length > 0).ToList();
     }
 
     /// <summary>Who is in a room, and whether each may publish. Nobody, when the room does not exist.</summary>
     public async Task<IReadOnlyList<LiveKitParticipant>> ListParticipantsAsync(string room, CancellationToken cancellationToken)
     {
-        var response = await CallAsync("ListParticipants", room, new JsonObject { ["room"] = room }, cancellationToken);
+        var response = await CallAsync("ListParticipants", room, new ListParticipantsRequest { Room = room },
+            ListParticipantsResponse.Parser, cancellationToken);
 
-        return Array(response, "participants")
+        return response.Participants
+            .Where(participant => participant.State != ParticipantInfo.Types.State.Disconnected)
             .Select(participant => new LiveKitParticipant(
-                Text(participant, "identity") ?? "",
-                Text(participant, "state") ?? "ACTIVE",
-                Flag(participant?[FieldName(participant, "permission")], "can_publish", "canPublish")))
-            .Where(participant => participant.State != "DISCONNECTED")
+                participant.Identity,
+                participant.State.ToString().ToUpperInvariant(),
+                participant.Permission?.CanPublish ?? false))
             .ToList();
     }
 
@@ -60,27 +60,28 @@ public sealed class LiveKitRoomClient : IDisposable
     /// <c>can_publish</c> would also switch off their ability to hear the call.
     /// </summary>
     public Task UpdatePermissionAsync(string room, string identity, bool canPublish, CancellationToken cancellationToken) =>
-        CallAsync("UpdateParticipant", room, new JsonObject
+        CallAsync("UpdateParticipant", room, new UpdateParticipantRequest
         {
-            ["room"] = room,
-            ["identity"] = identity,
-            ["permission"] = new JsonObject
+            Room = room,
+            Identity = identity,
+            Permission = new ParticipantPermission
             {
-                ["can_subscribe"] = true,
-                ["can_publish"] = canPublish,
-                ["can_publish_data"] = false,
-                ["can_publish_sources"] = new JsonArray("MICROPHONE"),
-                ["can_update_metadata"] = false
+                CanSubscribe = true,
+                CanPublish = canPublish,
+                CanPublishData = false,
+                CanPublishSources = { TrackSource.Microphone },
+                CanUpdateMetadata = false
             }
-        }, cancellationToken);
+        }, ParticipantInfo.Parser, cancellationToken);
 
     /// <summary>Removes a participant. Somebody already gone is not an error.</summary>
     public Task RemoveParticipantAsync(string room, string identity, CancellationToken cancellationToken) =>
-        CallAsync("RemoveParticipant", room, new JsonObject { ["room"] = room, ["identity"] = identity }, cancellationToken);
+        CallAsync("RemoveParticipant", room, new RoomParticipantIdentity { Room = room, Identity = identity },
+            Ignored.Parser, cancellationToken);
 
     /// <summary>Closes a room, disconnecting everybody in it. A room already gone is not an error.</summary>
     public Task DeleteRoomAsync(string room, CancellationToken cancellationToken) =>
-        CallAsync("DeleteRoom", room, new JsonObject { ["room"] = room }, cancellationToken);
+        CallAsync("DeleteRoom", room, new DeleteRoomRequest { Room = room }, Ignored.Parser, cancellationToken);
 
     /// <summary>
     /// Asks LiveKit for its rooms purely to find out whether it is there and whether it accepts this
@@ -96,7 +97,7 @@ public sealed class LiveKitRoomClient : IDisposable
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "twirp/livekit.RoomService/ListRooms")
         {
-            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            Content = Protobuf(new ListRoomsRequest())
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _jwt.CreateAdminToken(null));
 
@@ -171,23 +172,25 @@ public sealed class LiveKitRoomClient : IDisposable
 
     /// <summary>
     /// Makes one call. A Twirp <c>not_found</c> — and, for a call about one room, an
-    /// <c>unavailable</c> carrying <see cref="NoResponse"/> — answers with an empty object, since
+    /// <c>unavailable</c> carrying <see cref="NoResponse"/> — answers with an empty response, since
     /// every caller here treats "already gone" as success.
     /// </summary>
-    private async Task<JsonNode?> CallAsync(string method, string? room, JsonObject body, CancellationToken cancellationToken)
+    private async Task<TResponse> CallAsync<TResponse>(
+        string method, string? room, IMessage body, MessageParser<TResponse> parser, CancellationToken cancellationToken)
+        where TResponse : IMessage<TResponse>, new()
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, $"twirp/livekit.RoomService/{method}")
         {
-            Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json")
+            Content = Protobuf(body)
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _jwt.CreateAdminToken(room));
 
         HttpResponseMessage response;
-        string text;
+        byte[] bytes;
         try
         {
             response = await _http.SendAsync(request, cancellationToken);
-            text = await response.Content.ReadAsStringAsync(cancellationToken);
+            bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
         }
         catch (HttpRequestException ex)
         {
@@ -201,23 +204,42 @@ public sealed class LiveKitRoomClient : IDisposable
         using (response)
         {
             if (response.IsSuccessStatusCode)
-                return string.IsNullOrWhiteSpace(text) ? new JsonObject() : JsonNode.Parse(text);
+            {
+                try
+                {
+                    return parser.ParseFrom(bytes);
+                }
+                catch (InvalidProtocolBufferException ex)
+                {
+                    throw new VoiceTransportException($"LiveKit answered {method} with something that is not its protobuf.", ex);
+                }
+            }
 
+            var text = Encoding.UTF8.GetString(bytes);
             var error = TryParse(text);
             var code = Text(error, "code");
             var message = Text(error, "msg") ?? text;
 
             if (response.StatusCode == HttpStatusCode.NotFound || code == "not_found")
-                return new JsonObject();
+                return new TResponse();
 
             if (room is not null && code == "unavailable" && message.Contains(NoResponse, StringComparison.Ordinal))
-                return new JsonObject();
+                return new TResponse();
 
             throw new VoiceTransportException(
                 $"LiveKit refused {method}: {(int)response.StatusCode} {code ?? ""} {message}".TrimEnd());
         }
     }
 
+    /// <summary>A request body in Twirp's binary encoding.</summary>
+    private static ByteArrayContent Protobuf(IMessage body)
+    {
+        var content = new ByteArrayContent(body.ToByteArray());
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/protobuf");
+        return content;
+    }
+
+    /// <summary>A Twirp error body: always JSON, by the Twirp specification, whatever the request was.</summary>
     private static JsonNode? TryParse(string text)
     {
         try
@@ -244,15 +266,8 @@ public sealed class LiveKitRoomClient : IDisposable
         return snake;
     }
 
-    private static IEnumerable<JsonNode?> Array(JsonNode? node, string field) =>
-        node?[FieldName(node, field)] as JsonArray ?? [];
-
     private static string? Text(JsonNode? node, string field) =>
         node?[FieldName(node, field)] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
-
-    /// <summary>A boolean that protojson leaves out entirely when it is false.</summary>
-    private static bool Flag(JsonNode? node, string snake, string camel) =>
-        (node?[snake] ?? node?[camel]) is JsonValue value && value.TryGetValue<bool>(out var flag) && flag;
 }
 
 /// <param name="Identity">Their identity in the room — a Raindrop member's UUID, for anybody Raindrop admitted.</param>

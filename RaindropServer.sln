@@ -14,6 +14,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RaindropServer.Voice.LiveKi
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RaindropServer.Tests", "RaindropServer.Tests\RaindropServer.Tests.csproj", "{ECE17F5B-A643-4F8F-AC0E-DBDCE8784F16}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RaindropServer.Grpc", "RaindropServer.Grpc\RaindropServer.Grpc.csproj", "{D28E6775-57A1-4F03-B017-F53192F9A2F6}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -108,6 +110,18 @@ Global
 		{ECE17F5B-A643-4F8F-AC0E-DBDCE8784F16}.Release|x64.Build.0 = Release|Any CPU
 		{ECE17F5B-A643-4F8F-AC0E-DBDCE8784F16}.Release|x86.ActiveCfg = Release|Any CPU
 		{ECE17F5B-A643-4F8F-AC0E-DBDCE8784F16}.Release|x86.Build.0 = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|x64.Build.0 = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Debug|x86.Build.0 = Debug|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|x64.ActiveCfg = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|x64.Build.0 = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|x86.ActiveCfg = Release|Any CPU
+		{D28E6775-57A1-4F03-B017-F53192F9A2F6}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

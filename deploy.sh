@@ -14,17 +14,22 @@
 #   --dir <path>       the deploy directory there; relative paths start in that user's home
 #                                                      [DEPLOY_DIR, default raindrop]
 #
+# The wire protocol the server compiles comes from the sibling RaindropProto checkout:
+#   --proto-ref <ref>  the RaindropProto commit to build against        [default HEAD]
+#   --proto-dir <path> where that checkout is   [DEPLOY_PROTO_DIR, default ../RaindropProto]
+#
 # How it works:
-#   1. `git archive` exports the ref. Only committed files travel, so no .env, data/ or build output
-#      can leak in, and what runs on the server is always traceable to a commit.
+#   1. `git archive` exports the ref, and the RaindropProto ref beside it. Only committed files travel,
+#      so no .env, data/ or build output can leak in, and what runs on the server is always traceable
+#      to a pair of commits.
 #   2. The image is built ON the server by docker compose. A Mac and the server may not share a CPU
 #      architecture, and building where the image runs sidesteps emulation and needs no registry. The
 #      running server keeps serving until the build has succeeded.
 #   3. `docker compose up -d server` swaps the container (which also keeps postgres and livekit up, as
 #      docker-compose.yml describes). Nothing is recreated that did not change.
-#   4. This machine polls GET /api/server/info until the new server answers, then compares its identity
-#      key with the one it had before: clients pin that key, and a different one means data/server was
-#      lost or not mounted.
+#   4. The new server is asked for its handshake (`ServerCli probe`, a gRPC GetServerInfo call made
+#      inside its container) until it answers, and its identity key is compared with the one it had
+#      before: clients pin that key, and a different one means data/server was lost or not mounted.
 #
 # On the server, under the deploy directory:
 #   .env        passwords and settings. Created on the first deploy with generated secrets, never
@@ -34,8 +39,9 @@
 #   src/        the exported source and the docker build context, replaced wholesale on every deploy.
 #               It has to be separate from data/: on Linux Postgres's data directory is unreadable to
 #               ordinary users, which fails a `docker build` whose context contains it.
+#   proto/      the exported RaindropProto, the build's second context (raindrop_proto); replaced too.
 #   docker-compose.yml, livekit.yaml    copied from the export
-#   docker-compose.override.yml         written by this script; points the build at src/
+#   docker-compose.override.yml         written by this script; points the build at src/ and proto/
 #
 # Refused before anything is touched: a server .env that turns on RAINDROP_DEV_WIPE_DATABASE (it would
 # drop every table on each start) or still has the .env.example database password, a compose
@@ -52,6 +58,8 @@ REMOTE_DIR="${DEPLOY_DIR:-raindrop}"
 REF="HEAD"
 DRY_RUN=false
 ASSUME_YES=false
+PROTO_REF="HEAD"
+PROTO_DIR="${DEPLOY_PROTO_DIR:-}"
 HEALTH_TIMEOUT=120   # seconds to wait for the new server to answer
 CRASH_LOOP_GRACE=20  # seconds of restarting tolerated before giving up early
 
@@ -64,8 +72,10 @@ die()  { fail "$1"; exit 1; }
 usage() {
     cat <<EOF
 Usage: ./deploy.sh [--ref <tag|branch|commit>] [--dry-run] [--yes] [--host <address>] [--user <name>] [--dir <path>]
+                   [--proto-ref <tag|branch|commit>] [--proto-dir <path>]
 
-Deploys the committed state of this repository (HEAD unless --ref says otherwise) to
+Deploys the committed state of this repository (HEAD unless --ref says otherwise), built against the
+committed state of ../RaindropProto (HEAD unless --proto-ref says otherwise), to
 $SSH_USER@$HOST:$REMOTE_DIR. See the comment at the top of this file for what happens there.
 EOF
 }
@@ -78,6 +88,8 @@ while [ $# -gt 0 ]; do
         --host)    value_of "$@"; HOST="$2"; shift 2 ;;
         --user)    value_of "$@"; SSH_USER="$2"; shift 2 ;;
         --dir)     value_of "$@"; REMOTE_DIR="$2"; shift 2 ;;
+        --proto-ref) value_of "$@"; PROTO_REF="$2"; shift 2 ;;
+        --proto-dir) value_of "$@"; PROTO_DIR="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         --yes|-y)  ASSUME_YES=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -92,8 +104,9 @@ REMOTE_DIR="${REMOTE_DIR#\~/}"
 [[ "$REMOTE_DIR" =~ ^/?[A-Za-z0-9._/-]+$ ]]     || die "--dir '$REMOTE_DIR' contains characters other than letters, digits and . _ / -"
 [[ "$REMOTE_DIR" != *..* ]]                     || die "--dir '$REMOTE_DIR' must not contain '..'"
 [[ "$REF" =~ ^[A-Za-z0-9._/@^~-]+$ ]]           || die "--ref '$REF' is not a plain tag, branch or commit name"
+[[ "$PROTO_REF" =~ ^[A-Za-z0-9._/@^~-]+$ ]]     || die "--proto-ref '$PROTO_REF' is not a plain tag, branch or commit name"
 
-for tool in git ssh curl sed; do
+for tool in git ssh sed; do
     command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but was not found on this machine"
 done
 
@@ -108,6 +121,18 @@ BRANCH="$(git -C "$ROOT_DIR" branch --show-current)"
 
 if [ "$SHA" = "$(git -C "$ROOT_DIR" rev-parse HEAD)" ] && [ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]; then
     warn "the working tree has uncommitted changes; they are NOT part of this deploy, only commit $SHORT is"
+fi
+
+# The wire protocol: RaindropServer.Grpc compiles it from the sibling checkout, so it travels too.
+PROTO_DIR="${PROTO_DIR:-$ROOT_DIR/../RaindropProto}"
+git -C "$PROTO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "$PROTO_DIR is not a RaindropProto checkout; clone it next to this repository, or pass --proto-dir"
+[ -f "$PROTO_DIR/raindrop/v1/server.proto" ] || die "$PROTO_DIR does not look like RaindropProto (no raindrop/v1/server.proto)"
+PROTO_SHA="$(git -C "$PROTO_DIR" rev-parse --verify --quiet "$PROTO_REF^{commit}")" \
+    || die "'$PROTO_REF' is not a commit, tag or branch of $PROTO_DIR"
+PROTO_SHORT="$(git -C "$PROTO_DIR" rev-parse --short=7 "$PROTO_SHA")"
+if [ "$PROTO_SHA" = "$(git -C "$PROTO_DIR" rev-parse HEAD)" ] && [ -n "$(git -C "$PROTO_DIR" status --porcelain)" ]; then
+    warn "RaindropProto has uncommitted changes; they are NOT part of this deploy, only commit $PROTO_SHORT is"
 fi
 
 # ---- Talking to the server ---------------------------------------------------------------------------
@@ -213,11 +238,14 @@ EOF
 write_override() {
     cat > docker-compose.override.yml <<'YAML'
 # Written by deploy.sh on every deploy; edits here are overwritten. Builds the server image from the
-# source exported into ./src instead of from the directory holding this file (which also holds data/).
+# source exported into ./src instead of from the directory holding this file (which also holds data/),
+# and the wire protocol from the RaindropProto exported into ./proto.
 services:
   server:
     build:
       context: ./src
+      additional_contexts:
+        raindrop_proto: ./proto
       labels:
         raindrop.deploy: "true"   # lets deploy.sh clean up superseded images without touching others
 YAML
@@ -246,9 +274,10 @@ mode_check() {
 }
 
 mode_deploy() {
-    local sha="$1" node_ip="$2"
+    local sha="$1" node_ip="$2" proto_sha="$3"
     need_docker
     case "$sha" in ""|*[!0-9a-f]*) die "'$sha' is not a commit id" ;; esac
+    case "$proto_sha" in ""|*[!0-9a-f]*) die "'$proto_sha' is not a commit id" ;; esac
 
     mkdir -p "$app"
     cd "$app"
@@ -258,7 +287,7 @@ mode_deploy() {
         exec 9> .deploy.lock
         flock -n 9 || die "another deploy is already running in $app"
     fi
-    trap 'rm -rf "$app/.incoming" "$app/src.new" "$app/.env.new"' EXIT
+    trap 'rm -rf "$app/.incoming" "$app/src.new" "$app/proto.new" "$app/.env.new"' EXIT
 
     local tarball=".incoming/$sha.tar.gz"
     [ -s "$tarball" ] || die "the uploaded source ($tarball) is missing"
@@ -269,6 +298,13 @@ mode_deploy() {
     tar -xzf "$tarball" -C src.new
     [ -f src.new/docker-compose.yml ] && [ -f src.new/ServerCli/Dockerfile ] \
         || die "the uploaded source is not a RaindropServer checkout"
+
+    local proto_tarball=".incoming/proto-$proto_sha.tar.gz"
+    [ -s "$proto_tarball" ] || die "the uploaded wire protocol ($proto_tarball) is missing"
+    rm -rf proto.new
+    mkdir proto.new
+    tar -xzf "$proto_tarball" -C proto.new
+    [ -f proto.new/raindrop/v1/server.proto ] || die "the uploaded wire protocol is not a RaindropProto checkout"
 
     if [ ! -f .env ]; then
         if [ -e data/postgres ]; then
@@ -310,10 +346,12 @@ mode_deploy() {
     fi
 
     say "Installing the new source"
-    rm -rf src.old
+    rm -rf src.old proto.old
     [ -d src ] && mv src src.old
+    [ -d proto ] && mv proto proto.old
     mv src.new src
-    rm -rf src.old
+    mv proto.new proto
+    rm -rf src.old proto.old
     cp src/docker-compose.yml src/livekit.yaml .
     write_override
 
@@ -338,11 +376,25 @@ mode_deploy() {
 # Written only once the new server has answered, so .deployed always names the last release known to
 # work, which is what a rollback wants.
 mode_record() {
-    local sha="$1" ref="$2" now
+    local sha="$1" ref="$2" proto_sha="$3" now
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cd "$app"
-    printf 'sha=%s\nref=%s\ntime=%s\n' "$sha" "$ref" "$now" > .deployed
-    printf '%s %s (%s)\n' "$now" "$sha" "$ref" >> deploy.log
+    printf 'sha=%s\nref=%s\nproto=%s\ntime=%s\n' "$sha" "$ref" "$proto_sha" "$now" > .deployed
+    printf '%s %s (%s) proto %s\n' "$now" "$sha" "$ref" "$proto_sha" >> deploy.log
+}
+
+# Asks the running server for its handshake from inside its own container, as key=value lines. Prints
+# nothing while it is not answering.
+mode_probe() {
+    local cid=""
+    [ -f "$app/docker-compose.yml" ] || return 0
+    cd "$app"
+    cid="$(docker compose ps -q server 2>/dev/null | head -n 1)" || cid=""
+    [ -n "$cid" ] || return 0
+    # Only an image that sets SERVERCLI_HAS_PROBE has the probe command: an older ServerCli would ignore
+    # the argument and try to start a second server inside the container.
+    docker compose exec -T server sh -c \
+        '[ -n "${SERVERCLI_HAS_PROBE:-}" ] && exec dotnet ServerCli.dll probe https://127.0.0.1:5001' 2>/dev/null || true
 }
 
 mode_status() {
@@ -369,6 +421,7 @@ case "$mode" in
     record) mode_record "$@" ;;
     status) mode_status ;;
     logs)   mode_logs ;;
+    probe)  mode_probe ;;
     *)      die "unknown mode '$mode'" ;;
 esac
 REMOTE
@@ -384,8 +437,8 @@ run_remote() {
         <<< "$REMOTE_SCRIPT"
 }
 
-json_field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | head -n 1; }
-server_info() { curl -ksS --max-time 5 "https://$HOST_ADDR:$PORT/api/server/info" 2>/dev/null || true; }
+probe_field() { sed -n "s/^$1=//p" | head -n 1; }
+server_info() { run_remote probe 2>/dev/null || true; }
 
 # ---- Look at the server ------------------------------------------------------------------------------
 
@@ -406,8 +459,11 @@ LAST_GOOD="$(state deployed)"
 
 BEFORE_INFO=""
 if [ "$(state running)" = yes ]; then BEFORE_INFO="$(server_info)"; fi
-BEFORE_KEY="$(printf '%s' "$BEFORE_INFO" | json_field identityKey)"
-BEFORE_FINGERPRINT="$(printf '%s' "$BEFORE_INFO" | json_field tlsFingerprint)"
+BEFORE_KEY="$(printf '%s\n' "$BEFORE_INFO" | probe_field identityKey)"
+BEFORE_FINGERPRINT="$(printf '%s\n' "$BEFORE_INFO" | probe_field tlsFingerprint)"
+if [ "$(state running)" = yes ] && [ -z "$BEFORE_KEY" ]; then
+    warn "the running server did not say its identity key (it may be a release from before the probe command), so this deploy cannot check that the new one comes back with the same key. Compare the 'Server identity' line in its log by hand afterwards."
+fi
 
 NODE_IP="127.0.0.1"
 if [[ "$HOST_ADDR" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then NODE_IP="$HOST_ADDR"; fi
@@ -419,6 +475,7 @@ log "Plan"
 WHAT="$REF"
 if [ "$REF" = HEAD ] && [ -n "$BRANCH" ]; then WHAT="HEAD, branch $BRANCH"; fi
 printf '  %-10s %s  "%s"  (%s)\n' "deploy" "$SHORT" "$SUBJECT" "$WHAT"
+printf '  %-10s RaindropProto %s  "%s"\n' "protocol" "$PROTO_SHORT" "$(git -C "$PROTO_DIR" log -1 --format=%s "$PROTO_SHA")"
 printf '  %-10s %s:%s\n' "to" "$TARGET" "$REMOTE_DIR"
 if [ -n "$LAST_GOOD" ]; then
     printf '  %-10s %s (the last deploy that came up healthy)\n' "replaces" "${LAST_GOOD:0:7}"
@@ -455,15 +512,18 @@ fi
 # ---- Deploy ------------------------------------------------------------------------------------------
 
 STARTED=$SECONDS   # after the prompt, so the time reported below is the deploy's and not how long you thought
-log "Uploading $SHORT"
+log "Uploading $SHORT, and RaindropProto $PROTO_SHORT"
 # The directory is resolved against $HOME exactly as REMOTE_SCRIPT does, so both name the same place
 # whatever directory the SSH session happens to start in.
 git -C "$ROOT_DIR" archive --format=tar.gz "$SHA" \
     | ssh "${SSH_OPTS[@]}" "$TARGET" \
         "d=$(sq "$REMOTE_DIR"); case \$d in /*) ;; *) d=\$HOME/\$d ;; esac; mkdir -p \"\$d/.incoming\" && cat > \"\$d/.incoming/$SHA.tar.gz\""
+git -C "$PROTO_DIR" archive --format=tar.gz "$PROTO_SHA" \
+    | ssh "${SSH_OPTS[@]}" "$TARGET" \
+        "d=$(sq "$REMOTE_DIR"); case \$d in /*) ;; *) d=\$HOME/\$d ;; esac; mkdir -p \"\$d/.incoming\" && cat > \"\$d/.incoming/proto-$PROTO_SHA.tar.gz\""
 
 log "Building and restarting on $HOST_ADDR"
-if ! run_remote deploy "$SHA" "$NODE_IP"; then
+if ! run_remote deploy "$SHA" "$NODE_IP" "$PROTO_SHA"; then
     fail "the deploy stopped on the server (see above). The running server was left alone unless the output reached 'Starting the stack'."
     exit 1
 fi
@@ -474,7 +534,7 @@ DEADLINE=$((SECONDS + HEALTH_TIMEOUT))
 GRACE_ENDS=$((SECONDS + CRASH_LOOP_GRACE))
 while [ "$SECONDS" -lt "$DEADLINE" ]; do
     AFTER_INFO="$(server_info)"
-    if [[ "$AFTER_INFO" == *'"identityKey"'* ]]; then HEALTHY=true; break; fi
+    if [[ "$AFTER_INFO" == *identityKey=?* ]]; then HEALTHY=true; break; fi
 
     STATUS="$(run_remote status 2>/dev/null || true)"
     RESTARTS="$(printf '%s\n' "$STATUS" | sed -n 's/.*restarts=\([0-9]*\).*/\1/p' | head -n 1)"
@@ -501,8 +561,8 @@ if ! $HEALTHY; then
     exit 1
 fi
 
-AFTER_KEY="$(printf '%s' "$AFTER_INFO" | json_field identityKey)"
-AFTER_FINGERPRINT="$(printf '%s' "$AFTER_INFO" | json_field tlsFingerprint)"
+AFTER_KEY="$(printf '%s\n' "$AFTER_INFO" | probe_field identityKey)"
+AFTER_FINGERPRINT="$(printf '%s\n' "$AFTER_INFO" | probe_field tlsFingerprint)"
 
 # Checked before anything is called a success or recorded: a server that came back as a different
 # server has not been deployed, whatever it answers, and must not become the "last good" release.
@@ -514,7 +574,7 @@ if [ -n "$BEFORE_KEY" ] && [ "$BEFORE_KEY" != "$AFTER_KEY" ]; then
     exit 1
 fi
 
-run_remote record "$SHA" "$REF"
+run_remote record "$SHA" "$REF" "$PROTO_SHA"
 ok "Deployed $SHORT to $TARGET in $((SECONDS - STARTED))s"
 
 echo
