@@ -318,6 +318,9 @@ an interactive console on the main thread:
 | `events` | Shows how many clients have the [event stream](events.md) open |
 | `voice` | Lists who is in which [voice call](voice.md), and whether they are connecting, muted or deafened |
 | `attachments` | Shows the [attachment](attachments.md) folder, how many files are stored and how much room they take, and uploads waiting to be sent |
+| `reports` | Shows the most recently [reported messages](messages.md#reporting-an-encrypted-message) (the latest 20) |
+| `purge-plaintext` | Deletes every message stored before end-to-end encryption, and the deleted-message archive, after a typed `yes` |
+| `help` | Lists these commands |
 | `quit` | Shuts the server down gracefully |
 
 `grant`/`revoke` go through the **running server's own `RoleService`** rather than writing to the

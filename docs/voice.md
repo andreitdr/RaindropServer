@@ -342,7 +342,10 @@ For a real server:
   `rtc.use_external_ip: true` or `--node-ip`, and keep port 7880 private.
 - Open **UDP 7882** (media) and **TCP 7881** (fallback) to the internet.
 
-Packaging Raindrop and LiveKit together in one Docker deployment is planned.
+Raindrop and LiveKit are already packaged together for Docker: `docker-compose.yml` runs a
+`livekit` service from [`livekit.yaml`](../livekit.yaml) and the `server` service depends on it, and
+[`deploy.sh`](deployment.md) carries both to a host. See
+[Local development & Docker](local-development-and-docker.md#livekit-for-voice-channels).
 
 ### When a participant joins and is removed without a connection
 

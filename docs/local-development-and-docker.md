@@ -75,7 +75,7 @@ docker compose up -d server
 `depends_on` brings up `postgres` (waiting for it to report healthy) and `livekit` automatically, so
 this one command is enough for a working server with voice channels. The server's own TLS certificate
 and identity key — which must survive restarts, see
-[Transport security](transport-security.md#two-consequences) — are bind-mounted to `./data/server`.
+[Transport security](transport-security.md#consequences) — are bind-mounted to `./data/server`.
 
 To run against SQLite instead (no database container at all), override the `server` service's
 `environment` in a `docker-compose.override.yml` or on the command line:
@@ -215,7 +215,7 @@ Configure the running container entirely through the `RAINDROP_*` environment va
 Two things that matter for containers specifically, both covered in more depth elsewhere:
 
 - **The TLS certificate must live on a mounted volume** (see
-  [Transport security](transport-security.md#two-consequences)) — an ephemeral container filesystem
+  [Transport security](transport-security.md#consequences)) — an ephemeral container filesystem
   would regenerate it, and a new fingerprint, on every restart.
 - **Shutdown is bounded to five seconds** by `ServerHostOptions.ShutdownTimeout` (see
   [Architecture overview](architecture-overview.md#shutdown)), well inside the ten seconds `docker
