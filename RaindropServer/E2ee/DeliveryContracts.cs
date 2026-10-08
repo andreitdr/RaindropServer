@@ -1,7 +1,7 @@
 namespace RaindropServer.E2ee;
 
-// The MLS delivery service's wire contracts. Every MLS message is opaque bytes: base64 in JSON,
-// binary in MessagePack. Groups are named by their channel; the MLS group id is the channel's UUID
+// The MLS delivery service's contracts. Every MLS message is opaque bytes, protobuf `bytes` on the
+// wire. Groups are named by their channel; the MLS group id is the channel's UUID
 // as 16 big-endian bytes.
 
 /// <param name="UserId">The device's owner.</param>

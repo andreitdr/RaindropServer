@@ -155,7 +155,7 @@ public static class PermissionNames
 
             if (match.Name is null)
                 throw ApiException.BadRequest("invalid_permission",
-                    $"'{name}' is not a permission on this server. Ask GET /api/roles/permissions for the list.");
+                    $"'{name}' is not a permission on this server. RoleService.ListPermissions has the list.");
 
             permissions |= match.Flag;
         }

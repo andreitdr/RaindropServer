@@ -12,10 +12,18 @@ public sealed class EventOptions
     public int MaximumPendingEvents { get; set; } = 256;
 
     /// <summary>
-    /// How often the server pings an idle connection, so that proxies and NAT boxes do not drop it
-    /// and a client that vanished is noticed.
+    /// How often a client sends a heartbeat on its stream, as told in <see cref="ReadyEvent"/>. Short
+    /// enough that proxies and NAT boxes keep an idle stream open.
     /// </summary>
-    public TimeSpan KeepAliveInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// How long a stream may go without a heartbeat before the client is taken to be gone and the
+    /// stream is closed as <see cref="EventCloseReason.ConnectionLost"/>. This is what makes presence
+    /// honest: a client that was killed rather than closed reads as offline this long afterwards, not
+    /// when its session lapses. Several intervals, so one late heartbeat is not a disconnection.
+    /// </summary>
+    public TimeSpan HeartbeatTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// How often an open connection renews its session. An open stream is a client that is still
@@ -23,7 +31,4 @@ public sealed class EventOptions
     /// a request. Capped at half the session idle timeout, whatever this says.
     /// </summary>
     public TimeSpan SessionRenewalInterval { get; set; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>How long a closing handshake may take before the connection is simply dropped.</summary>
-    public TimeSpan CloseTimeout { get; set; } = TimeSpan.FromSeconds(2);
 }

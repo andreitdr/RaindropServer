@@ -8,7 +8,7 @@ namespace RaindropServer.Channels;
 /// </summary>
 /// <remarks>
 /// A module is deliberately tiny. The interesting work of a channel type — sending messages, joining
-/// a call — is its own service and its own endpoints; this is only the seam the shared channel
+/// a call — is its own service and its own calls; this is only the seam the shared channel
 /// lifecycle needs.
 /// </remarks>
 public interface IChannelModule

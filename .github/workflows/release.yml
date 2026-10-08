@@ -26,11 +26,21 @@ jobs:
           - { name: macos, os: macos-latest, rid: osx-arm64 }
           - { name: windows, os: windows-latest, rid: win-x64 }
     runs-on: ${{ matrix.os }}
+    # Same side-by-side layout as ci.yml: the server compiles ../RaindropProto (needs PROTO_REPO_TOKEN
+    # when that repo is private).
     defaults:
       run:
         shell: bash # Windows defaults to PowerShell
+        working-directory: RaindropServer
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: RaindropServer
+      - uses: actions/checkout@v4
+        with:
+          repository: andreitdr/RaindropProto
+          token: ${{ secrets.PROTO_REPO_TOKEN || github.token }}
+          path: RaindropProto
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -46,7 +56,7 @@ jobs:
           mkdir -p dist
           name="RaindropServer-$VERSION-${{ matrix.rid }}"
           if [ "${{ matrix.name }}" = "windows" ]; then
-            (cd publish && 7z a -tzip "$GITHUB_WORKSPACE/dist/$name.zip" RaindropServer)
+            (cd publish && 7z a -tzip "$GITHUB_WORKSPACE/RaindropServer/dist/$name.zip" RaindropServer)
           else
             # tar keeps the executable bit on the server launcher.
             tar -czf "dist/$name.tar.gz" -C publish RaindropServer
@@ -55,7 +65,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.name }}
-          path: dist/*
+          path: RaindropServer/dist/*
 
   release:
     name: Publish GitHub release

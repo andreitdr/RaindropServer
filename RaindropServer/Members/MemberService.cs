@@ -4,7 +4,7 @@ namespace RaindropServer.Members;
 
 /// <summary>
 /// The server's roster: who is a member, and where each of them is right now. Every rule lives here,
-/// so the endpoint stays thin and the database driver stays dumb.
+/// so the service serving it stays thin and the database driver stays dumb.
 /// </summary>
 /// <remarks>
 /// There is no membership table — a member <em>is</em> an active user

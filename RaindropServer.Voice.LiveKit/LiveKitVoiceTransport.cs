@@ -17,7 +17,7 @@ public sealed class LiveKitVoiceTransport : IVoiceTransport
     public const string TransportName = "livekit";
 
     /// <summary>Where clients open LiveKit's signalling connection on this server.</summary>
-    public const string SignalPath = "/api/channels/voice/signal";
+    public const string SignalPath = VoiceSignalRoutes.Path;
 
     private readonly LiveKitJwt _jwt;
     private readonly LiveKitRoomClient _rooms;

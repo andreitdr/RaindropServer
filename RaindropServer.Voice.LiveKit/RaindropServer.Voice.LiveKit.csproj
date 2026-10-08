@@ -11,10 +11,26 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
-  <!-- No LiveKit SDK: the access tokens are plain HS256 JWTs and the room API is Twirp over JSON, both
-       small enough to own outright rather than pull a protobuf stack in for. -->
+  <!-- No LiveKit SDK: the access tokens are plain HS256 JWTs, and the room API is Twirp in its binary
+       protobuf form, over the handful of RoomService messages vendored in Protos/. -->
   <ItemGroup>
     <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos\livekit_room_service.proto" GrpcServices="None" Access="Internal" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RaindropServer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.36.2" />
+    <PackageReference Include="Grpc.Tools" Version="2.84.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
   </ItemGroup>
 
 </Project>

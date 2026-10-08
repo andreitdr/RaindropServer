@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -174,6 +175,38 @@ public class DeliveryServiceTests
     }
 }
 
+public class SessionStoreTests
+{
+    /// <summary>A clock the test moves by hand.</summary>
+    private sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = now;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    /// <summary>
+    /// Presence no longer reads sessions, so nothing walks them as a side effect: a lapsed one is only
+    /// forgotten by the sweep, or by its token being used again.
+    /// </summary>
+    [Fact]
+    public void The_sweep_forgets_lapsed_sessions_and_keeps_live_ones()
+    {
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var options = new UserOptions { SessionIdleTimeout = TimeSpan.FromMinutes(10) };
+        var sessions = new InMemorySessionStore(options, clock);
+
+        var lapsed = sessions.Create(Guid.NewGuid(), "gone");
+        clock.Now += TimeSpan.FromMinutes(6);
+        var live = sessions.Create(Guid.NewGuid(), "here");
+        clock.Now += TimeSpan.FromMinutes(6);
+
+        Assert.Equal(1, sessions.RemoveExpired());
+        Assert.False(sessions.IsActive(lapsed.Token));
+        Assert.True(sessions.IsActive(live.Token));
+        Assert.Equal(0, sessions.RemoveExpired());
+    }
+}
+
 public class DeviceServiceTests
 {
     private static async Task<(DeviceService Service, IUserStore Users, InMemorySessionStore Sessions)> CreateAsync()
@@ -271,6 +304,11 @@ public class LiveKitRoomClientTests
         private readonly HttpListener _listener = new();
 
         public StubLiveKit(HttpStatusCode status, string body)
+            : this(status, Encoding.UTF8.GetBytes(body), "application/json")
+        {
+        }
+
+        public StubLiveKit(HttpStatusCode status, byte[] body, string contentType)
         {
             var port = FreePort();
             Url = $"http://127.0.0.1:{port}";
@@ -292,10 +330,16 @@ public class LiveKitRoomClientTests
                     }
 
                     Calls.Add(context.Request.Url!.AbsolutePath);
+                    RequestTypes.Add(context.Request.ContentType ?? "");
+                    using (var received = new MemoryStream())
+                    {
+                        await context.Request.InputStream.CopyToAsync(received);
+                        Requests.Add(received.ToArray());
+                    }
+
                     context.Response.StatusCode = (int)status;
-                    context.Response.ContentType = "application/json";
-                    var bytes = Encoding.UTF8.GetBytes(body);
-                    await context.Response.OutputStream.WriteAsync(bytes);
+                    context.Response.ContentType = contentType;
+                    await context.Response.OutputStream.WriteAsync(body);
                     context.Response.Close();
                 }
             });
@@ -304,6 +348,10 @@ public class LiveKitRoomClientTests
         public string Url { get; }
 
         public List<string> Calls { get; } = [];
+
+        public List<string> RequestTypes { get; } = [];
+
+        public List<byte[]> Requests { get; } = [];
 
         public void Dispose()
         {
@@ -332,6 +380,41 @@ public class LiveKitRoomClientTests
 
     private static readonly Guid Channel = Guid.Parse("d592c66e-d5fe-47df-a103-5e77e77eefa9");
     private static readonly string Member = Guid.Parse("f3803c9b-723c-459b-a9d4-01653bf8d2b5").ToString("D");
+
+    /// <summary>
+    /// The room API is Twirp's binary form: the request goes out as protobuf with LiveKit's field
+    /// numbers, and the answer is read back from protobuf — dropping anybody already disconnected.
+    /// </summary>
+    [Fact]
+    public async Task Calls_are_protobuf_both_ways()
+    {
+        var answer = new Voice.LiveKit.Protocol.ListParticipantsResponse
+        {
+            Participants =
+            {
+                new Voice.LiveKit.Protocol.ParticipantInfo
+                {
+                    Identity = Member,
+                    State = Voice.LiveKit.Protocol.ParticipantInfo.Types.State.Active,
+                    Permission = new Voice.LiveKit.Protocol.ParticipantPermission { CanPublish = true }
+                },
+                new Voice.LiveKit.Protocol.ParticipantInfo
+                {
+                    Identity = Guid.NewGuid().ToString("D"),
+                    State = Voice.LiveKit.Protocol.ParticipantInfo.Types.State.Disconnected
+                }
+            }
+        };
+        using var livekit = new StubLiveKit(HttpStatusCode.OK, answer.ToByteArray(), "application/protobuf");
+        using var client = Client(livekit);
+
+        var participants = await client.ListParticipantsAsync("raindrop-" + Channel, default);
+
+        Assert.Equal([new LiveKitParticipant(Member, "ACTIVE", true)], participants);
+        Assert.Equal(["application/protobuf"], livekit.RequestTypes);
+        Assert.Equal("raindrop-" + Channel,
+            Voice.LiveKit.Protocol.ListParticipantsRequest.Parser.ParseFrom(livekit.Requests[0]).Room);
+    }
 
     [Fact]
     public async Task A_participant_already_gone_is_not_an_error()

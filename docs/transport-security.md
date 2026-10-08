@@ -1,7 +1,11 @@
 # Transport security
 
-Everything is TLS. `ServerHost` configures Kestrel with the server's certificate and enables both
-HTTP/1.1 and HTTP/2, negotiated by ALPN.
+Everything is TLS, always: there is no plain-HTTP mode. `ServerHost` configures Kestrel with the
+server's certificate and enables both HTTP/2 and HTTP/1.1, negotiated by ALPN per connection.
+- **HTTP/2** carries everything a client says: every [gRPC](grpc-services.md) call and the event stream,
+  multiplexed over one connection.
+- **HTTP/1.1** remains for the voice signalling relay's WebSocket, which LiveKit's client SDK opens as an
+  ordinary upgrade (dart:io cannot open a WebSocket over HTTP/2).
 
 ## Protocol versions
 
@@ -37,7 +41,7 @@ The fingerprint is:
 
 - printed at server startup,
 - available from the `fingerprint` console command (see [Configuration](configuration.md#the-owner-console)),
-- and served by `GET /api/server/info`.
+- and served by `ServerService.GetServerInfo`, the one gRPC call that needs no session.
 
 ## The server identity key: changing the certificate without breaking pins
 
@@ -45,16 +49,16 @@ A certificate pinned on first use would lock every client out the moment it chan
 therefore also keeps a long-lived **identity key**, an ECDSA P-256 key stored in `server-identity.key`
 (owner-only permissions, generated on first start, path set by `tls.identityKeyPath`). Its
 [`ServerIdentityKey`](../RaindropServer/Security/ServerIdentityKey.cs) signs the fingerprint of whatever
-certificate the server presents. `GET /api/server/info` returns:
+certificate the server presents. `GetServerInfo` returns:
 
 | Field | Contents |
 |---|---|
-| `identityKey` | Base64 of the uncompressed public point (`0x04‖X‖Y`, 65 bytes) |
-| `tlsBindingSignature` | Base64 of an ECDSA-SHA256 signature, `r‖s` (64 bytes), over `"raindrop/tls-binding/v1\n"` + the fingerprint in lower-case hex without separators |
+| `identity_key` | The uncompressed public point (`0x04‖X‖Y`, 65 bytes) |
+| `tls_binding_signature` | An ECDSA-SHA256 signature, `r‖s` (64 bytes), over `"raindrop/tls-binding/v1\n"` + the fingerprint in lower-case hex without separators |
 | `capabilities` | Includes `tls.identity-binding.v1` when the above are present |
 
 A client pins the identity key next to the fingerprint. If the fingerprint later stops matching, the
-client makes one unauthenticated request to `/api/server/info` and accepts the new certificate only if
+client makes one unauthenticated `GetServerInfo` call and accepts the new certificate only if
 the pinned identity key signed the certificate that the TLS handshake actually presented. Otherwise the
 mismatch stands.
 
@@ -67,10 +71,9 @@ replace `raindrop.pfx` and restart. The server re-signs the new fingerprint at s
 1. **The identity key must persist, and should be backed up.** Losing it makes the server a stranger
    to every client, just as losing the certificate did before identity keys existed. The certificate
    itself can now be replaced. In the Docker setup, both files live on a mounted volume.
-2. **Nothing sensitive goes in a URL.** Lookups that would naturally be GETs with query parameters
-   (`status`, `username-available`, `lookup`) are instead POSTs carrying a body, so UUIDs and
-   usernames stay inside the encrypted request body rather than in a URL that tends to end up in
-   access logs.
+2. **Nothing sensitive goes in a URL or a header.** Every id, username and password travels inside a
+   protobuf request body. The only thing in metadata is the session token (`authorization`), and the
+   only URL that carries a credential is the voice relay's, which is LiveKit's short-lived token.
 
 ## LiveKit
 
@@ -95,7 +98,12 @@ decrypt. See [Voice](voice.md#end-to-end-encrypted-calls).
 
 ## Configuration knobs
 
-Set `tls.enabled` to `false` only when a reverse proxy terminates TLS in front of the server, and
-listen on `http://` in that case — an `https://` URL with TLS switched off is treated as a startup
-configuration error rather than a silent downgrade to plaintext. See [Configuration](configuration.md)
-for the full `tls` section and the `RAINDROP_TLS_*` environment variable overrides.
+TLS cannot be switched off. Clients pin *this server's* certificate (or one its identity key vouches
+for), and speak gRPC over HTTP/2 to it, so TLS has to end here:
+- `tls.enabled: false` (or `RAINDROP_TLS_ENABLED=false`) is a startup error.
+- So is an `http://` listening URL.
+- A reverse proxy in front of the server must pass TLS through untouched (TCP or SNI passthrough)
+  rather than terminate it.
+
+See [Configuration](configuration.md) for the full `tls` section and the `RAINDROP_TLS_*` environment
+variable overrides.

@@ -5,7 +5,7 @@ namespace RaindropServer.Users;
 /// <summary>
 /// The whole user lifecycle on one server: claiming a username, logging in and out, changing
 /// credentials, and leaving — with or without keeping your data. Every rule lives here, so the
-/// endpoints stay thin and the database driver stays dumb.
+/// services serving it stay thin and the database driver stays dumb.
 /// </summary>
 public sealed class UserService
 {

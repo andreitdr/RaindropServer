@@ -444,7 +444,7 @@ public sealed class AttachmentService : IMessageAttachments
 
             total += read;
             if (total > limit)
-                throw new ApiException(StatusCodes.PayloadTooLarge, "chunk_too_large",
+                throw ApiException.TooLarge("chunk_too_large",
                     $"A chunk may carry at most {limit} more bytes of this upload.");
 
             await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
@@ -464,10 +464,5 @@ public sealed class AttachmentService : IMessageAttachments
         {
             Console.Error.WriteLine($"[raindrop] an attachment listener failed: {ex.Message}");
         }
-    }
-
-    private static class StatusCodes
-    {
-        public const int PayloadTooLarge = 413;
     }
 }

@@ -2,7 +2,7 @@ namespace RaindropServer.Users;
 
 // ── Shared shapes ────────────────────────────────────────────────────────────
 
-/// <summary>The caller's own account, returned by every endpoint that establishes or inspects a session.</summary>
+/// <summary>The caller's own account, returned by every call that establishes or inspects a session.</summary>
 /// <param name="UserId">The UUID this user is known by on this server.</param>
 /// <param name="Username">The username, unique on this server.</param>
 /// <param name="State">One of <c>active</c>, <c>left_preserved</c>, <c>erased</c>.</param>

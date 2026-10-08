@@ -54,14 +54,12 @@ public interface ISessionStore
     void RenameUser(Guid userId, string username);
 
     /// <summary>
-    /// The UUIDs holding at least one session that has not lapsed — which is to say, who is logged
-    /// in right now.
+    /// Forgets every session that has lapsed, and says how many. A lapsed session is refused anyway;
+    /// this is housekeeping, so a client that vanished without logging out does not hold memory until
+    /// the next restart. <see cref="SessionSweepService"/> calls it on a timer.
     /// </summary>
     /// <remarks>
-    /// The whole set in one call rather than a per-user question, because the only caller is a
-    /// roster asking about every member at once (see <c>Members/SessionPresenceTracker</c>). The
-    /// presence <em>meaning</em> of the answer is deliberately not this interface's business: it
-    /// reports sessions, and something else decides what a session implies.
+    /// The default forgets nothing, for a store that expires sessions by itself (or an older one).
     /// </remarks>
-    IReadOnlySet<Guid> ActiveUserIds();
+    int RemoveExpired() => 0;
 }

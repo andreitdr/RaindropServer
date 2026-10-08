@@ -9,7 +9,7 @@ namespace RaindropServer.Channels.Text;
 /// </summary>
 /// <param name="MessageId">The id to pass back when deleting it.</param>
 /// <param name="ChannelId">The text channel it belongs to.</param>
-/// <param name="AuthorId">The UUID of whoever wrote it — resolve it with <c>POST /api/users/lookup</c>.</param>
+/// <param name="AuthorId">The UUID of whoever wrote it — resolve it with <c>UserService.LookupUser</c>.</param>
 /// <param name="Content">The text, or null once the message has been deleted.</param>
 /// <param name="SentAtUtc">When the server accepted it; what the ordering is by.</param>
 /// <param name="Deleted">Whether this is a tombstone the client should render as a removed message.</param>
@@ -39,7 +39,7 @@ public record ChannelMessage(
     IReadOnlyList<MessageAttachment>? Attachments = null);
 
 /// <summary>An encrypted file a message carries, as far as the server can describe it.</summary>
-/// <param name="AttachmentId">What to pass to <c>POST /api/attachments/download</c>.</param>
+/// <param name="AttachmentId">What to pass to <c>AttachmentService.Download</c>.</param>
 /// <param name="Kind"><c>file</c>, or <c>thumbnail</c> for a preview of another file in the same message.</param>
 /// <param name="Extension">
 /// The extension the sender declared, lower case without the dot; empty for none. A client compares it
@@ -65,7 +65,7 @@ public record SendMessageRequest(Guid ChannelId, string Content);
 /// channel's group, in its current epoch.
 /// </param>
 /// <param name="AttachmentIds">
-/// Uploads to send with the message, finished with <c>POST /api/attachments/uploads/complete</c>, in
+/// Uploads to send with the message, finished with <c>AttachmentService.CompleteUpload</c>, in
 /// the order the message lists them. Each must have been uploaded by the caller for this channel.
 /// </param>
 public record SendEncryptedMessageRequest(Guid ChannelId, byte[] Message, IReadOnlyList<Guid>? AttachmentIds = null);

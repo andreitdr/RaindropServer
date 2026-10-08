@@ -1,48 +1,44 @@
-# Wire formats
+# Wire format
 
-Request and response bodies are encoded by an `IPayloadCodec`
-([`RaindropServer/Payloads/`](../RaindropServer/Payloads/)), negotiated per request from the
-`Content-Type` and `Accept` headers:
+There is one: **protobuf over gRPC**, defined in [RaindropProto](../../RaindropProto/README.md)
+(`raindrop/v1/*.proto`). Every request, response, event and error a client sees is a protobuf message,
+carried over HTTP/2 inside TLS 1.3. There is no JSON API, and no MessagePack either; the server once
+negotiated both, and both are gone.
 
-| Format | Content type | Notes |
+What the encoding looks like is RaindropProto's business; its
+[conventions](../../RaindropProto/docs/conventions.md) set the rules both sides follow. In summary:
+
+- **UUIDs travel as canonical lower-case strings.** Device certificates and attestations sign ids as
+  text, so the exact text matters.
+- **Times are `google.protobuf.Timestamp`.** The server reads its stores' times as UTC (`Wire.Time`).
+- **Opaque crypto blobs are `bytes`.** That covers MLS messages, certificates, signatures, backups and
+  ciphertext hashes. The server stores and relays them without parsing them, apart from the MLS
+  cleartext framing it does read ([E2EE](e2ee.md)).
+- **Open sets stay strings, closed sets are enums.**
+  - Strings: permissions, channel types, voice leave reasons, transport names, capabilities and
+    plugin event types. A plugin or a newer build can extend these, and a client ignores what it does
+    not know.
+  - Enums: presence, user state, role kind, attachment kind and upload state. Each has an
+    `*_UNSPECIFIED = 0` that an unknown value decodes to.
+- **Errors are statuses, not bodies.** See [gRPC services](grpc-services.md#errors).
+- **Events are one `oneof`.** See [Events](events.md).
+
+## What is not protobuf, and why
+
+Three things outside the client protocol are not protobuf. Each is fixed by a format someone else owns:
+
+| What | Encoding | Why |
 |---|---|---|
-| JSON | `application/json` | The default, and what curl sends when you say nothing. |
-| MessagePack | `application/x-msgpack` | Binary; what a real client should use. |
+| Voice signalling relay (`/api/channels/voice/signal`) | LiveKit's WebSocket protocol, protobuf inside | LiveKit's client SDK speaks it; Raindrop forwards it unread |
+| Twirp **errors** from the LiveKit sidecar | JSON `{"code","msg"}` | the Twirp spec writes errors as JSON whatever the request was; requests and answers are binary protobuf |
+| LiveKit access tokens | JWT (base64url JSON) | that is what a JWT is |
 
-The two are interchangeable in both directions — a request can arrive as JSON and be answered in
-MessagePack — and error bodies (`{ "error", "message" }`) follow the same negotiation.
-`GET /api/server/info` advertises which formats a given server supports, so a client can check before
-committing to one.
+`raindrop.json`, the owner's configuration file, is JSON too, but it is a file on disk, not traffic.
 
-The same negotiation picks the format of the [event stream](events.md): `Accept` on the WebSocket
-upgrade decides it, and JSON is sent in text frames, MessagePack in binary ones. A codec says which it
-is through `IPayloadCodec.IsBinary`, and `Encode<T>` encodes a value on its own — no `HttpResponse`
-involved — so one event is encoded once per format however many connections hear it. JSON uses the
-same web defaults (`JsonSerializerOptions.Web`) as response bodies, so an event is spelled exactly like
-the same object in a response.
+## Inside an encrypted message
 
-## MessagePack specifics
-
-MessagePack is serialized **contractless**, so the C# request/response records stay plain records with
-no serialization attributes. The trade-off: binary keys are the property names verbatim (`UserId`)
-where JSON camelCases them (`userId`). A .NET client sharing the contract types never notices; a
-client written in another language needs to know this to decode the binary form correctly.
-
-Typeless resolvers are deliberately not used, and deserialization runs under
-`MessagePackSecurity.UntrustedData` — i.e. it's hardened against a malicious payload trying to trigger
-arbitrary type construction.
-
-## Is the binary format actually worth it?
-
-Worth being honest about the payoff, per the project's own design notes: on the small objects user
-management deals with, MessagePack saves only about 15% of the bytes — GUIDs dominate the payload
-size, and the longer PascalCase keys eat into the gain. The wins that actually matter are:
-
-- skipping text parsing entirely,
-- HTTP/2 multiplexing every call over one connection, and
-- headroom for message history and voice metadata, where payloads are numeric and repetitive and
-  binary pulls far ahead of JSON.
-
-`RaindropServer` currently only uses JSON by default (`ApiClient` in the Flutter client sends
-`application/json` unconditionally) — MessagePack is fully implemented server-side but not yet adopted
-client-side; see the client's [wire format doc](../../RaindropClient/docs/wire-format.md).
+The plaintext of an end-to-end encrypted message is the client's business; the server never sees it.
+It is protobuf as well: RaindropProto's `payload.proto`, `MessagePayload`, behind a `0x02` version byte.
+Older clients wrote MessagePack, and clients still read that. Neither changes anything here: the
+server stores the MLS ciphertext around it and checks attestations, whose bytes are built from fields,
+not from this encoding ([Messages](messages.md)).

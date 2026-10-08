@@ -7,7 +7,7 @@ namespace RaindropServer.Channels.Voice;
 /// (<paramref name="ChannelId"/>, <paramref name="UserId"/>) rather than applying a change.
 /// </summary>
 /// <param name="ChannelId">The voice channel whose call they are in.</param>
-/// <param name="UserId">The member; resolve a name through <c>POST /api/users/lookup</c>.</param>
+/// <param name="UserId">The member; resolve a name through <c>UserService.LookupUser</c>.</param>
 /// <param name="SelfMute">They muted their own microphone.</param>
 /// <param name="SelfDeaf">They stopped hearing the call; implies <paramref name="SelfMute"/>.</param>
 /// <param name="ServerMute">A moderator muted them for everyone.</param>

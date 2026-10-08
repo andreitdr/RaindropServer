@@ -300,7 +300,14 @@ public sealed record ServerConfig
     private void ValidateTlsFiles(ConfigurationReport report)
     {
         if (!Tls.Enabled)
+        {
+            report.Error("enabled",
+                "is false, but this server can no longer run without TLS: clients pin its own certificate and speak " +
+                "gRPC over HTTP/2 to it, so TLS has to end here.",
+                "Remove the setting (or set it to true). A reverse proxy in front of the server must pass TLS through " +
+                "rather than terminate it.");
             return;
+        }
 
         if (report.Require("certificatePath", Tls.CertificatePath, "is required when TLS is enabled."))
             ValidateKeyFile(report, "certificatePath", ResolvePath(Tls.CertificatePath), generated: true);
@@ -493,8 +500,7 @@ public sealed record ServerConfig
                 : SslProtocols.Tls13
         };
 
-        if (Tls.Enabled)
-            options.Certificate = ServerCertificate.LoadOrCreate(
+        options.Certificate = ServerCertificate.LoadOrCreate(
                 ResolvePath(Tls.CertificatePath),
                 string.IsNullOrEmpty(Tls.CertificatePassword) ? null : Tls.CertificatePassword,
                 CertificateHostNames());
@@ -848,7 +854,9 @@ public sealed record ServerConfig
 }
 
 /// <param name="Enabled">
-/// Whether the server terminates TLS itself. Turn it off only when a reverse proxy does it instead.
+/// Must be true. Kept so an older raindrop.json still reads, and refused when false: clients pin this
+/// server's own certificate and speak gRPC over HTTP/2 to it, so TLS always ends here. A reverse proxy in
+/// front has to pass TLS through untouched.
 /// </param>
 /// <param name="CertificatePath">
 /// The PKCS#12 (.pfx) file to present, relative to the executable. Generated as a self-signed
@@ -914,7 +922,7 @@ public sealed record ChannelConfig(
 
 /// <param name="DefaultMemberPermissions">
 /// What the built-in <c>everyone</c> role is created with on a server that has never had one, as
-/// permission names — ask <c>GET /api/roles/permissions</c> for the list this build understands.
+/// permission names — ask <c>RoleService.ListPermissions</c> for the list this build understands.
 /// Left out, a new member may see channels, post in them, and create channels. Only a seed: once the
 /// role exists, changing this does not reach back and overwrite what administrators have made it.
 /// </param>

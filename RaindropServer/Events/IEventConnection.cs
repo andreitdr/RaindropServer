@@ -1,13 +1,12 @@
-using RaindropServer.Payloads;
 using RaindropServer.Users;
 
 namespace RaindropServer.Events;
 
 /// <summary>
-/// One client listening for events, whatever carries them. The WebSocket stream is the transport this
-/// server ships (<c>Events/WebSockets/</c>); another — server-sent events, a push gateway — is added by
-/// implementing this and registering its connections with <see cref="IEventConnectionRegistry"/>, and
-/// nothing that publishes has to change.
+/// One client listening for events, whatever carries them. The gRPC event stream is the transport this
+/// server ships (<c>RaindropServer.Grpc</c>); another — a push gateway, say — is added by implementing
+/// this and registering its connections with <see cref="IEventConnectionRegistry"/>, and nothing that
+/// publishes has to change.
 /// </summary>
 /// <remarks>
 /// Implementations must not block in either method: they are called from inside a publish, on the
@@ -25,17 +24,34 @@ public interface IEventConnection
     /// </summary>
     UserSession Session { get; }
 
-    /// <summary>The wire format the client asked for. Frames arrive already encoded in it.</summary>
-    IPayloadCodec Codec { get; }
+    /// <summary>
+    /// How events are turned into this transport's frames. Connections sharing an encoder share each
+    /// encoded frame, so an event is encoded once however many of them hear it.
+    /// </summary>
+    IEventEncoder Encoder { get; }
 
-    /// <summary>Queues one encoded <see cref="ServerEvent{T}"/> for the client. Must not block.</summary>
-    void Deliver(byte[] frame);
+    /// <summary>Queues one frame <see cref="Encoder"/> produced. Must not block.</summary>
+    void Deliver(object frame);
 
     /// <summary>
     /// Asks for the connection to be closed. Only the first request counts, so the reason a client is
     /// given is the reason its connection actually ended. Must not block.
     /// </summary>
     void Close(EventCloseReason reason);
+}
+
+/// <summary>
+/// Turns a <see cref="ServerEvent{T}"/> into whatever a transport sends: for the gRPC stream, one
+/// protobuf message. The result is shared between connections, so it must not be changed afterwards.
+/// </summary>
+public interface IEventEncoder
+{
+    /// <summary>
+    /// The frame for <paramref name="serverEvent"/>, or null when this transport cannot carry it — a
+    /// plugin's event whose payload it has no encoding for — in which case its connections do not
+    /// receive that event.
+    /// </summary>
+    object? Encode<T>(ServerEvent<T> serverEvent);
 }
 
 /// <summary>
@@ -53,6 +69,26 @@ public interface IEventConnectionRegistry
     /// can receive anything else. Dispose the result once the connection has closed.
     /// </summary>
     IDisposable Register(IEventConnection connection);
+
+    /// <summary>
+    /// Delivers a fresh <see cref="ServerEventTypes.Ready"/> to a registered connection, which its client
+    /// takes as the cue to re-read everything — what a client asks for after it was suspended, rather
+    /// than reconnecting.
+    /// </summary>
+    void Resubscribe(IEventConnection connection);
+
+    /// <summary>The members with at least one connection open right now.</summary>
+    IReadOnlySet<Guid> ConnectedUserIds();
+}
+
+/// <summary>
+/// Told when a member's first event connection opens or their last one closes — the moment they start
+/// or stop listening anywhere. Register with <c>TryAddEnumerable</c>; presence is what uses it.
+/// </summary>
+public interface IEventStreamListener
+{
+    /// <summary>Called after the change; ask the registry for the state it is in now.</summary>
+    Task OnEventStreamsChangedAsync(Guid userId, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -77,6 +113,9 @@ public enum EventCloseReason
     /// <summary>The client sent something the stream does not accept.</summary>
     ProtocolViolation,
 
-    /// <summary>The network connection went away underneath it.</summary>
+    /// <summary>
+    /// The network connection went away underneath it, or the client stopped sending heartbeats for
+    /// longer than <see cref="EventOptions.HeartbeatTimeout"/>.
+    /// </summary>
     ConnectionLost
 }

@@ -227,7 +227,7 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
     }
 
     /// <summary>
-    /// Plain text rather than Raindrop's JSON error body: the caller is LiveKit's client library, which
+    /// Plain text rather than a gRPC status: the caller is LiveKit's client library, which
     /// shows the body of a refused validate call as the reason.
     /// </summary>
     private static Task WriteTextAsync(HttpContext context, int status, string message, CancellationToken cancellationToken)

@@ -11,11 +11,17 @@ using RaindropServer.Channels.Voice;
 using RaindropServer.Configuration;
 using RaindropServer.Data;
 using RaindropServer.Events;
+using RaindropServer.Grpc;
 using RaindropServer.Roles;
 using RaindropServer.Security;
 using RaindropServer.Users;
 using RaindropServer.Voice.LiveKit;
 using ServerCli;
+
+// `ServerCli probe <url>` asks a running server for its handshake instead of running one; deploy.sh uses
+// it to check that a redeployed server came back with the same identity key.
+if (args is ["probe", var probeUrl])
+    return await ServerProbe.RunAsync(probeUrl);
 
 // ── 1. Read the server owner's configuration, and check it ───────────────────
 // raindrop.json sits next to the executable; RAINDROP_* environment variables override it. Every
@@ -29,9 +35,9 @@ if (!PrintProblems(report, "raindrop.json"))
     return 1;
 
 // ── 2. Configure services ────────────────────────────────────────────────────
-// AddRaindropServer brings in the user subsystem and discovers every endpoint automatically —
-// to add one, just implement an endpoint interface anywhere in the project. That's it.
-// AddRaindropDatabase enables one of the installed database modules; nothing is stored until it is.
+// AddRaindropServer brings in the whole domain; AddRaindropGrpc serves it — every client talks to this
+// server through the raindrop.v1 gRPC services (the RaindropProto repo). AddRaindropDatabase enables one
+// of the installed database modules; nothing is stored until it is.
 IServiceCollection services;
 try
 {
@@ -44,6 +50,7 @@ try
 
     services.AddRaindropServer(config.ApplyTo, config.ApplyTo, config.ApplyTo,
         configureVoice: config.ApplyTo, configureAttachments: config.ApplyTo);
+    services.AddRaindropGrpc();
 }
 catch (InvalidOperationException ex)
 {
@@ -148,7 +155,7 @@ Console.WriteLine($"Raindrop server is running on {string.Join(", ", config.Urls
 Console.WriteLine($"Database: {config.Database.Provider}");
 
 if (fingerprint is null)
-    Console.WriteLine("TLS: off — only do this behind a proxy that terminates it for you.");
+    Console.WriteLine("TLS: the certificate's fingerprint could not be read; clients will not be able to pin it.");
 else
 {
     Console.WriteLine($"TLS fingerprint (SHA-256): {fingerprint}");

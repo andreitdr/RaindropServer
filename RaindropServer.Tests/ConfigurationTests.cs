@@ -244,12 +244,29 @@ public class ServerConfigTests : IDisposable
     }
 
     [Fact]
+    public void Turning_tls_off_is_refused_because_clients_only_speak_grpc_over_pinned_tls()
+    {
+        var (_, report) = Read("""{ "tls": { "enabled": false } }""");
+
+        Assert.Equal(ConfigurationSeverity.Error, Find(report, "tls.enabled").Severity);
+    }
+
+    [Fact]
+    public void Listening_without_tls_is_refused()
+    {
+        var report = new ConfigurationReport();
+        new ServerHostOptions { Urls = ["http://0.0.0.0:5000"] }.Validate(report);
+
+        Assert.Equal(ConfigurationSeverity.Error, Find(report, "urls").Severity);
+        Assert.Equal(ConfigurationSeverity.Error, Find(report, "tls.certificatePath").Severity);
+    }
+
+    [Fact]
     public void A_working_configuration_is_reported_clean()
     {
         var (config, report) = Read($$"""
             {
               "urls": [ "https://localhost:5001" ],
-              "tls": { "enabled": false },
               "database": { "provider": "sqlite", "connectionString": "Data Source=raindrop.db" },
               "voice": {
                 "provider": "livekit",
@@ -509,8 +526,9 @@ public class LiveKitStartupCheckTests
                         return;
                     }
 
+                    // Twirp answers in the request's encoding — protobuf — and refuses in JSON, always.
                     context.Response.StatusCode = (int)status;
-                    context.Response.ContentType = "application/json";
+                    context.Response.ContentType = status == HttpStatusCode.OK ? "application/protobuf" : "application/json";
 
                     if (clock is { } time)
                         context.Response.Headers["Date"] = time.ToString("R");
@@ -566,7 +584,7 @@ public class LiveKitStartupCheckTests
     [Fact]
     public async Task A_livekit_that_answers_is_nothing_to_report()
     {
-        using var livekit = new StubLiveKit(HttpStatusCode.OK, """{"rooms":[]}""");
+        using var livekit = new StubLiveKit(HttpStatusCode.OK, "" /* an empty ListRoomsResponse */);
 
         Assert.False((await CheckAsync(livekit)).HasProblems);
     }
@@ -633,7 +651,7 @@ public class LiveKitStartupCheckTests
     [Fact]
     public async Task A_livekit_whose_clock_is_far_from_this_one_is_a_warning()
     {
-        using var livekit = new StubLiveKit(HttpStatusCode.OK, """{"rooms":[]}""",
+        using var livekit = new StubLiveKit(HttpStatusCode.OK, "" /* an empty ListRoomsResponse */,
             clock: DateTimeOffset.UtcNow.AddMinutes(10));
 
         var report = await CheckAsync(livekit);

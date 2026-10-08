@@ -4,18 +4,18 @@ namespace RaindropServer.Events;
 /// One frame on the event stream: what happened, and the thing it happened to.
 /// </summary>
 /// <remarks>
-/// Generic rather than carrying an <c>object</c>, so both wire formats serialize the payload by its
-/// declared type — contractless MessagePack in particular has no business guessing at runtime types.
-/// On the wire it is <c>{ "type": "message.created", "data": { … } }</c> in JSON and
-/// <c>{ Type, Data }</c> in MessagePack, following the usual casing rule (see <c>Payloads/</c>).
+/// Generic rather than carrying an <c>object</c>, so a transport's <see cref="IEventEncoder"/> sees the
+/// payload's declared type. On the gRPC stream it becomes one case of <c>raindrop.v1.ServerEvent</c>,
+/// chosen by <paramref name="Type"/>.
 /// </remarks>
 /// <param name="Type">One of the <see cref="ServerEventTypes"/> names.</param>
 /// <param name="Data">The payload; its shape is fixed by <paramref name="Type"/>.</param>
 public sealed record ServerEvent<T>(string Type, T Data);
 
 /// <summary>
-/// The names of every event this server sends. Like permissions and presence, events travel by
-/// name: a client too old to know one ignores it rather than failing on it.
+/// The names of every event this server sends. Inside the server, events travel by name, which is what
+/// lets a plugin add its own; each built-in name is one case of the protocol's <c>ServerEvent</c>, and a
+/// client too old to know a case ignores it.
 /// </summary>
 public static class ServerEventTypes
 {
@@ -71,11 +71,12 @@ public static class ServerEventTypes
     public const string VoiceLeft = "voice.left";
 }
 
-// ── Payloads that have no REST counterpart to reuse ──────────────────────────
+// ── Payloads that have no call's response to reuse ───────────────────────────
 
 /// <param name="UserId">The UUID of the connection's own member.</param>
 /// <param name="ProtocolVersion">The Raindrop protocol this server speaks, as in the handshake.</param>
-public record ReadyEvent(Guid UserId, string ProtocolVersion);
+/// <param name="HeartbeatInterval">How often the client should send a heartbeat on its stream.</param>
+public record ReadyEvent(Guid UserId, string ProtocolVersion, TimeSpan HeartbeatInterval);
 
 /// <param name="ChannelId">The channel that no longer exists.</param>
 public record ChannelDeletedEvent(Guid ChannelId);

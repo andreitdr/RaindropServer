@@ -104,22 +104,18 @@ public sealed class InMemorySessionStore : ISessionStore
         }
     }
 
-    public IReadOnlySet<Guid> ActiveUserIds()
+    public int RemoveExpired()
     {
         var now = _time.GetUtcNow().UtcDateTime;
-        var online = new HashSet<Guid>();
+        var removed = 0;
 
         foreach (var (token, session) in _sessions)
         {
-            // Iterating anyway, so this is where lapsed sessions get swept: leaving them in would
-            // report somebody as online for as long as nobody happened to use their token again.
-            if (session.ExpiresAtUtc <= now)
-                _sessions.TryRemove(token, out _);
-            else
-                online.Add(session.UserId);
+            if (session.ExpiresAtUtc <= now && _sessions.TryRemove(token, out _))
+                removed++;
         }
 
-        return online;
+        return removed;
     }
 
     private static string Base64Url(byte[] bytes) =>

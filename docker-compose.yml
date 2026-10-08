@@ -21,6 +21,10 @@ services:
     build:
       context: .
       dockerfile: ServerCli/Dockerfile
+      # The wire protocol, from the sibling RaindropProto checkout (Compose 2.17+). deploy.sh points
+      # this at the copy it uploads.
+      additional_contexts:
+        raindrop_proto: ../RaindropProto
     restart: unless-stopped
     depends_on:
       postgres:
@@ -109,7 +113,9 @@ services:
     # --node-ip is the address LiveKit tells clients to send audio to. Docker cannot work it out from
     # inside the container, so set LIVEKIT_NODE_IP in .env: 127.0.0.1 when every client runs on this
     # machine, this machine's LAN address when phones or other computers join.
-    image: livekit/livekit-server:latest
+    # Pinned: RaindropServer.Voice.LiveKit/Protos holds the RoomService messages of the protocol this
+    # release is built against. Move both together.
+    image: livekit/livekit-server:v1.13.7
     restart: unless-stopped
     command: --config /etc/livekit.yaml --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
     environment:

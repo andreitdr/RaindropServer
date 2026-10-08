@@ -1,14 +1,16 @@
 # Attachments
 
 Members can add files of any type to text-channel messages. Code: `RaindropServer/Attachments/` (the
-domain), `ServerCli/Endpoints/Attachments/` (the HTTP surface), `Data/Relational/RelationalAttachmentStore.cs`.
+domain), [`AttachmentGrpcService`](../RaindropServer.Grpc/Services/AttachmentGrpcService.cs) (the wire
+surface, `raindrop.v1.AttachmentService` in [`attachments.proto`](../../RaindropProto/raindrop/v1/attachments.proto)),
+`Data/Relational/RelationalAttachmentStore.cs`.
 
 ## The model in one paragraph
 
 Files are **end-to-end encrypted like the messages that carry them**. The sender's client encrypts each
 file with a fresh random key in the `raindrop/attachment/v1` format (defined by the Rust core, see
 [RaindropCrypto's attachments doc](../../RaindropCrypto/docs/attachments.md)), uploads the ciphertext in
-chunks, and then posts an ordinary encrypted message (`send-encrypted`) whose MLS payload holds the
+a stream of frames, and then posts an ordinary encrypted message (`SendEncryptedMessage`) whose MLS payload holds the
 caption and, for each file, its id, key, name, MIME type, size and ciphertext hash. The request also
 lists the attachment ids **in cleartext**, so the server can tie the stored blobs to the message for
 access control and deletion. Recipients download the ciphertext and decrypt it on their device. The
@@ -22,7 +24,7 @@ declared extension, and its size**, which is exactly what the owner's rules are 
 | `maximumFileSizeMegabytes`, `…ByExtension` | the declared ciphertext length, which **fixes the plaintext length exactly** (`AttachmentFormat`: `ciphertext = 20 + plaintext + 16 × max(1, ⌈plaintext / 65536⌉)`); an impossible length is refused, and the bytes that arrive can never exceed it | exact, trusts nothing |
 | `allowedExtensions` / `blockedExtensions` / `allowFilesWithoutExtension` | the extension the upload declares | a modified client could lie. The receiving client compares the declared extension with the file name inside the encrypted message and refuses to preview a file whose two disagree |
 | `maximumFilesPerMessage`, `maximumPendingUploadsPerMember`, `pendingUploadExpiryHours` | the server's own records | exact |
-| `preview.*` | nothing; served to clients through `GET /api/attachments/policy` | a hint for clients, which render previews themselves (the server cannot make a thumbnail of a file it cannot read, so the **sender** uploads one as its own `thumbnail` attachment) |
+| `preview.*` | nothing; served to clients through `GetAttachmentPolicy` | a hint for clients, which render previews themselves (the server cannot make a thumbnail of a file it cannot read, so the **sender** uploads one as its own `thumbnail` attachment) |
 
 A blocklist is a courtesy rather than a defence (any file can be renamed), which is why clients never
 open a received file by themselves either.
@@ -30,38 +32,43 @@ open a received file by themselves either.
 ## Lifecycle
 
 ```text
-uploads/create ──► uploading ──chunk…chunk──► uploads/complete ──► uploaded ──send-encrypted──► attached
-                        │                                              │                          │
-                        └───────── uploads/cancel, or pendingUploadExpiryHours ──► deleted ◄── message or channel deleted
+CreateUpload ──► uploading ──Upload stream(s)──► CompleteUpload ──► uploaded ──SendEncryptedMessage──► attached
+                      │                                               │                               │
+                      └──────── CancelUpload, or pendingUploadExpiryHours ──► deleted ◄── message or channel deleted
                                                                                     │
                                                                  AttachmentMaintenanceService removes the file
 ```
 
-1. **Create** (`POST /api/attachments/uploads/create`) — resolves the channel (404 when hidden, as for
+1. **Create** (`CreateUpload`) — resolves the channel (404 when hidden, as for
    messages), requires `send_messages` **and** `attach_files` there and a **bound session**
    (`device_required`), checks the declared extension and size against every `IAttachmentPolicy`, and
    reserves an id. Answers with an `UploadStatus`.
-2. **Chunks** (`PUT /api/attachments/uploads/chunk`) — raw bytes, with `Raindrop-Attachment-Id` and
-   `Raindrop-Upload-Offset` headers (ids stay out of the URL, like everywhere else). The offset must be
-   exactly what the server has received (`upload_offset_mismatch` otherwise); a chunk carries at most
-   `uploadChunkBytes` (8 MiB) and never runs past the declared size (`chunk_too_large`, 413). A chunk
-   that fails part-way is simply sent again from the same offset: storage truncates to it. Chunks of one
-   upload are serialised in-process.
-3. **Resume** (`POST /api/attachments/uploads/status`) — how many bytes have arrived.
-4. **Complete** (`POST /api/attachments/uploads/complete`) — every byte must be there
+2. **Upload** (the client-streaming `Upload`) — an `UploadHeader {attachment_id, offset}` first, then
+   data frames of at most `upload_frame_bytes` (256 KiB, `AttachmentGrpcService.FrameBytes`; a bigger one
+   is `chunk_too_large`). The offset must be exactly what the server has received
+   (`upload_offset_mismatch` otherwise). The service writes the frames as a run of **chunks** of at most
+   `uploadChunkBytes` (8 MiB) through `AttachmentService.WriteChunkAsync`, each committed as it
+   completes, so the database is touched once per chunk rather than once per frame. Nothing may run
+   past the declared size (`chunk_too_large`). A stream that breaks keeps every committed chunk; the part
+   of a chunk that was in flight is written again by the next stream, from the committed offset, and
+   storage truncates to it. Writes to one upload are serialised in-process.
+3. **Resume** (`GetUploadStatus`) — how many bytes have arrived: where the next `Upload` starts.
+4. **Complete** (`CompleteUpload`) — every byte must be there
    (`upload_incomplete`) and hash to the SHA-256 the uploader computed; a mismatch throws the upload
    away (`hash_mismatch`). The file is then committed in storage and becomes `uploaded`. Completing
    twice is not an error.
-5. **Send** — `POST /api/channels/text/messages/send-encrypted` with `attachmentIds`. The files are
+5. **Send** — `SendEncryptedMessage` with `attachment_ids`. The files are
    claimed for the new message **before** it is stored, atomically and all-or-nothing (a conditional
    `UPDATE … WHERE state = 'uploaded'` per file in one transaction), so two messages can never carry
    one file; if storing the message fails, they are released again. Every file must be the caller's,
    finished, uploaded for this channel, and not already sent. At most `maximumFilesPerMessage` files,
    plus at most one thumbnail per file. `attach_files` is checked again here, since it may have been
-   taken away since the upload. Plaintext `send` cannot carry files.
-6. **Read** — `ChannelMessage.attachments` lists `{attachmentId, kind, extension, ciphertextSize,
-   ciphertextSha256}` in history and in `message.created`; `POST /api/attachments/download` streams the
-   ciphertext to anybody who can see the channel (the uploader alone, before it is sent). Everything
+   taken away since the upload. Plaintext `SendMessage` cannot carry files.
+6. **Read** — `ChannelMessage.attachments` lists `MessageAttachment {attachment_id, kind, extension,
+   ciphertext_size, ciphertext_sha256}` in history and in `message_created`; the server-streaming
+   `Download` sends the ciphertext to anybody who can see the channel (the uploader alone, before it is
+   sent): a `DownloadHeader {ciphertext_size, offset}`, then data frames, from the requested `offset` — how
+   a client resumes, appending to what it already has (`invalid_offset` past the end). Everything
    else — an unknown id, a hidden channel, somebody else's unsent upload — is the same
    `attachment_not_found`, so ids cannot be probed.
 7. **Delete** — `AttachmentDeletionListener` (an `IMessageDeletionListener`) marks a deleted message's
@@ -115,29 +122,32 @@ the message, so a reporter cannot pair the author's words with a different file.
 [Messages](messages.md#reporting-an-encrypted-message). Showing moderators the reported files
 themselves, by revealing their keys, is not implemented yet.
 
-## API
+## Attachment API
 
-All authenticated. `ciphertextSha256` is bytes (base64 in JSON).
+All authenticated. `raindrop.v1.AttachmentService`:
 
-| Method | Route | Body → Response |
-|---|---|---|
-| GET | `/api/attachments/policy` | → `{enabled, maximumFileBytes, maximumFileBytesByExtension, allowedExtensions, blockedExtensions, allowFilesWithoutExtension, maximumFilesPerMessage, maximumThumbnailBytes, previewExtensions, previewAutoLoadMaximumBytes, uploadChunkBytes}` |
-| POST | `/api/attachments/uploads/create` | `{channelId, extension, ciphertextSize, kind?}` → `UploadStatus` |
-| PUT | `/api/attachments/uploads/chunk` | raw bytes + `Raindrop-Attachment-Id`, `Raindrop-Upload-Offset` headers → `UploadStatus` |
-| POST | `/api/attachments/uploads/status` | `{attachmentId}` → `UploadStatus` |
-| POST | `/api/attachments/uploads/complete` | `{attachmentId, ciphertextSha256}` → `UploadStatus` |
-| POST | `/api/attachments/uploads/cancel` | `{attachmentId}` → `{attachmentId}` |
-| POST | `/api/attachments/download` | `{attachmentId}` (+ optional `Range: bytes=…`) → `application/octet-stream`, `206` with `Content-Range` for a range, `416` for one outside the file |
+| RPC | Request → Response |
+|---|---|
+| `GetAttachmentPolicy` | → `AttachmentPolicy {enabled, maximum_file_bytes, maximum_file_bytes_by_extension, allowed_extensions?, blocked_extensions, allow_files_without_extension, maximum_files_per_message, maximum_thumbnail_bytes, preview_extensions, preview_auto_load_maximum_bytes, upload_frame_bytes}` — `allowed_extensions` absent means any extension that is not blocked |
+| `CreateUpload` | `{channel_id, extension, ciphertext_size, kind}` → `UploadStatus` (`ATTACHMENT_KIND_UNSPECIFIED` means a file) |
+| `Upload` *(client stream)* | `UploadHeader {attachment_id, offset}`, then `data` frames → `UploadStatus` |
+| `GetUploadStatus` | `{attachment_id}` → `UploadStatus` |
+| `CompleteUpload` | `{attachment_id, ciphertext_sha256}` → `UploadStatus` |
+| `CancelUpload` | `{attachment_id}` → `{attachment_id}` |
+| `Download` *(server stream)* | `{attachment_id, offset}` → `DownloadHeader {ciphertext_size, offset}`, then `data` frames |
 
-`UploadStatus` is `{attachmentId, state, ciphertextSize, receivedSize, chunkSize, expiresAtUtc}`.
+`UploadStatus` is `{attachment_id, state, ciphertext_size, received_size, frame_bytes, expires_at}`, its
+state the enum `UploadState` (`UPLOADING`, `UPLOADED`, `ATTACHED`). See RaindropProto's
+[streams doc](../../RaindropProto/docs/streams.md) for both streams.
 
 Error codes: `attachments_disabled`, `device_required`, `missing_permission`, `channel_not_found`,
 `invalid_attachment`, `file_type_not_allowed`, `file_too_large`, `too_many_pending_uploads`,
-`upload_offset_mismatch`, `chunk_too_large` (413), `upload_incomplete`, `upload_finished`,
-`hash_mismatch`, `too_many_attachments`, `attachment_already_sent`, `attachment_not_found`,
+`upload_offset_mismatch`, `chunk_too_large`, `invalid_frame` (an upload stream that does not start with
+its header, or has a second one), `upload_incomplete`, `upload_finished`, `hash_mismatch`,
+`too_many_attachments`, `attachment_already_sent`, `attachment_not_found`, `invalid_offset`,
 `attachment_unavailable` (the record exists but storage lost the file).
 
-The capability `attachments.v1` is advertised by `GET /api/server/info` while `attachments.enabled` is on.
+The capability `attachments.v1` is advertised by `GetServerInfo` while `attachments.enabled` is on.
 
 ## Configuration
 
@@ -150,8 +160,10 @@ files are stored and how much room they take.
 configuration rule, the megabyte conversion and the size map in `raindrop.json`; the store on every
 database (claim races, all-or-nothing claims, ordered chunk progress, deletion and expiry); the service
 rules end to end over a real folder (permissions, policy refusals, chunk order and size, hash mismatch,
-who may download, deletion and orphan removal); `Range` parsing; and the v2 attestation bytes against a
-golden vector the client checks too.
+who may download, deletion and orphan removal); and the v2 attestation bytes against a golden vector the
+client checks too. `GrpcTests.cs` covers the streams over a real gRPC client: an upload in frames that
+straddle chunks, resumed after an offset mismatch, completed, and downloaded from an offset; an oversized
+frame; and a download of an id the caller cannot reach.
 
 ## Related
 

@@ -5,12 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Documentation wiki
 
 [`docs/`](docs/README.md) is a per-feature documentation wiki for this project, meant to stay current.
-**Whenever you change a feature or add a new one — a new endpoint, a changed contract, a new
+**Whenever you change a feature or add a new one — a new RPC, a changed contract, a new
 permission, a new database driver, a new config option — update the matching file(s) under `docs/` as
 part of that same change**, not as a follow-up. If nothing existing fits, add a new file and link it
 from `docs/README.md`.
 
 ## Commands
+
+The wire protocol lives in the sibling [RaindropProto](../RaindropProto/CLAUDE.md) repo, which must be
+checked out next to this one (`../RaindropProto`): `RaindropServer.Grpc` compiles its `.proto` files on
+every build, and the build stops with a message saying so when they are missing.
 
 Build and run (from repo root):
 
@@ -29,6 +33,10 @@ dotnet test
 ```
 
 They cover:
+- the whole server in memory, called through a real gRPC client (`GrpcTests.cs`, over ASP.NET Core's
+  `TestServer`): who may call what, how a refusal arrives (status + `ErrorInfo.reason`), the event
+  stream (ready first, pushed events, resubscribe, presence, `session_ended`, the heartbeat timeout,
+  plugin events), and streamed uploads/downloads (frames straddling chunks, resume, offsets)
 - the MLS envelope parser and device certificates, against real fixtures from the Rust core
   (`RaindropServer.Tests/Fixtures/*.hex`)
 - Ed25519 (RFC 8032 vectors) and the server identity key
@@ -38,48 +46,50 @@ They cover:
 - attachments: the ciphertext-length contract with the Rust core, the store's claim races, the upload /
   attach / download rules over a real folder, and the v2 attestation bytes against a golden vector
 - configuration: what `ServerConfig` makes of a mistyped `raindrop.json`, every component's own
-  option validation, and `LiveKitStartupCheck` against a stub LiveKit that answers however the test
-  says
+  option validation (TLS cannot be switched off), and `LiveKitStartupCheck` against a stub LiveKit that
+  answers however the test says
+- the LiveKit room client speaking binary Twirp both ways, and reading Twirp's JSON errors
 
 Store tests run on SQLite, and also on PostgreSQL and SQL Server when `RAINDROP_TEST_POSTGRES` or
 `RAINDROP_TEST_SQLSERVER` holds a connection string (the docker-compose services will do). End-to-end
 tests against a running server, with the real Rust core, are in the client:
 `RaindropClient/test/integration/`.
 
-Once the CLI is running, exercise endpoints with curl. The server presents a self-signed
-certificate by default, so `-k` is needed until you trust it:
+Once the CLI is running, exercise it with `grpcurl` (`brew install grpcurl`). Everything is gRPC; the
+server presents a self-signed certificate by default, so `-insecure` is needed until you trust it, and
+the protos come from `../RaindropProto` because the server serves no reflection:
 
 ```bash
-curl -k https://localhost:5001/api/server/info
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/server.proto localhost:5001 raindrop.v1.ServerService/GetServerInfo
 ```
 
 ```bash
-curl -k -X POST https://localhost:5001/api/users/register -H "Content-Type: application/json" -d '{"userId":"<uuid>","username":"alice","password":"correct horse"}'
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/users.proto -d '{"user_id":"<uuid>","username":"alice","password":"correct horse"}' localhost:5001 raindrop.v1.UserService/Register
 ```
 
 Authenticated calls carry the token that came back from registering or logging in:
 
 ```bash
-curl -k https://localhost:5001/api/members -H "Authorization: Bearer <token>"
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/members.proto -H "authorization: Bearer <token>" localhost:5001 raindrop.v1.MemberService/ListMembers
 ```
 
 ```bash
-curl -k -X POST https://localhost:5001/api/channels/create -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d '{"type":"text","name":"general"}'
-```
-
-```bash
-curl -k -X POST https://localhost:5001/api/channels/text/messages/send -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d '{"channelId":"<uuid>","content":"hello"}'
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/channels.proto -H "authorization: Bearer <token>" -d '{"type":"text","name":"general"}' localhost:5001 raindrop.v1.ChannelService/CreateChannel
 ```
 
 The first UUID to register owns the server, so its token is the one that can make roles:
 
 ```bash
-curl -k -X POST https://localhost:5001/api/roles/create -H "Content-Type: application/json" -H "Authorization: Bearer <owner token>" -d '{"name":"Moderator","permissions":["manage_messages","rename_channels"]}'
+grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/roles.proto -H "authorization: Bearer <owner token>" -d '{"name":"Moderator","permissions":["manage_messages","rename_channels"]}' localhost:5001 raindrop.v1.RoleService/CreateRole
 ```
 
+The event stream is bidirectional; `-d @` reads its frames from stdin:
+
 ```bash
-curl -k -X POST https://localhost:5001/api/roles/assign -H "Content-Type: application/json" -H "Authorization: Bearer <owner token>" -d '{"userId":"<uuid>","roleId":"<uuid>"}'
+(echo '{"heartbeat":{}}'; sleep 30) | grpcurl -insecure -import-path ../RaindropProto -proto raindrop/v1/events.proto -H "authorization: Bearer <token>" -d @ localhost:5001 raindrop.v1.EventService/Connect
 ```
+
+`ServerCli probe https://localhost:5001` prints a running server's handshake as `key=value` lines.
 
 In the running CLI's console, `drivers` lists the installed database modules, `db` shows the active
 one, `fingerprint` prints the TLS fingerprint for clients to pin, `roles` lists the server's roles
@@ -97,95 +107,106 @@ allows before it resorts to SIGKILL — a server killed mid-stop is one that nev
 shutdown at all.
 
 Docker: `docker-compose.yml`'s `server` service builds and runs the whole stack (server + Postgres +
-LiveKit) — `docker compose up -d server`. Built directly, `ServerCli/Dockerfile` is built from the
-repo root as context since it references `../.dockerignore`:
+LiveKit) — `docker compose up -d server`; it passes `../RaindropProto` as the named build context
+`raindrop_proto` (Compose 2.17+). Built directly, `ServerCli/Dockerfile` is built from the repo root as
+context since it references `../.dockerignore`, with the protocol as a second context:
 
 ```bash
-docker build -f ServerCli/Dockerfile -t raindrop-server .
+docker build -f ServerCli/Dockerfile --build-context raindrop_proto=../RaindropProto -t raindrop-server .
 ```
 
 Deploying to the owner's own Docker server is `./deploy.sh` (reference: [`docs/deployment.md`](docs/deployment.md)):
-it exports the committed `HEAD` (or `--ref`) with `git archive`, builds the image on the server, restarts
-`server`, and checks that the server's identity key did not change. `--dry-run` changes nothing, and
+it exports the committed `HEAD` (or `--ref`) with `git archive`, and RaindropProto's (`--proto-ref`)
+beside it, builds the image on the server, restarts `server`, and checks — with `ServerCli probe` run
+inside the container — that the server's identity key did not change. `--dry-run` changes nothing, and
 deploying an older ref is the rollback. State (`data/`, `.env`) lives outside the build context on the
 server and is never touched.
 
 ## Architecture
 
-A solution of seven projects targeting `net10.0` (the seventh, `RaindropServer.Tests`, is the xUnit
-suite):
+A solution of eight projects targeting `net10.0` (the eighth, `RaindropServer.Tests`, is the xUnit
+suite), built against the sibling RaindropProto checkout:
 
 - **RaindropServer** (`RaindropServer/`) — the library: hosts an ASP.NET Core app on a background
-  thread, auto-discovers endpoints, and owns the domain layer behind them (users, sessions, password
-  hashing, the member roster and presence, roles and permissions, channels and their messages, push
-  events, the database abstraction).
-  No HTTP endpoints live here.
+  thread and owns the domain layer (users, sessions, password hashing, the member roster and presence,
+  roles and permissions, channels and their messages, push events, the database abstraction). **It
+  knows no transport** — no gRPC or protobuf package — and maps no route of its own except the voice
+  signalling relay's (`VoiceSignalRoutes`).
+- **RaindropServer.Grpc** (`RaindropServer.Grpc/`) — the transport: compiles
+  `../RaindropProto/raindrop/v1/*.proto` (`Grpc.Tools`, C# into `obj/`, never committed), implements every
+  `raindrop.v1` service as a thin layer over the library (`Services/`, `Mapping/`), and holds
+  `RaindropInterceptor` (sessions, error statuses) and the event stream (`Events/`).
 - **RaindropServer.Data.Sqlite / .Postgres / .SqlServer** — the database modules. Each is a separate
   assembly holding one `IDatabaseDriver` and the client library for that database.
 - **RaindropServer.Voice.LiveKit** — the media module: carries voice calls on a LiveKit sidecar
-  (tokens, the room API, the signalling relay) behind `IVoiceTransport`. No packages — the JWTs and
-  the Twirp JSON calls are hand-written. Idle unless `voice.provider` names it.
+  (tokens, the room API, the signalling relay) behind `IVoiceTransport`. No LiveKit SDK — the JWTs are
+  hand-written, and the room API is binary Twirp over LiveKit's RoomService messages, vendored in
+  `Protos/` from the protocol version the pinned `livekit-server` image is built against. Idle unless
+  `voice.provider` names it.
 - **ServerCli** (`ServerCli/`) — the executable everyone runs. It reads `raindrop.json`, enables one
-  database module, starts the server, hosts the owner's console, and **owns every endpoint**, under
-  `ServerCli/Endpoints/`.
+  database module, registers the domain (`AddRaindropServer`) and the gRPC transport
+  (`AddRaindropGrpc`), starts the server, and hosts the owner's console. `ServerCli probe <url>` asks a
+  running server for its handshake instead.
 
 Raindrop is decentralised: every server is independent, and a client holds a **separate GUID per
 server**. Nothing in here may assume another server exists.
 
 Every server starts out identical because every owner runs this same CLI — what makes one server
 different from another is its address and its users, and implicitly its database and its plugins.
-So endpoints belong in `ServerCli/Endpoints/`; only the logic they call belongs in the library.
+The protocol every server speaks lives outside this repo, in RaindropProto, shared with the client so
+the two cannot disagree about a field. Rules belong in the library; `RaindropServer.Grpc` only
+translates between that protocol and the library's own records.
 
-### Endpoint model
+### gRPC services
 
-Implement one of four interfaces anywhere in a loaded assembly and it is mapped automatically — no
-registration code. The last three are wrapped into an `IEndpoint` by an adapter, so `ServerHost`
-only ever knows about `IEndpoint`.
+Full reference: [`docs/grpc-services.md`](docs/grpc-services.md). Every client call is gRPC (HTTP/2,
+TLS), package `raindrop.v1`, one service per domain: `ServerService`, `UserService`, `MemberService`,
+`RoleService`, `ChannelService`, `TextChannelService`, `VoiceService`, `DeviceService`,
+`DeliveryService`, `AttachmentService`, `EventService`. Each lives in
+`RaindropServer.Grpc/Services/` and does three things: read the request (ids through `Wire.Id`), call
+the library service that owns the rule, map the record it returns (`Mapping/ToWire`). The library's
+contract records are not protobuf types and must stay that way.
 
-| Interface | Gives you | Use when |
-|---|---|---|
-| `IEndpoint` | raw `HttpContext` | full control, or a GET with no request body |
-| `ITypedEndpoint<TReq,TRes>` | typed request and response | an anonymous POST |
-| `IAuthenticatedEndpoint` | `UserSession` + `HttpContext` | an authenticated GET |
-| `IAuthenticatedTypedEndpoint<TReq,TRes>` | `UserSession` + typed request and response | an authenticated POST |
+- **Authentication**: `RaindropInterceptor` resolves `authorization: Bearer <token>` metadata through
+  `ISessionStore.TryValidate` before any handler runs (`missing_token`, `invalid_session`) — for every
+  call shape, streams included. A method marked `[AllowAnonymous]` skips it; six do (`GetServerInfo`
+  and the five sign-in calls). Handlers read the caller with `context.Session()`.
+- **Errors**: services and the library throw `ApiException` (`ApiException.Conflict("username_taken",
+  …)`). Its `ApiErrorKind` picks the gRPC status (BadRequest→INVALID_ARGUMENT, Unauthorized→
+  UNAUTHENTICATED, Forbidden→PERMISSION_DENIED, NotFound→NOT_FOUND, Conflict→FAILED_PRECONDITION,
+  TooLarge→RESOURCE_EXHAUSTED, ServiceUnavailable→UNAVAILABLE), and its code becomes the
+  `google.rpc.ErrorInfo.reason` (domain `raindrop`) in the details trailer — what clients branch on.
+  Anything else is `INTERNAL`/`internal_error`, logged, never leaked. Every reason is listed in
+  `../RaindropProto/docs/errors.md`; a new one goes there too.
+- **Ids** arrive as strings: malformed is `invalid_payload`; empty becomes `Guid.Empty`, which the
+  domain refuses with its own code exactly as it did a missing id.
+- **Absent vs empty**: proto3 cannot send null, so where absent means something different the protocol
+  uses `optional` or a wrapper (`PermissionSet`, `ExtensionList`, `AttestedFiles`) and the service maps
+  it back to null. Keep it that way when adding fields.
+- **Routes**: `ServerHost` maps every `IRouteContributor`; `AddRaindropGrpc` registers the one mapping
+  the services. Messages are capped at 1 MiB (`MaximumMessageBytes`); attachment frames are 256 KiB.
+- **The one route that is not gRPC** is `/api/channels/voice/signal/{path}`: LiveKit's own signalling
+  WebSocket, relayed. It is why Kestrel still speaks HTTP/1.1 beside HTTP/2.
 
-The authenticated pair resolve `Authorization: Bearer <token>` through `ISessionStore` and answer
-401 before the handler runs, so handlers can assume a valid caller. The typed pair are *format*
-agnostic — see Wire formats below — so a handler never knows whether it was called in JSON or binary.
+Adding an RPC: add it to the `.proto` in RaindropProto (its CLAUDE.md has the rules — own
+`<Rpc>Request`/`<Rpc>Response`, never renumber), override it in the matching `*GrpcService`, map with
+`Wire`/`ToWire`, add a `GrpcTests` case if it is a new shape, and update both docs folders.
 
-Handlers signal failure by throwing `ApiException` (`ApiException.Conflict("username_taken", …)`);
-every adapter turns it into the right status code with an `{ "error", "message" }` body, encoded in
-whichever format the caller asked for. Raw `IEndpoint` implementations get the same treatment by
-going through `EndpointResponse.WriteAsync`.
-Adapters themselves carry `[SkipEndpointDiscovery]` so discovery does not pick them up.
+### Wire format
 
-### Wire formats
-
-Bodies are encoded by an `IPayloadCodec`, negotiated per request from `Content-Type` and `Accept`:
-
-- `application/json` — the default, and what you get from curl when you say nothing.
-- `application/x-msgpack` — MessagePack, what a real client should use.
-
-The two are interchangeable in both directions: a request can arrive as JSON and be answered in
-MessagePack, and error bodies follow the same negotiation. `GET /api/server/info` advertises which
-formats a server supports.
-
-MessagePack is serialized contractless, so contracts stay plain records with no attributes. The
-trade-off is that binary keys are the property names verbatim (`UserId`) where JSON camelCases them
-(`userId`); a .NET client sharing the contract types never notices, a client in another language
-needs to know. Typeless resolvers are deliberately not used, and deserialization runs under
-`MessagePackSecurity.UntrustedData`.
-
-Worth being honest about the payoff: on the small objects user management deals with, MessagePack
-saves only ~15% of the bytes — GUIDs dominate, and the longer PascalCase keys eat into the gain. The
-wins that matter are skipping text parsing entirely, HTTP/2 multiplexing every call over one
-connection, and headroom for message history and voice metadata, where payloads are numeric and
-repetitive and binary pulls far ahead.
+Protobuf only — see [`docs/wire-formats.md`](docs/wire-formats.md) and RaindropProto's
+`docs/conventions.md`. UUIDs are canonical lower-case strings (certificates and attestations sign ids as
+text), times are `Timestamp`, crypto blobs are `bytes`, open sets (permissions, channel types, leave
+reasons, capabilities) stay strings and closed ones (presence, user state, role kind, attachment kind,
+upload state) are enums with an `UNSPECIFIED` zero. The only non-protobuf bytes the server handles are
+LiveKit's: its signalling (relayed unread), Twirp's JSON error bodies, and its JWTs.
 
 ### Transport security
 
-Everything is TLS. `ServerHost` configures Kestrel with the certificate and enables HTTP/1.1 and
-HTTP/2, which is negotiated by ALPN.
+Everything is TLS, always. `ServerHost` configures Kestrel with the certificate and enables HTTP/2 (gRPC)
+and HTTP/1.1 (the voice relay's WebSocket), negotiated by ALPN. There is no plain-HTTP mode:
+`tls.enabled: false` and `http://` URLs are startup errors, because clients pin this server's own
+certificate and speak gRPC to it — a reverse proxy in front must pass TLS through.
 
 Raindrop servers are self-hosted on whatever address their owner has, and most will never have a
 CA-issued certificate, so `ServerCertificate` generates a self-signed one on first start and saves
@@ -196,11 +217,11 @@ ever changes. Same trust-on-first-use model as SSH. Point `certificatePath` at a
 instead and clients can verify it normally.
 
 The fingerprint is printed at startup, available from the `fingerprint` console command, and served
-by `GET /api/server/info`.
+by `ServerService.GetServerInfo`.
 
 TLS is 1.3-only (`tls.allowTls12` to relax; macOS cannot serve 1.3, so it allows 1.2 there too), and a
 generated certificate is ECDSA P-256. A long-lived **server identity key** (`ServerIdentityKey`,
-`server-identity.key`) signs the certificate's fingerprint; `/api/server/info` serves the key and
+`server-identity.key`) signs the certificate's fingerprint; `GetServerInfo` serves the key and
 signature, and clients pin the key so a replaced certificate is followed only when that key vouches
 for it. See `docs/transport-security.md`. LiveKit's API URL must be https unless loopback or a
 container name, and weak or `--dev` LiveKit secrets are refused (`LiveKitOptions.Validate`, which also
@@ -211,9 +232,8 @@ Two consequences worth remembering:
 
 - The identity key file **must persist** (and the certificate should). Losing the key locks out every
   client that pinned it. In Docker both live on a mounted volume for exactly this reason.
-- Nothing sensitive goes in a URL. The lookups that would naturally be GETs with query parameters
-  (`status`, `username-available`, `lookup`) are POSTs carrying a body instead, so UUIDs and
-  usernames stay inside the encrypted body rather than in a line that tends to end up in logs.
+- Nothing sensitive goes in a URL or a header: ids, usernames and passwords travel inside protobuf
+  request bodies; metadata carries only the session token.
 
 This is transport encryption: the server can read everything it stores and relays. End-to-end
 encryption sits on top — see **End-to-end encryption** below.
@@ -246,16 +266,17 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
   commit the difference against `groups/roster` — the server cannot change a group. Key packages
   (one-time + last resort), Welcomes addressed to recipient devices the committer names, a bounded
   commit log (`resyncRequired` beyond it). Key packages must be `MLSMessage`-wrapped.
-- **Encrypted messages** (`TextChannelService.SendEncryptedAsync`, `send-encrypted`): an MLS
+- **Encrypted messages** (`TextChannelService.SendEncryptedAsync`, `SendEncryptedMessage`): an MLS
   application message for the channel's group, epoch within `MaximumPastEpochs` of the group's
   (`stale_epoch` otherwise), from a bound session; stored as ciphertext in
   `raindrop_encrypted_messages` (a new table — `RelationalTextMessageStore` routes by
   `TextMessageRecord.IsEncrypted` and merges both tables for history under the same cursor), never
-  archived. Plaintext `send` answers `encryption_required` unless `channels.allowPlaintextMessages`;
+  archived. Plaintext `SendMessage` answers `encryption_required` unless `channels.allowPlaintextMessages`;
   the console's `purge-plaintext` deletes old plaintext and the deleted-message archive.
 - **Attachments** (`RaindropServer/Attachments/`, full reference [`docs/attachments.md`](docs/attachments.md)):
   files are encrypted by the sender under a per-file key (the Rust core's chunked `raindrop/attachment/v1`
-  format), uploaded in chunks as ciphertext, and named by id in `send-encrypted`'s `AttachmentIds`; the key
+  format), streamed up as ciphertext (`Upload`, a client stream of 256 KiB frames the service writes in
+  8 MiB chunks), and named by id in `SendEncryptedMessage`'s `attachment_ids`; the key
   travels inside the MLS message. The server sees only a file's channel, declared extension and size — the
   ciphertext length fixes the plaintext length exactly (`AttachmentFormat`), which is how
   `attachments.maximumFileSizeMegabytes` is enforced without trusting the client.
@@ -275,10 +296,9 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
 
 ### Users
 
-`RaindropServer/Users/` holds the domain; `ServerCli/Endpoints/Users/` holds its HTTP surface.
-`UserService` owns every rule, so endpoints stay thin and drivers stay dumb. The request and response
-contracts live in the library next to `UserService` — it returns them, and the library cannot depend
-on `ServerCli`.
+`RaindropServer/Users/` holds the domain; `UserGrpcService` its wire surface.
+`UserService` owns every rule, so the service stays thin and drivers stay dumb. The domain's contracts
+live in the library next to `UserService` — it returns them, and the gRPC layer maps them.
 
 The lifecycle (`UserStatus`) is the thing to keep straight:
 
@@ -287,7 +307,8 @@ The lifecycle (`UserStatus`) is the thing to keep straight:
 - **Usernames are unique per server**, compared on a lower-cased `username_normalized` column with a
   unique index. The same person can be `alice` here and `alice42` elsewhere.
 - **Sessions live in memory only** (`InMemorySessionStore`) and are deliberately never persisted, so
-  a restart logs everyone out. Clients log out when they close; a 12-hour idle timeout is the backstop.
+  a restart logs everyone out. Clients log out when they close; a 12-hour idle timeout is the backstop
+  (an open event stream renews its session, and its heartbeat timeout ends it when the client is gone).
 - **Leaving preserves or erases.** `LeftDataPreserved` keeps the username (still reserved) and
   password until `data_expires_at`, capped at two years by `UserOptions.MaximumDataRetention`;
   `RetentionCleanupService` sweeps expired ones on a timer and at startup. `Erased` nulls the
@@ -304,26 +325,26 @@ invalidating anything.
 `RaindropServer/Members/` is the roster: who is on this server, and whether each of them is around
 right now. There is no membership table — **a member is an active user** — because a Raindrop server
 is one place rather than a directory of many, so `MemberService` reads the user store and asks an
-`IPresenceTracker` for the half that is not persisted. `GET /api/members` is its whole HTTP surface.
+`IPresenceTracker` for the half that is not persisted. `MemberService.ListMembers` is its whole wire surface.
 
 **Presence is derived, never stored.** `PresenceStatus` is `Online` or `Offline`, and
-`SessionPresenceTracker` — the default `IPresenceTracker` — answers it from `ISessionStore`: a member
-is online exactly when they hold a session that has not lapsed. That is as much as the server can
-honestly know. Two consequences follow from sessions living in memory: everybody is offline after a
-restart, and a client that was killed rather than closed reads as online until its idle timeout
-expires. Shortening `UserOptions.SessionIdleTimeout` sharpens presence; a client heartbeat would
-sharpen it further, and would go behind the same interface rather than into the session store.
+`StreamPresenceTracker` — the default `IPresenceTracker` — answers it from the event stream registry: a
+member is online exactly while they have an event stream open. The stream ends when its session does,
+and when its heartbeats stop for `EventOptions.HeartbeatTimeout` (60 s), so a client that was killed
+rather than closed reads as offline about a minute later. Everybody is offline after a restart until
+their clients reconnect. `PresenceBroadcaster` (an `IEventStreamListener` and `ISessionListener`)
+publishes `member.presence` when a member's first stream opens or last one closes.
 
 The enum is deliberately open-ended, and the thing that makes adding to it cheap is that nothing
 persists its numbers. It is **declared in the order a roster shows them** and sorted on that
 declaration order, so `Idle` or `DoNotDisturb` is added by inserting a value between `Online` and
 `Offline` — no renumbering, no migration, and no separate ranking table to keep in step. What the
-wire carries is the *name* (`online`, `offline`), so clients sort by their own copy of that order and
-a client too old to know a status simply does not render it.
+wire carries is the protobuf enum `raindrop.v1.Presence` (next free number for a new status), so
+clients sort by their own copy of that order and a client too old to know a status reads
+`PRESENCE_UNSPECIFIED`, which it shows as offline.
 
-`ISessionStore` gained one method for this, `ActiveUserIds()` — the whole set at once, so a roster
-costs one call however many members it has. It reports *sessions*, not presence: what a session
-implies is `Members/`'s business, which is what keeps the presence enum out of the user subsystem.
+`IEventConnectionRegistry.ConnectedUserIds()` answers for the whole roster at once, so a roster costs
+one call however many members it has.
 
 The roster is unpaged, and `IUserStore.ListByStatusAsync` is what it reads. A list sorted by presence
 cannot be paged by the database anyway, since presence is not a column — a server large enough to
@@ -331,12 +352,11 @@ need paging needs presence to live somewhere queryable first.
 
 One naming trap worth knowing: a member's `presence` is not their `state`. `state` (`active`,
 `left_preserved`, `erased`) is the membership lifecycle from `Users/`; `presence` is whether they are
-logged in. Members who have left do not appear in the roster at all.
+around — listening on an event stream. Members who have left do not appear in the roster at all.
 
 ### Roles and permissions
 
-`RaindropServer/Roles/` decides what anybody is allowed to do; `ServerCli/Endpoints/Roles/` is its
-HTTP surface. **A role is a named set of permissions, a member holds any number of them, and what
+`RaindropServer/Roles/` decides what anybody is allowed to do; `RoleGrpcService` is its wire surface. **A role is a named set of permissions, a member holds any number of them, and what
 they may do is the union.** Roles live on the server and are keyed to the member's UUID, matched at
 login like everything else about them. A client is *told* what it may do, so it can grey out a
 button rather than let a request fail — but it is never trusted about it: every check runs here.
@@ -354,7 +374,7 @@ Two conventions hold everywhere:
 - **Permissions travel as names, never as a bitfield.** `view_channel`, `manage_roles`, and so on. A
   client too old to know a permission lists the ones it understands and ignores the rest, exactly as
   it does with `PresenceStatus` and `ChannelType`. `PermissionNames` is the single table everything
-  is derived from — the wire names, the parser, and the catalogue `GET /api/roles/permissions`
+  is derived from — the wire names, the parser, and the catalogue `RoleService.ListPermissions`
   serves — so adding a permission means adding one row to it.
 - **`Administrator` is expanded, never compared literally.** `PermissionExtensions.Expand` turns it
   into every permission this build has, so an administrator is never refused something merely
@@ -443,7 +463,7 @@ down the code:
 permissions, and `ChannelService` for the lifecycle (create, list, get, rename, delete).
 `RaindropServer/Channels/Text/` holds everything that is only true of text channels, and
 `RaindropServer/Channels/Voice/` everything only true of voice channels — added without touching
-`ChannelService`. `ServerCli/Endpoints/Channels/` mirrors the same split.
+`ChannelService`. On the wire the split is `ChannelService`, `TextChannelService` and `VoiceService`.
 
 What keeps the shared half from growing a `switch` over the type is `IChannelModule`: one small
 registration per kind of channel, saying which type it implements and how to delete what a channel
@@ -462,7 +482,7 @@ class as usernames.
 #### Messages
 
 A message belongs to a channel and is tied to the author's **UUID** — never to their account, which
-may be erased, and never to their username, which may change. `POST /api/users/lookup` is how a
+may be erased, and never to their username, which may change. `UserService.LookupUser` is how a
 client turns that UUID into a name to show.
 
 **Deleting a message keeps the row.** The text is nulled and `deleted_at` / `deleted_by` are set, so
@@ -494,8 +514,7 @@ History is paged backwards, newest page first, through an opaque cursor. The cur
 `(sent_at, message_id)` pair rather than a timestamp alone, because two messages can share a
 timestamp and the id breaks the tie — so a page boundary always falls between two specific rows and
 paging can neither repeat nor skip a message. Each page arrives in chronological order, the way it is
-rendered; `nextCursor` leads further into the past and comes back null at the beginning of the
-channel.
+rendered; `next_cursor` leads further into the past and is absent at the beginning of the channel.
 
 #### Permissions
 
@@ -505,7 +524,7 @@ permission each operation needs (`SendMessages` to post, `RenameChannels` to ren
 `DeleteChannels` to delete, `ManageMessages` to remove somebody else's message) and the fact that
 `ChannelService.ResolveAsync` asks once and hands the answer to the type's own service.
 
-Every channel a client is shown carries `yourPermissions`, so it can grey out what the caller cannot
+Every channel a client is shown carries `your_permissions`, so it can grey out what the caller cannot
 do instead of guessing at the server's rules. A channel the caller may not see is reported as
 `channel_not_found` rather than forbidden, so the API cannot be used to enumerate channels somebody
 has been kept out of.
@@ -523,18 +542,24 @@ outcome as a grant — a join token whose `canPublish` says whether the micropho
   `voice_unavailable`), `IVoiceSignalRelay`, `IVoiceStateStore` (in-memory — a call cannot outlive the
   sessions in it), `IVoiceMuteStore` (persisted, `raindrop_voice_mutes`), `IVoiceJoinPolicy` (plugins
   may refuse a join). Leave reasons and transport names are open strings.
-- **No webhooks.** LiveKit's would have to call Raindrop's self-signed HTTPS. Join and leave are REST
-  (the roster updates instantly; a joiner is *pending* until LiveKit reports them), and
+- **No webhooks.** LiveKit's would have to call Raindrop's self-signed HTTPS. Join and leave are gRPC
+  calls (the roster updates instantly; a joiner is *pending* until LiveKit reports them), and
   `VoiceMaintenanceService` — one loop, so work and reconciliation never race — reconciles every 5 s
   both ways: drops participants LiveKit has not seen for 20 s and sessions that ended, and **removes
   anybody in a Raindrop room Raindrop did not admit**. That matters because self-hosted LiveKit does not
   revoke a removed participant's token; tokens therefore live 2 minutes (LiveKit refreshes them for
   connected clients). At startup it deletes leftover rooms (every session died with the old process);
   on shutdown it ends every call.
-- **The signalling relay.** Clients connect LiveKit's SDK to `/api/channels/voice/signal` on the server
-  they already pin, and `LiveKitSignalRelay` forwards only `rtc` and `rtc/validate` — one certificate,
-  LiveKit's HTTP port stays private, and the relay refuses a token whose member Raindrop has not
-  admitted to that room. Only LiveKit's media ports (UDP 7882, TCP 7881) face the internet.
+- **The signalling relay** — the one route that is not gRPC. Clients connect LiveKit's SDK to
+  `/api/channels/voice/signal` on the server they already pin (mapped by `VoiceSignalRoutes` when a
+  transport registers an `IVoiceSignalRelay`), and `LiveKitSignalRelay` forwards only `rtc` and
+  `rtc/validate` — one certificate, LiveKit's HTTP port stays private, and the relay refuses a token
+  whose member Raindrop has not admitted to that room. Only LiveKit's media ports (UDP 7882, TCP 7881)
+  face the internet.
+- **The room API is binary Twirp.** `LiveKitRoomClient` posts `application/protobuf` with the RoomService
+  messages vendored in `RaindropServer.Voice.LiveKit/Protos/` (copied from `livekit/protocol` at the
+  commit the pinned `livekit/livekit-server` image uses — move the two together); only Twirp's error
+  bodies are JSON, by the Twirp spec.
 - **Calls are end-to-end encrypted** (`e2ee.voice.v1`): clients' LiveKit frame cryptor encrypts every
   frame with a key exported from the voice channel's MLS group (`raindrop/voice/v1`, slot `epoch mod
   16`), so LiveKit forwards audio it cannot hear; tokens grant no data channel, so no key material
@@ -547,34 +572,38 @@ outcome as a grant — a join token whose `canPublish` says whether the micropho
 
 ### Events (push)
 
-`RaindropServer/Events/` pushes every change to the clients allowed to see it, over a WebSocket at
-`GET /api/events` — same `Authorization: Bearer` header, same `Accept` negotiation (JSON in text
-frames, MessagePack in binary). Full reference: [`docs/events.md`](docs/events.md).
+`RaindropServer/Events/` pushes every change to the clients allowed to see it, over the bidirectional
+gRPC stream `EventService.Connect` — same `authorization` metadata as every call. Full reference:
+[`docs/events.md`](docs/events.md). The server sends `ready` first (with the heartbeat interval), then a
+`ServerEvent` per change, a typed `oneof`; the client sends `Heartbeat` every 20 s and `Resubscribe`
+to get a fresh `ready` without reconnecting. Everything else a client does stays a unary call.
 
 **Events are notifications, not a source of truth.** Each carries the full current state of what it
 is about, so a client merges by id; nothing is replayed, and a client that reconnects waits for
-`ready` and then re-reads. Audiences use the same `IPermissionResolver` as every REST check —
+`ready` and then re-reads. Audiences use the same `IPermissionResolver` as every call —
 `ChannelService.AudienceFor(channel)` for anything inside a channel — so a hidden channel produces no
 events at all.
 
 This is built as replaceable seams because a **plugin SDK** will expose them, and new features should
 follow the same shape: `IEventPublisher` (how anything announces a change; event types are open
-strings, plugins prefix theirs), `IEventConnection` + `IEventConnectionRegistry` (the transport seam —
-WebSocket lives in `Events/WebSockets/` and is one implementation), `IServerEventHandler<T>`
-(in-process subscribers, registered with `AddServerEventHandler<T, THandler>`),
-`Users/ISessionListener` (told when a member's sessions change), and
-`Channels/Text/IMessageDeletionListener` (told *before* message text is destroyed — not an event, and
-fail-closed), the voice seams in **Voice** above, and for files `IAttachmentStorage` (where ciphertext is
-kept; a local folder by default), `IAttachmentPolicy` (enumerable: every policy must accept an upload),
-`IAttachmentListener` (enumerable, told when a file is uploaded, sent or removed) and
-`Channels/Text/IMessageAttachments` (how text channels hand files to whatever stores them). `EventHub` is the default publisher
-and registry; it sends `ready` first, closes a stream whose session ends (`4401`), renews an open
-stream's session, bounds each connection's queue (`4429` when full), and closes everything with
-`1001` on shutdown. Publishing never fails or blocks the request that caused it.
+strings inside the server, plugins prefix theirs), `IEventConnection` + `IEventConnectionRegistry` +
+`IEventEncoder` (the transport seam — the gRPC stream in `RaindropServer.Grpc/Events/` is one
+implementation; `ProtobufEventEncoder` maps each built-in name to its `oneof` case and carries a
+plugin's protobuf payload as `PluginEvent`), `IServerEventHandler<T>` (in-process subscribers,
+registered with `AddServerEventHandler<T, THandler>`), `IEventStreamListener` (told when a member's
+first stream opens or last one closes — presence), `Users/ISessionListener` (told when a member's
+sessions change), and `Channels/Text/IMessageDeletionListener` (told *before* message text is destroyed
+— not an event, and fail-closed), the voice seams in **Voice** above, and for files `IAttachmentStorage`
+(where ciphertext is kept; a local folder by default), `IAttachmentPolicy` (enumerable: every policy
+must accept an upload), `IAttachmentListener` (enumerable, told when a file is uploaded, sent or
+removed) and `Channels/Text/IMessageAttachments` (how text channels hand files to whatever stores them).
+`EventHub` is the default publisher and registry; it sends `ready` first, closes a stream whose session
+ends (`session_ended`), renews an open stream's session, bounds each connection's queue (`too_slow` when
+full), and closes everything on shutdown (`server_stopping`). A stream with no heartbeat for
+`HeartbeatTimeout` ends as `connection_lost`. Publishing never fails or blocks the call that caused it.
 
 Services publish **after** the write, from the library, so the console's `grant`/`revoke` reach
-clients exactly like the API's. Over HTTP/2 a WebSocket is an extended `CONNECT`, which is why
-`ServerHost` maps every `GET` route for `CONNECT` as well.
+clients exactly like a call's.
 
 ### Database modules
 
@@ -629,16 +658,18 @@ consistent. So deleting a role deletes its assignments explicitly.
 ### Wiring
 
 - `AddRaindropServer(configureUsers?, configureChannels?, configureRoles?, configureEvents?,
-  configureVoice?, configureAttachments?)` registers routing, events, the user subsystem, roles,
-  attachments, channels and every kind of channel this server can host, voice, and every discovered
-  endpoint.
+  configureVoice?, configureAttachments?)` registers the domain: events, the user subsystem, roles,
+  attachments, channels and every kind of channel this server can host, voice, and E2EE. No transport.
+- `AddRaindropGrpc()` (in `RaindropServer.Grpc`) serves it: `AddGrpc` with `RaindropInterceptor` and the
+  message limits, the `ProtobufEventEncoder`, and the route contributor mapping every service. Call it
+  after `AddRaindropServer`.
 - `AddRaindropAttachments(configure?)` registers `AttachmentService` (also the `IMessageAttachments` text
   channels use), the local-folder storage, the configured policy, the deletion listener, the maintenance
   sweep and the storage startup check. It runs **before** `AddRaindropChannels`, which otherwise fills in
   `NoMessageAttachments` (refuses every file).
-- `AddRaindropEvents(configure?)` registers the publisher, the connection registry and the WebSocket
-  transport. Every subsystem that publishes calls it itself; register your own `IEventPublisher` or
-  `IEventConnectionRegistry` first to replace them.
+- `AddRaindropEvents(configure?)` registers the publisher, the connection registry and the placeholder
+  `ServerIdentity`. Every subsystem that publishes calls it itself; register your own `IEventPublisher`
+  or `IEventConnectionRegistry` first to replace them.
 - `AddRaindropRoles(configure?)` registers roles, the `IPermissionResolver` that reads them, and the
   `OwnerClaim` listener. `AddRaindropChannels` calls it, because channels own no permission rules of
   their own. Registering a different `IPermissionResolver` before this runs wins — everything here
@@ -647,165 +678,36 @@ consistent. So deleting a role deletes its assignments explicitly.
   an `IChannelModule` registration here; that list is what decides which types can exist. It also
   registers the default `IMessageDeletionListener` (the archive), with `TryAddEnumerable`.
 - `AddRaindropVoice(configure?)` registers the voice module, `VoiceService`, the in-memory state
-  store, and the background worker. `AddRaindropLiveKit(configure)` (in `RaindropServer.Voice.LiveKit`)
-  registers the LiveKit transport and relay, and must run **before** `AddRaindropServer`, since the
-  voice subsystem only fills in a transport when none is registered.
+  store, the background worker and `VoiceSignalRoutes`. `AddRaindropLiveKit(configure)` (in
+  `RaindropServer.Voice.LiveKit`) registers the LiveKit transport and relay, and must run **before**
+  `AddRaindropServer`, since the voice subsystem only fills in a transport when none is registered.
 - `AddRaindropDatabase(options)` enables exactly one driver by name and registers its stores.
   Nothing is persisted until it is called.
 - `InitializeRaindropDatabaseAsync()` creates missing tables **and seeds the two built-in roles**;
-  call it before `ServerHost.Start` so both are in place before the first request.
-- `ServerHost.Start(services, urls)` copies the descriptors into a `WebApplication`, maps every
-  `IEndpoint`, and starts on a background `Task.Run` so the calling thread stays free for the console
-  loop. It is `IAsyncDisposable`, and exposes `Services` so the console can act through the same
-  instances the endpoints use rather than writing behind the running server's back.
+  call it before `ServerHost.Start` so both are in place before the first call.
+- `ServerHost.Start(services, options)` validates the options, builds the `WebApplication`
+  (`ServerHost.Build`: Kestrel, every registered descriptor, every `IRouteContributor` mapped) and
+  starts it on a background `Task.Run` so the calling thread stays free for the console loop. It is
+  `IAsyncDisposable`, and exposes `Services` so the console can act through the same instances the
+  services use rather than writing behind the running server's back. Tests call `Build` directly with
+  `TestServer` swapped in.
 
-### User API
+### APIs
 
-All routes are under `/api/users`. Authenticated ones take `Authorization: Bearer <token>`.
-
-| Method | Route | Auth | Purpose |
-|---|---|---|---|
-| GET | `/api/server/info` | – | handshake: protocol version, TLS fingerprint to pin, supported formats |
-| POST | `/api/users/status` | – | what this UUID means here: `unregistered`, `active`, `left_preserved`, `erased` |
-| POST | `/api/users/username-available` | – | uniqueness pre-check for the registration screen |
-| POST | `/api/users/register` | – | first login: claim a username and password, get a session |
-| POST | `/api/users/login` | – | UUID (or username) + password → session |
-| POST | `/api/users/rejoin` | – | restore a preserved account |
-| POST | `/api/users/logout` | ✓ | end this session |
-| GET | `/api/users/me` | ✓ | own profile |
-| POST | `/api/users/lookup` | ✓ | resolve a UUID to a display name, e.g. for a message author |
-| POST | `/api/users/me/password` | ✓ | change password; revokes all sessions and returns a new token |
-| POST | `/api/users/me/username` | ✓ | claim a different username |
-| POST | `/api/users/me/leave` | ✓ | leave the server, preserving or erasing data |
-
-Error bodies are `{ "error": "<code>", "message": "<text>" }`. Codes clients branch on:
-`username_taken`, `already_registered`, `account_preserved`, `account_left`, `invalid_credentials`,
-`invalid_session`, `no_preserved_account`, `weak_password`, `invalid_username`, `invalid_payload`,
-`unsupported_media_type`.
+Every service, RPC and message is in `../RaindropProto/raindrop/v1/`; the per-domain docs carry the
+tables and rules: [users](docs/users.md#user-api), [members](docs/members.md#member-api),
+[roles](docs/roles-and-permissions.md#role-api), [channels](docs/channels.md#channel-api),
+[messages](docs/messages.md#message-api), [voice](docs/voice.md#voice-api), [E2EE](docs/e2ee.md#api),
+[attachments](docs/attachments.md#attachment-api), [events](docs/events.md). Every error reason is in
+`../RaindropProto/docs/errors.md`.
 
 Login deliberately answers `invalid_credentials` for an unknown UUID as well as a wrong password, so
-the API cannot be used to enumerate who is on the server.
-
-### Event API
-
-| Method | Route | Auth | Purpose |
-|---|---|---|---|
-| GET | `/api/events` | ✓ | WebSocket (HTTP/1.1 upgrade or HTTP/2 extended CONNECT) streaming every change the caller may see |
-
-Event types: `ready`, `message.created`, `message.deleted`, `channel.created`, `channel.renamed`,
-`channel.deleted`, `member.joined`, `member.renamed`, `member.left`, `member.presence`, `member.roles`,
-`role.created`, `role.updated`, `role.deleted`, `voice.state`, `voice.left`, `e2ee.device.added`,
-`e2ee.device.revoked`, `e2ee.identity.reset`, `e2ee.handshake`, `e2ee.welcome`, `e2ee.group.reconcile`,
-`e2ee.keypackages.low`, `message.reported`. A non-WebSocket request gets `426 websocket_required`.
-Close codes: `1001` server stopping, `1008` client sent data, `4401` session ended, `4429` too slow.
-
-### E2EE API
-
-All authenticated; see [`docs/e2ee.md`](docs/e2ee.md#api) for request shapes and error codes.
-
-| Method | Route | Purpose |
-|---|---|---|
-| POST | `/api/e2ee/devices/register` | register a device from its certificate (first one sets the identity key) |
-| POST | `/api/e2ee/devices/list` | identity keys and active devices of up to 500 users |
-| POST | `/api/e2ee/devices/revoke` | revoke one of your devices (bound session, unless it is this one) |
-| POST | `/api/e2ee/identity/reset` | with the password: forget identity key and backup, revoke every device |
-| POST | `/api/e2ee/session/challenge` | one-time nonce to sign with a device key |
-| POST | `/api/e2ee/session/bind` | bind this session to a device with that signature |
-| GET | `/api/e2ee/backup` | the sealed key backup |
-| POST | `/api/e2ee/backup/put` | replace it (bound session) |
-| POST | `/api/e2ee/device-link/start` · `offer` · `approve` · `approval` | link a new device through the relay |
-| POST | `/api/e2ee/groups/create` · `state` · `commit` · `info` · `sync` · `roster` | a channel's MLS group: start, read, commit (one per epoch), publish group info, catch up, who belongs |
-| POST | `/api/e2ee/keypackages/upload` · `claim`, GET `…/count` | devices' key packages |
-| GET | `/api/e2ee/welcomes`, POST `…/ack` | Welcomes waiting for this device |
-
-### Member API
-
-| Method | Route | Auth | Purpose |
-|---|---|---|---|
-| GET | `/api/members` | ✓ | every active member, with `presence` (`online`/`offline`), ordered by presence then username |
-
-No error codes of its own beyond `invalid_session`, which is what a caller who is no longer a member
-gets.
-
-### Role API
-
-All authenticated. Reading is open to any member — a role list is not a secret, and a client needs it
-to show who moderates what. Writing needs `manage_roles` **and** every permission involved.
-
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/roles` | every role on this server, highest position first |
-| GET | `/api/roles/me` | the caller's own roles, and what they may do server-wide |
-| GET | `/api/roles/permissions` | the permissions this build understands, for a role editor |
-| POST | `/api/roles/get` | one role, and the UUIDs holding it |
-| POST | `/api/roles/create` | create a role |
-| POST | `/api/roles/update` | rename it, replace its permissions, or move it |
-| POST | `/api/roles/delete` | delete it and take it away from everyone holding it |
-| POST | `/api/roles/assign` | give a member a role |
-| POST | `/api/roles/unassign` | take a role away from a member |
-| POST | `/api/roles/member` | which roles one member holds, and what they add up to |
-
-`update` leaves out what it is not changing: `name`, `permissions` and `position` are each optional
-and mean "leave this alone" when absent, so renaming a role cannot accidentally clear what it grants.
-An **empty** permission list does clear them — that is the difference between absent and empty.
-
-`assign` and `unassign` answer with `changed`, which is false when the member already held the role
-or already did not. Neither is an error: the request describes a state, and that state now holds.
-
-Role error codes on top of the user ones: `invalid_role_name`, `role_name_taken`, `role_not_found`,
-`invalid_permission`, `role_immutable`, `role_not_assignable`, `last_owner`, `member_not_found`,
-`missing_permission`.
-
-### Channel API
-
-All authenticated. Ids travel in the body rather than the path, for the same reason usernames do —
-see Transport security.
-
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/channels` | every channel the caller may see, with `yourPermissions` for each |
-| POST | `/api/channels/create` | create a channel of a given type: `text` or `voice` |
-| POST | `/api/channels/get` | one channel, and what the caller may do in it |
-| POST | `/api/channels/rename` | rename it — needs `RenameChannels`, or having created it |
-| POST | `/api/channels/delete` | delete it and everything in it — needs `DeleteChannels`, or having created it |
-| POST | `/api/channels/text/messages/send-encrypted` | post an end-to-end encrypted message — needs `SendMessages` and a bound session; `attachmentIds` adds finished uploads (needs `AttachFiles`) |
-| POST | `/api/channels/text/messages/send` | post a plaintext message — `encryption_required` unless `channels.allowPlaintextMessages` |
-| POST | `/api/channels/text/messages/report` | report an encrypted message, revealing its text with the author's attestation |
-| POST | `/api/channels/text/messages/reports` | a channel's reports — needs `ManageMessages` |
-| POST | `/api/channels/text/messages/history` | one page of history, newest page first; follow `nextCursor` |
-| POST | `/api/channels/text/messages/delete` | delete a message: your own always, anyone else's with `ManageMessages` |
-| GET | `/api/channels/voice` | whether voice works here, and who is in every call the caller can see |
-| POST | `/api/channels/voice/join` | join a call — needs `Connect`; returns the transport, where to connect, and a short-lived token |
-| POST | `/api/channels/voice/leave` | leave the named call (idempotent; only the joining session) |
-| POST | `/api/channels/voice/state` | self mute / deafen, for everybody's icons |
-| POST | `/api/channels/voice/mute` | mute or unmute a member for everyone — needs `MuteMembers` server-wide |
-| GET | `/api/channels/voice/signal/{path}` | LiveKit's signalling, relayed (authenticated by LiveKit's token, not a session) |
-
-Channel error codes on top of the user ones: `invalid_channel_type`, `channel_type_unsupported`,
-`invalid_channel_name`, `channel_name_taken`, `channel_not_found`, `wrong_channel_type`,
-`missing_permission`, `invalid_message`, `message_too_long`, `message_not_found`, `invalid_cursor`,
-`encryption_required`, `device_required`, `invalid_mls_message`, `wrong_group`, `group_not_found`, `stale_epoch`,
-and for voice `voice_unavailable`, `channel_full`, `not_in_voice`, `member_not_found`.
-
-### Attachment API
-
-All authenticated; full reference [`docs/attachments.md`](docs/attachments.md). Uploads need `SendMessages`
-and `AttachFiles` in the channel and a bound session.
-
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/attachments/policy` | what this server accepts: size limits, allowed/blocked extensions, preview list, chunk size |
-| POST | `/api/attachments/uploads/create` | start an upload: `{channelId, extension, ciphertextSize, kind?}` |
-| PUT | `/api/attachments/uploads/chunk` | raw bytes, with `Raindrop-Attachment-Id` and `Raindrop-Upload-Offset` headers |
-| POST | `/api/attachments/uploads/status` | bytes received so far, to resume |
-| POST | `/api/attachments/uploads/complete` | finish it, checked against the ciphertext's SHA-256 |
-| POST | `/api/attachments/uploads/cancel` | throw away an upload not yet sent |
-| POST | `/api/attachments/download` | the ciphertext, to anyone who can see the channel (`Range` honoured) |
-
-Attachment error codes: `attachments_disabled`, `invalid_attachment`, `file_type_not_allowed`,
-`file_too_large`, `too_many_pending_uploads`, `upload_offset_mismatch`, `chunk_too_large`,
-`upload_incomplete`, `upload_finished`, `hash_mismatch`, `too_many_attachments`,
-`attachment_already_sent`, `attachment_not_found`, `attachment_unavailable`.
+the API cannot be used to enumerate who is on the server. `UpdateRole` leaves out what it is not
+changing (`optional` name and position, a `PermissionSet` wrapper — absent keeps, empty clears);
+`AssignRole`/`UnassignRole` answer `changed: false` rather than an error when nothing changed. A channel
+the caller may not see is `channel_not_found`, never forbidden. Uploads need `send_messages` and
+`attach_files` in the channel and a bound session; downloads refuse everything unreachable as
+`attachment_not_found`.
 
 
 ## Configuration
@@ -814,7 +716,7 @@ Attachment error codes: `attachments_disabled`, `invalid_attachment`, `file_type
 `urls`, `tls`, `database`, `users`, `channels` (message length and history page sizes), `roles`,
 `voice` and `attachments`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
 `RAINDROP_DB_PROVIDER`, `RAINDROP_DB_CONNECTION_STRING`, `RAINDROP_DEV_WIPE_DATABASE`,
-`RAINDROP_TLS_ENABLED`,
+`RAINDROP_TLS_ENABLED` (only `true` is accepted),
 `RAINDROP_TLS_CERTIFICATE_PATH`, `RAINDROP_TLS_CERTIFICATE_PASSWORD`, `RAINDROP_TLS_IDENTITY_KEY_PATH`,
 `RAINDROP_VOICE_PROVIDER`, `RAINDROP_VOICE_STARTUP_CHECK`, `RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`,
 `RAINDROP_LIVEKIT_API_SECRET`, `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`, `RAINDROP_ATTACHMENTS_ENABLED`,
@@ -878,9 +780,9 @@ the first time this server runs and never afterwards), `channelCreatorModeratesO
 setting, rather than a role that silently grants less than the owner meant.
 
 Relative TLS certificate paths resolve against the executable's directory; the SQLite path is
-relative to the working directory. Set `tls.enabled` to false only when a reverse proxy terminates
-TLS, and listen on `http://` in that case — an `https://` URL without a certificate is a startup
-error rather than a silent downgrade.
+relative to the working directory. TLS cannot be switched off: `tls.enabled: false` and any `http://`
+URL are startup errors (the setting is still read so an older file loads). A reverse proxy in front
+of the server has to pass TLS through rather than terminate it.
 
 ## Docker Compose: the whole stack, or just its components
 
@@ -895,7 +797,8 @@ docker compose up -d server
 `postgres`, `sqlserver` and `livekit` can also run on their own, for `dotnet run` development against
 a real database instead of the default SQLite, or a LiveKit sidecar for voice calls (configured by
 `livekit.yaml`, key and secret from `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` in `.env`; the server
-refuses `--dev` credentials). `docker compose up -d livekit`, then run with
+refuses `--dev` credentials; the image is pinned to the release whose RoomService messages
+`RaindropServer.Voice.LiveKit/Protos/` holds). `docker compose up -d livekit`, then run with
 `RAINDROP_VOICE_PROVIDER=livekit` and the *same* pair as `RAINDROP_LIVEKIT_API_KEY` /
 `RAINDROP_LIVEKIT_API_SECRET` — LiveKit rejects everything signed with any other secret;
 `LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for audio (127.0.0.1 for clients on

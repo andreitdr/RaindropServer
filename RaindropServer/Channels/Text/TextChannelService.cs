@@ -7,7 +7,7 @@ namespace RaindropServer.Channels.Text;
 
 /// <summary>
 /// What happens inside a text channel: posting a message, reading the history, and deleting a
-/// message. Every rule lives here, so the endpoints stay thin and the database driver stays dumb.
+/// message. Every rule lives here, so the services serving it stay thin and the database driver stays dumb.
 /// </summary>
 /// <remarks>
 /// The channel itself — whether it exists, and whether the caller may see it — is

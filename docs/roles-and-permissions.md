@@ -1,7 +1,8 @@
 # Roles & permissions
 
-Domain code: [`RaindropServer/Roles/`](../RaindropServer/Roles/). HTTP surface:
-[`ServerCli/Endpoints/Roles/`](../ServerCli/Endpoints/Roles/).
+Domain code: [`RaindropServer/Roles/`](../RaindropServer/Roles/). Wire surface: `raindrop.v1.RoleService`
+([`roles.proto`](../../RaindropProto/raindrop/v1/roles.proto)), served by
+[`RoleGrpcService`](../RaindropServer.Grpc/Services/CommunityServices.cs).
 
 **A role is a named set of permissions, a member holds any number of them, and what they may do is the
 union.** Roles live on the server and are keyed to the member's UUID, matched at login like everything
@@ -36,7 +37,7 @@ Two conventions hold everywhere in the codebase:
 - **Permissions travel as names, never as a bitfield.** A client too old to know a permission lists
   the ones it understands and ignores the rest — exactly like `PresenceStatus` and `ChannelType`.
   [`PermissionNames`](../RaindropServer/Roles/Permission.cs) is the single table everything else is
-  derived from (wire names, the parser, and the catalogue `GET /api/roles/permissions` serves), so
+  derived from (wire names, the parser, and the catalogue `RoleService.ListPermissions` serves), so
   adding a permission means adding one row to it.
 - **`Administrator` is expanded, never compared literally.** `PermissionExtensions.Expand` turns it
   into every permission this build has, so an administrator is never refused something merely because
@@ -139,27 +140,25 @@ touching the database directly.
 All authenticated. Reading is open to any member (a role list isn't a secret, and a client needs it to
 show who moderates what). Writing needs `manage_roles` **and** every permission involved.
 
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/api/roles` | Every role on this server, highest position first |
-| GET | `/api/roles/me` | The caller's own roles, and what they may do server-wide |
-| GET | `/api/roles/permissions` | The permissions this build understands, for a role editor |
-| POST | `/api/roles/get` | One role, and the UUIDs holding it |
-| POST | `/api/roles/create` | Create a role |
-| POST | `/api/roles/update` | Rename it, replace its permissions, or move it |
-| POST | `/api/roles/delete` | Delete it and take it away from everyone holding it |
-| POST | `/api/roles/assign` | Give a member a role |
-| POST | `/api/roles/unassign` | Take a role away from a member |
-| POST | `/api/roles/member` | Which roles one member holds, and what they add up to |
+`raindrop.v1.RoleService`:
 
-Endpoint implementations: [`ServerCli/Endpoints/Roles/`](../ServerCli/Endpoints/Roles/)
-(`ListRolesEndpoint.cs`, `MyRolesEndpoint.cs`, `PermissionCatalogueEndpoint.cs`, `GetRoleEndpoint.cs`,
-`CreateRoleEndpoint.cs`, `UpdateRoleEndpoint.cs`, `DeleteRoleEndpoint.cs`, `AssignRoleEndpoint.cs`,
-`UnassignRoleEndpoint.cs`, `MemberRolesEndpoint.cs`).
+| RPC | Purpose |
+|---|---|
+| `ListRoles` | Every role on this server, highest position first |
+| `GetMyRoles` | The caller's own roles, and what they may do server-wide |
+| `ListPermissions` | The permissions this build understands, for a role editor |
+| `GetRole` | One role, and the UUIDs holding it |
+| `CreateRole` | Create a role |
+| `UpdateRole` | Rename it, replace its permissions, or move it |
+| `DeleteRole` | Delete it and take it away from everyone holding it |
+| `AssignRole` | Give a member a role |
+| `UnassignRole` | Take a role away from a member |
+| `GetMemberRoles` | Which roles one member holds, and what they add up to |
 
-### Request/response shapes
+### Domain contracts
 
-Defined in [`RaindropServer/Roles/RoleContracts.cs`](../RaindropServer/Roles/RoleContracts.cs):
+Defined in [`RaindropServer/Roles/RoleContracts.cs`](../RaindropServer/Roles/RoleContracts.cs); on the
+wire a role is `raindrop.v1.Role`, its kind the enum `RoleKind`, and permissions stay `repeated string`:
 
 - `RoleSummary(RoleId, Name, Kind, Position, Permissions, CreatedAtUtc)` — `Kind` is `custom`,
   `everyone` or `owner`.
@@ -167,7 +166,8 @@ Defined in [`RaindropServer/Roles/RoleContracts.cs`](../RaindropServer/Roles/Rol
 - `UpdateRoleRequest(RoleId, Name?, Permissions?, Position?)` — **every field but `RoleId` is optional
   and means "leave this alone" when omitted**, so renaming a role can't accidentally clear what it
   grants. An **empty** permission list *does* clear them — that's the difference between absent and
-  empty.
+  empty. On the wire `name` and `position` are `optional` and `permissions` is a `PermissionSet`
+  wrapper, so absent and empty stay different.
 - `RoleRequest(RoleId)`, `MemberRolesRequest(UserId)`, `MemberRoleRequest(UserId, RoleId)`
 - `RoleListResponse(Roles)`
 - `RoleDetail(Role, Members)` — the UUIDs holding a role, in grant order; empty for `everyone`, which
@@ -175,7 +175,7 @@ Defined in [`RaindropServer/Roles/RoleContracts.cs`](../RaindropServer/Roles/Rol
 - `MemberRolesResponse(UserId, Roles, Permissions)` — `Roles` includes `everyone` first even though
   nobody is assigned it; `Permissions` is the fully-expanded union.
 - `RoleDeletedResponse(RoleId, Message)`
-- `MemberRoleChangedResponse(UserId, RoleId, Changed, Message)` — `assign`/`unassign` answer with
+- `MemberRoleChangedResponse(UserId, RoleId, Changed, Message)` — `AssignRole`/`UnassignRole` answer with
   `Changed`, which is `false` when the member already held the role or already didn't. **Neither case
   is an error** — the request describes a target state, and that state now holds.
 - `PermissionCatalogueResponse(Permissions)` — the catalogue a client builds a role editor from.
@@ -191,5 +191,5 @@ On top of the [user error codes](users.md#error-codes): `invalid_role_name`, `ro
 - [Channels](channels.md#permissions) — what permission each channel operation needs.
 - [Events](events.md) — `role.created`, `role.updated`, `role.deleted` and `member.roles` are pushed to
   every member, from the API and the console alike. They are the cue for a client to re-read its channel
-  list and `GET /api/roles/me`, since what it may see and do may have changed.
+  list and `GetMyRoles`, since what it may see and do may have changed.
 - [Configuration](configuration.md#roles) — the `roles` section of `raindrop.json`.

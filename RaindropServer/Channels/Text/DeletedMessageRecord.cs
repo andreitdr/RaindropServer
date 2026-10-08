@@ -6,7 +6,7 @@ namespace RaindropServer.Channels.Text;
 /// <remarks>
 /// Deleting a message erases its text from the message row (see <see cref="TextMessageRecord"/>), and
 /// deleting a channel removes its messages outright. This is what is kept instead. It is written to
-/// the database and nowhere else: no endpoint reads it, and no client is ever sent it, so it is
+/// the database and nowhere else: no call reads it, and no client is ever sent it, so it is
 /// there for the server owner and for nobody else.
 /// </remarks>
 public sealed record DeletedMessageRecord
