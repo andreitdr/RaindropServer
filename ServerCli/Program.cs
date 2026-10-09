@@ -118,6 +118,11 @@ services.AddSingleton(new ServerIdentity(
     [
         .. fingerprint is null ? Array.Empty<string>() : [ServerIdentity.TlsIdentityBindingCapability],
         ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability,
+        // Camera video needs a media server to carry it and a cap above zero to allow it. Left out
+        // otherwise, so a client hides the camera button rather than offering one that always fails.
+        .. config.Voice.Provider is not null && config.Voice.MaximumCameraPublishers > 0
+            ? [ServerIdentity.VoiceVideoCapability]
+            : Array.Empty<string>(),
         .. config.Attachments.Enabled ? [ServerIdentity.AttachmentsCapability] : Array.Empty<string>()
     ]
 });
@@ -333,7 +338,11 @@ async Task PrintVoiceCallsAsync()
     foreach (var call in participants.GroupBy(participant => participant.ChannelId))
     {
         var channel = await channelStore.FindByIdAsync(call.Key, CancellationToken.None);
-        Console.WriteLine($"  {channel?.Name ?? call.Key.ToString()}");
+        var cameras = call.Count(participant => participant.CameraOn);
+        var cap = config.Voice.MaximumCameraPublishers;
+
+        Console.WriteLine($"  {channel?.Name ?? call.Key.ToString()}" +
+                          (cap == 0 ? "" : $"  ({cameras}/{cap} camera(s))"));
 
         foreach (var participant in call)
         {
@@ -344,6 +353,8 @@ async Task PrintVoiceCallsAsync()
             else if (participant.SelfMute) flags.Add("muted");
             if (participant.ServerMute) flags.Add("muted for everyone");
             if (participant.Suppressed) flags.Add("cannot speak");
+            if (participant.CameraOn) flags.Add("camera on");
+            else if (participant.CameraSuppressed) flags.Add("no camera");
 
             Console.WriteLine($"      {user?.Username ?? participant.UserId.ToString()}" +
                               (flags.Count == 0 ? "" : $"  ({string.Join(", ", flags)})"));

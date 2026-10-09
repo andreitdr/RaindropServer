@@ -387,6 +387,7 @@ public sealed record ServerConfig
     public void ApplyTo(VoiceOptions options)
     {
         options.MaximumParticipantsPerChannel = Voice.MaximumParticipants;
+        options.MaximumCameraPublishersPerChannel = Voice.MaximumCameraPublishers;
         options.StartupCheck = VoiceStartupCheck;
     }
 
@@ -946,6 +947,10 @@ public sealed record RoleConfig(
 /// then still be created, but nobody can join one.
 /// </param>
 /// <param name="MaximumParticipants">The most members one voice call holds.</param>
+/// <param name="MaximumCameraPublishers">
+/// How many members of one call may send their camera at once — far fewer than the call holds, since
+/// every camera goes to everybody else. 0 switches camera video off on this server entirely.
+/// </param>
 /// <param name="StartupCheck">
 /// How hard the server looks for the media server before it starts listening: <c>off</c> not at all,
 /// <c>warn</c> to report an unreachable one and start anyway, <c>require</c> to refuse to start
@@ -955,6 +960,7 @@ public sealed record RoleConfig(
 public sealed record VoiceConfig(
     string? Provider = null,
     int MaximumParticipants = 25,
+    int MaximumCameraPublishers = 6,
     string StartupCheck = "warn",
     // Named here as the file names it: the property is LiveKit, and a server owner told their typo
     // was in 'voice.liveKit' would go looking for a setting that does not appear anywhere.

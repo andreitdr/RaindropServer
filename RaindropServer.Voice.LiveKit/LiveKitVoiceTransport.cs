@@ -38,8 +38,14 @@ public sealed class LiveKitVoiceTransport : IVoiceTransport
         return Task.FromResult(new VoiceConnection(Name, null, SignalPath, token, expiresAtUtc));
     }
 
-    public Task SetCanSpeakAsync(Guid channelId, Guid userId, bool canSpeak, CancellationToken cancellationToken) =>
-        _rooms.UpdatePermissionAsync(_jwt.RoomFor(channelId), userId.ToString("D"), canSpeak, cancellationToken);
+    public Task SetPublishAsync(
+        Guid channelId,
+        Guid userId,
+        bool canSpeak,
+        bool canPublishCamera,
+        CancellationToken cancellationToken) =>
+        _rooms.UpdatePermissionAsync(
+            _jwt.RoomFor(channelId), userId.ToString("D"), canSpeak, canPublishCamera, cancellationToken);
 
     public Task DisconnectAsync(Guid channelId, Guid userId, CancellationToken cancellationToken) =>
         _rooms.RemoveParticipantAsync(_jwt.RoomFor(channelId), userId.ToString("D"), cancellationToken);
@@ -62,7 +68,8 @@ public sealed class LiveKitVoiceTransport : IVoiceTransport
             {
                 if (Guid.TryParse(participant.Identity, out var userId))
                 {
-                    participants.Add(new TransportParticipant(userId, participant.CanPublish));
+                    participants.Add(new TransportParticipant(
+                        userId, participant.CanPublish, participant.CanPublishCamera));
                     continue;
                 }
 

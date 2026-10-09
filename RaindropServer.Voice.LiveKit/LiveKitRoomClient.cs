@@ -39,7 +39,14 @@ public sealed class LiveKitRoomClient : IDisposable
         return response.Rooms.Select(room => room.Name).Where(name => name.Length > 0).ToList();
     }
 
-    /// <summary>Who is in a room, and whether each may publish. Nobody, when the room does not exist.</summary>
+    /// <summary>
+    /// Who is in a room, and what each may publish. Nobody, when the room does not exist.
+    /// </summary>
+    /// <remarks>
+    /// The sources are read back, not just <c>can_publish</c>, because the reconciler compares what
+    /// LiveKit allows a participant against what Raindrop's record says it should — and the camera
+    /// is the half of that which <c>can_publish</c> alone cannot express.
+    /// </remarks>
     public async Task<IReadOnlyList<LiveKitParticipant>> ListParticipantsAsync(string room, CancellationToken cancellationToken)
     {
         var response = await CallAsync("ListParticipants", room, new ListParticipantsRequest { Room = room },
@@ -50,7 +57,8 @@ public sealed class LiveKitRoomClient : IDisposable
             .Select(participant => new LiveKitParticipant(
                 participant.Identity,
                 participant.State.ToString().ToUpperInvariant(),
-                participant.Permission?.CanPublish ?? false))
+                participant.Permission?.CanPublish ?? false,
+                participant.Permission?.CanPublishSources.Contains(TrackSource.Camera) ?? false))
             .ToList();
     }
 
@@ -59,7 +67,12 @@ public sealed class LiveKitRoomClient : IDisposable
     /// merging, so everything a Raindrop participant is allowed is sent every time — sending only
     /// <c>can_publish</c> would also switch off their ability to hear the call.
     /// </summary>
-    public Task UpdatePermissionAsync(string room, string identity, bool canPublish, CancellationToken cancellationToken) =>
+    public Task UpdatePermissionAsync(
+        string room,
+        string identity,
+        bool canSpeak,
+        bool canPublishCamera,
+        CancellationToken cancellationToken) =>
         CallAsync("UpdateParticipant", room, new UpdateParticipantRequest
         {
             Room = room,
@@ -67,12 +80,24 @@ public sealed class LiveKitRoomClient : IDisposable
             Permission = new ParticipantPermission
             {
                 CanSubscribe = true,
-                CanPublish = canPublish,
+                CanPublish = canSpeak || canPublishCamera,
                 CanPublishData = false,
-                CanPublishSources = { TrackSource.Microphone },
+                // Built by the same never-empty rule as the join token's, since LiveKit reads an
+                // empty list here as "every source" too.
+                CanPublishSources =
+                {
+                    LiveKitJwt.PublishableSources(canSpeak, canPublishCamera).Select(SourceOf)
+                },
                 CanUpdateMetadata = false
             }
         }, ParticipantInfo.Parser, cancellationToken);
+
+    private static TrackSource SourceOf(string name) => name switch
+    {
+        "camera" => TrackSource.Camera,
+        "microphone" => TrackSource.Microphone,
+        _ => TrackSource.Unknown
+    };
 
     /// <summary>Removes a participant. Somebody already gone is not an error.</summary>
     public Task RemoveParticipantAsync(string room, string identity, CancellationToken cancellationToken) =>
@@ -273,7 +298,11 @@ public sealed class LiveKitRoomClient : IDisposable
 /// <param name="Identity">Their identity in the room — a Raindrop member's UUID, for anybody Raindrop admitted.</param>
 /// <param name="State"><c>JOINING</c>, <c>JOINED</c>, <c>ACTIVE</c> or <c>DISCONNECTED</c>.</param>
 /// <param name="CanPublish">Whether LiveKit currently accepts their microphone.</param>
-public sealed record LiveKitParticipant(string Identity, string State, bool CanPublish);
+public sealed record LiveKitParticipant(
+    string Identity,
+    string State,
+    bool CanPublish,
+    bool CanPublishCamera);
 
 /// <summary>What asking LiveKit whether it is there came back with.</summary>
 public enum LiveKitReachability

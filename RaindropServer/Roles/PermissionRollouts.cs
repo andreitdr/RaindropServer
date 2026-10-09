@@ -34,6 +34,7 @@ public static class PermissionRollouts
     public static IReadOnlyList<PermissionRollout> All { get; } =
     [
         new("voice", Permission.Connect | Permission.Speak),
-        new("attachments", Permission.AttachFiles)
+        new("attachments", Permission.AttachFiles),
+        new("voice-video", Permission.Video)
     ];
 }

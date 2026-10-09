@@ -59,6 +59,18 @@ public sealed record ServerIdentity(
     public const string E2eeVoiceCapability = "e2ee.voice.v1";
 
     /// <summary>
+    /// Advertised when calls on this server carry camera video as well as voice: a member with the
+    /// <c>video</c> permission may turn their camera on, within the server's cap on how many cameras
+    /// one call carries at once. Encryption is the same key and the same guarantee as
+    /// <see cref="E2eeVoiceCapability"/> — one key per call, covering voice and camera alike.
+    /// </summary>
+    /// <remarks>
+    /// A new capability rather than a protocol version bump, which is how every additive feature is
+    /// announced: a client too old to know it simply shows no camera button.
+    /// </remarks>
+    public const string VoiceVideoCapability = "voice.video.v1";
+
+    /// <summary>
     /// Advertised when members may add end-to-end encrypted files to messages
     /// (<c>AttachmentService</c>, and <c>attachment_ids</c> on <c>SendEncryptedMessage</c>). Left out when the
     /// owner has switched attachments off.

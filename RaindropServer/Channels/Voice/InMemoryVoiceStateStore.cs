@@ -66,6 +66,41 @@ public sealed class InMemoryVoiceStateStore : IVoiceStateStore
         }
     }
 
+    public ValueTask<VoiceCameraOutcome> SetCameraAsync(
+        Guid userId,
+        bool on,
+        int cameraCapacity,
+        Func<VoiceParticipantRecord, bool>? predicate,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (!_byUser.TryGetValue(userId, out var record) || predicate?.Invoke(record) == false)
+                return ValueTask.FromResult(new VoiceCameraOutcome(false, false, null));
+
+            // Already what was asked for: nothing to decide, and in particular a member whose camera
+            // is on must not be told the call is full because they are counted in it themselves.
+            if (record.CameraOn == on)
+                return ValueTask.FromResult(new VoiceCameraOutcome(false, false, record));
+
+            if (on)
+            {
+                if (record.CameraSuppressed)
+                    return ValueTask.FromResult(new VoiceCameraOutcome(false, true, null));
+
+                var others = _byUser.Values.Count(other =>
+                    other.ChannelId == record.ChannelId && other.UserId != userId && other.CameraOn);
+
+                if (others >= cameraCapacity)
+                    return ValueTask.FromResult(new VoiceCameraOutcome(true, false, null));
+            }
+
+            var updated = record with { CameraOn = on };
+            _byUser[userId] = updated;
+            return ValueTask.FromResult(new VoiceCameraOutcome(false, false, updated));
+        }
+    }
+
     public ValueTask<VoiceParticipantRecord?> FindAsync(Guid userId, CancellationToken cancellationToken)
     {
         lock (_gate)

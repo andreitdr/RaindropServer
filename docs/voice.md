@@ -42,17 +42,22 @@ Voice uses the same server-wide roles as everything else (see
 | `ViewChannel` | `view_channel` | See the voice channel at all. Without it the channel does not exist for you, and neither does its call. |
 | `Connect` | `connect` | Join the call. |
 | `Speak` | `speak` | Be heard. Without it you join as a listener: the participant is `suppressed`, and LiveKit refuses your microphone. |
+| `Video` | `video` | Be seen. Without it the participant is `camera_suppressed` and LiveKit refuses their camera. Separate from `speak`, so a member can be heard without being seen. |
 | `MuteMembers` | `mute_members` | Mute or unmute somebody for everyone. Checked **server-wide**, never per channel, and not part of the channel-creator rule, because a mute follows its target into every call. |
 
-`connect` and `speak` are in the `everyone` role by default. An existing server gains them once
-through a **permission rollout**; see below.
+`connect`, `speak` and `video` are in the `everyone` role by default. An existing server gains them
+once through a **permission rollout**; see below.
 
 Permissions are enforced by the media server, not just the UI:
 
-- A join token's `canPublish` is `speak && !mutedForEveryone`.
-- `canPublishSources` is limited to the microphone. Camera and screen share come later, by widening it.
+- A join token's `canPublish` is `(speak && !mutedForEveryone) || cameraGranted`.
+- `canPublishSources` names `microphone` and/or `camera`, and **never nothing** — LiveKit reads an
+  empty list as "every source", so `canPublish: false` is what actually says no
+  (`LiveKitJwt.PublishableSources`, used by the join token and by `UpdateParticipant` alike).
+  Screen share comes later, by widening it again.
 - A change mid-call is pushed with LiveKit's `UpdateParticipant`. Losing `view_channel` or `connect`
-  mid-call removes the participant with reason `permission_lost`.
+  mid-call removes the participant with reason `permission_lost`; losing `video` turns their camera
+  off and takes the grant away without disturbing the rest of their call.
 
 **Nobody may mute an administrator for everyone unless they are one.** That is the same spirit as "you
 cannot hand out what you do not hold". It can never lock anybody out, because an administrator can
@@ -63,7 +68,8 @@ always unmute themselves.
 `RoleOptions.DefaultMemberPermissions` only seeds a **new** server, so an existing server upgraded to
 a build with voice would otherwise have nobody but its administrators able to join a call.
 `PermissionRollouts.All` (`Roles/PermissionRollouts.cs`) fixes that. It lists permissions a build
-introduces for everybody: `new("voice", Connect | Speak)`.
+introduces for everybody: `new("voice", Connect | Speak)`, and `new("voice-video", Video)` for the
+build that added camera video.
 
 - On startup, `EnsureBuiltInRolesAsync` ORs each rollout not yet recorded into the `everyone` role,
   then records it in `raindrop_permission_rollouts`.
@@ -81,13 +87,50 @@ sessions. A call cannot outlive the process that admitted its participants, beca
 not outlive it either.
 
 - The store's operations are whole decisions (`JoinAsync(record, capacity)` returns
-  full / moved-from / replaced). That enforces capacity and **one call per member per server**
-  atomically.
+  full / moved-from / replaced; `SetCameraAsync(on, cameraCapacity)` returns full / not-allowed).
+  That enforces capacity, the camera cap and **one call per member per server** atomically — two
+  members racing for the last place, or the last camera place, cannot both win.
 - Each record keeps the **session token** that joined. Logging out on one device ends that device's
   call and no other.
 
 **Mutes for everyone** are stored in `raindrop_voice_mutes` (`IVoiceMuteStore`, one row per muted
 member). They survive restarts and rejoins, and can be lifted while the member is not in a call.
+
+## Camera video
+
+Advertised as the capability `voice.video.v1`, when a media server is configured **and**
+`voice.maximumCameraPublishers` is above zero. A new capability name rather than a protocol version
+bump, which is how every additive feature is announced: a client too old to know it shows no camera
+button.
+
+**The camera grant follows the camera being on, not the permission.** That is the whole design, and
+it is what makes the cap real:
+
+1. A member joins. Their token names `microphone` only, whatever their permissions say —
+   `VoiceGrant.CanPublishCamera` is false at join, because joining never starts a camera.
+2. They call `SetVoiceSelfState(camera_on: true)`. The server checks `video`, counts the cameras
+   already on in that call, and either refuses (`missing_permission` / `camera_limit_reached`) or
+   records it.
+3. Having recorded it, the server pushes the new grant to LiveKit through `UpdateParticipant`, which
+   adds `camera` to `canPublishSources`. The client waits for LiveKit's permission update and *then*
+   publishes.
+4. Turning the camera off reverses it, and a client stops publishing **before** telling the server, so
+   the grant is never withdrawn from under a live publication.
+
+So a client that ignores a refusal still cannot send: LiveKit was never told to accept its camera.
+`VoiceParticipantRecord.CanPublishCamera` is `CameraOn && !CameraSuppressed` — note that unlike
+`CanSpeak` it requires the member to have *asked*, which is the mechanism in one line.
+
+**Losing `video` mid-call** turns the camera off as well as forbidding it (`ReevaluateAsync`), so the
+record never claims a camera nobody is allowed to see, and the grant goes back to microphone-only.
+
+**The cap** (`voice.maximumCameraPublishers`, 6 by default) is per call, not per server, and counted
+inside `IVoiceStateStore.SetCameraAsync` so two members racing for the last place cannot both win. It
+is deliberately far below `maximumParticipants`: every camera is sent to everybody else, so six
+cameras in a call of 25 is already 150 video streams out of the media server. Zero switches camera
+video off entirely, and the capability with it.
+
+**What is *not* here.** Screen sharing — `canPublishSources` would be widened again the same way.
 
 ## Keeping Raindrop and LiveKit in step
 
@@ -155,9 +198,9 @@ pins>/api/channels/voice/signal`. LiveKit's SDK then opens `…/rtc` and, after 
 Media is encrypted twice:
 
 - **DTLS-SRTP**, as far as LiveKit.
-- **End to end, inside that.** Each client's LiveKit frame cryptor encrypts every audio frame
-  (AES-GCM) before it leaves the device. LiveKit forwards frames it cannot decrypt, so neither the
-  media server nor whoever runs it can hear a call.
+- **End to end, inside that.** Each client's LiveKit frame cryptor encrypts every frame (AES-GCM)
+  before it leaves the device — voice and camera alike. LiveKit forwards frames it cannot decrypt, so
+  neither the media server nor whoever runs it can hear or see a call.
 
 **Where the key comes from.** The key comes from the voice channel's MLS group, which is the same
 [delivery service](e2ee.md#the-delivery-service) as text channels. Its members are the devices of
@@ -165,6 +208,11 @@ everyone with `view_channel` and `connect`. A client exports it as
 `MLS-Exporter("raindrop/voice/v1", group id, 32)` for the group's current epoch, and puts it in key
 slot `epoch mod 16`, so the previous keys still decrypt frames in flight. Keys are never ratcheted, and
 a decryption failure never turns encryption off.
+
+**One key per call, covering every track.** There is no second label for camera video, and there could
+not usefully be one: LiveKit's shared-key provider holds one key per ring slot for the whole room, and
+moving a participant to a new slot moves every one of their tracks — microphone and camera together.
+So camera video needed no change to the crypto at all.
 
 **Key changes.** The key changes whenever the group's epoch does:
 - somebody gains or loses access to the channel
@@ -177,11 +225,14 @@ a decryption failure never turns encryption off.
 - Its LiveKit tokens grant **no data channel** (`canPublishData = false`), so nothing that could carry
   key material passes through LiveKit.
 
-**Clients fail closed.** Audio published without encryption, or not decrypting with the group's key,
-is kept silent, and the call bar shows the state as a lock.
+**Clients fail closed.** Media published without encryption, or not decrypting with the group's key,
+is never played or drawn: audio is kept silent, and a camera is not rendered and not even subscribed
+to. The call bar shows the state as a lock. Clients also refuse to *send* a camera the frame cryptor
+did not take, and pin the video codec for that reason — see the client's
+[`docs/voice.md`](../../RaindropClient/docs/voice.md#codecs-and-the-frame-cryptor).
 
 **What the server can still see** is the call's metadata: who is in which call, when, speaking
-indicators, mute state.
+indicators, mute state, and whether a camera is on.
 
 **A participant who leaves a call keeps the key** only as long as they stay in the channel's group,
 which means they could still join the call anyway. Removing their access removes them from the group
@@ -193,19 +244,19 @@ All authenticated. `raindrop.v1.VoiceService`:
 
 | RPC | Purpose |
 |---|---|
-| `GetVoiceStatus` | → `{available, transport, maximum_participants, participants}`: whether voice works here, and everybody in every call the caller can see |
+| `GetVoiceStatus` | → `{available, transport, maximum_participants, maximum_camera_publishers, participants}`: whether voice works here, how many cameras a call carries, and everybody in every call the caller can see |
 | `JoinVoice` | `{channel_id, self_mute, self_deaf}` → `{channel_id, transport, url?, path?, token, expires_at, you, participants}`. Needs `connect`. Joining another call leaves the first; joining the same call from another device takes it over. |
 | `LeaveVoice` | `{channel_id}` → `{left}`. Idempotent, and only the session that joined can leave, so a late leave from one device cannot end another device's call. |
-| `SetVoiceSelfState` | `{self_mute, self_deaf}` → `{participant}`. Deafening always mutes too. |
+| `SetVoiceSelfState` | `{self_mute, self_deaf, camera_on}` → `{participant}`. Deafening always mutes too. Mute and deafen are only icons and are always accepted; **the camera is a decision and can be refused** (`missing_permission`, `camera_limit_reached`), and a refused camera leaves a mute in the same request standing. |
 | `MuteVoiceMember` | `{user_id, muted}` → `{user_id, muted, changed}`. Mute or unmute for everyone; needs server-wide `mute_members`. |
 
 The signalling relay at `/api/channels/voice/signal/{path}` (see above) is not part of this service and
 not a Raindrop-session route.
 
 `VoiceParticipant` is `{channel_id, user_id, self_mute, self_deaf, server_mute, suppressed, connected,
-joined_at}`: the whole state, merged by clients on `(channel_id, user_id)`. `url` is absent in this
-version (everything goes through the relay). It is in the contract so a transport can point clients
-at a media server with its own TLS later.
+joined_at, camera_on, camera_suppressed}`: the whole state, merged by clients on
+`(channel_id, user_id)`. `url` is absent in this version (everything goes through the relay). It is in
+the contract so a transport can point clients at a media server with its own TLS later.
 
 Error codes on top of the channel ones:
 
@@ -213,9 +264,10 @@ Error codes on top of the channel ones:
 |---|---|---|
 | `voice_unavailable` | 503 | No media server is configured (`voice.provider` is null) |
 | `channel_full` | 409 | The call already holds `maximumParticipants` other members |
+| `camera_limit_reached` | 409 | The call already has `maximumCameraPublishers` other cameras on |
 | `not_in_voice` | 409 | `state` from a session that is not in a call |
 | `member_not_found` | 404 | `mute` for somebody who is not an active member |
-| `missing_permission` | 403 | No `connect`, no `mute_members`, or muting an administrator without being one |
+| `missing_permission` | 403 | No `connect`, no `video` (turning a camera on), no `mute_members`, or muting an administrator without being one |
 | `wrong_channel_type` | 400 | Joining a text channel |
 
 Events: `voice.state` (a `VoiceParticipant`) and `voice.left` (`{channelId, userId, reason}`), sent to
@@ -230,6 +282,7 @@ as `left`. See [Events](events.md).
 "voice": {
   "provider": null,              // "livekit" to switch voice on
   "maximumParticipants": 25,
+  "maximumCameraPublishers": 6,  // cameras on at once in one call; 0 switches camera video off
   "startupCheck": "warn",        // off | warn | require — how hard to look for LiveKit at startup
   "livekit": {
     "apiUrl": "http://localhost:7880",

@@ -71,10 +71,12 @@ public class ConfigurationReportTests
 
     [Theory]
     [InlineData("maximumParticipans", "maximumParticipants")]
+    [InlineData("maximumCameraPublisher", "maximumCameraPublishers")]
     [InlineData("apisecret", "apiSecret")]
     [InlineData("livekid", "livekit")]
     public void A_near_miss_is_pointed_at_what_it_was_probably_meant_to_be(string typed, string meant) =>
-        Assert.Equal(meant, ConfigurationNames.Suggest(typed, ["maximumParticipants", "apiSecret", "livekit"]));
+        Assert.Equal(meant, ConfigurationNames.Suggest(typed,
+            ["maximumParticipants", "maximumCameraPublishers", "apiSecret", "livekit"]));
 
     [Fact]
     public void Something_that_resembles_nothing_is_left_unguessed() =>
@@ -311,6 +313,38 @@ public class ComponentOptionsTests
 
         Assert.False(report.HasErrors);
         Assert.True(report.HasProblems);
+    }
+
+    /// <summary>Zero is the documented way to switch camera video off, so it has to be in range.</summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(6, false)]
+    [InlineData(-1, true)]
+    [InlineData(51, true)]
+    public void The_camera_cap_takes_zero_but_not_a_negative_or_an_absurd_number(int cap, bool error) =>
+        Assert.Equal(error,
+            Check(new VoiceOptions { MaximumCameraPublishersPerChannel = cap }.Validate).HasErrors);
+
+    [Fact]
+    public void A_camera_cap_larger_than_the_call_can_never_be_reached_and_is_said_out_loud()
+    {
+        var report = Check(new VoiceOptions
+        {
+            MaximumParticipantsPerChannel = 4,
+            MaximumCameraPublishersPerChannel = 10
+        }.Validate);
+
+        Assert.False(report.HasErrors);
+        Assert.Contains(report.Problems, problem => problem.Setting == "maximumCameraPublishers");
+    }
+
+    [Fact]
+    public void A_great_many_cameras_at_once_is_allowed_but_said_out_loud()
+    {
+        var report = Check(new VoiceOptions { MaximumCameraPublishersPerChannel = 20 }.Validate);
+
+        Assert.False(report.HasErrors);
+        Assert.Contains(report.Problems, problem => problem.Setting == "maximumCameraPublishers");
     }
 
     [Fact]

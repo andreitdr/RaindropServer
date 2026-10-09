@@ -47,6 +47,7 @@ is how the Docker container is configured without editing the file.
   "voice": {
     "provider": null,
     "maximumParticipants": 25,
+    "maximumCameraPublishers": 6,
     "startupCheck": "warn",
     "livekit": {
       "apiUrl": "http://localhost:7880",
@@ -149,6 +150,12 @@ See [Voice](voice.md) for the model these configure.
   which case voice channels can be created but joining one is refused with `voice_unavailable`. Any
   other name is a startup error.
 - `maximumParticipants` — the most members one call holds (`channel_full` beyond it).
+- `maximumCameraPublishers` — how many members of one call may send their camera at once
+  (`camera_limit_reached` beyond it). Far smaller than `maximumParticipants` by design: every camera
+  goes to everybody else in the call, so this costs an order of magnitude more than voice. **0
+  switches camera video off** on this server — no member is granted a camera, and `voice.video.v1` is
+  not advertised, so clients show no camera button. A value above `maximumParticipants` is reported as
+  unreachable, and one above 12 is reported with the number of video streams it implies.
 - `startupCheck` — how hard the server looks for the media server before it starts listening: `off`
   not at all, `warn` (the default) to report an unreachable one and start anyway, `require` to refuse
   to start without it. A media server that answers and *refuses* these credentials stops the server

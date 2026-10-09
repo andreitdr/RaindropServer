@@ -41,15 +41,17 @@ public sealed class LiveKitJwt
             : null;
 
     /// <summary>
-    /// A token that lets one member into one room. The microphone is the only thing they may publish,
-    /// and only when <see cref="VoiceGrant.CanSpeak"/>; they cannot send data or rewrite their own
-    /// metadata, so nothing about them in the call is theirs to forge.
+    /// A token that lets one member into one room. They may publish their microphone only when
+    /// <see cref="VoiceGrant.CanSpeak"/> and their camera only when
+    /// <see cref="VoiceGrant.CanPublishCamera"/>, and nothing else of either kind; they cannot send
+    /// data or rewrite their own metadata, so nothing about them in the call is theirs to forge.
     /// </summary>
     public (string Token, DateTime ExpiresAtUtc) CreateParticipantToken(VoiceGrant grant)
     {
         var now = _time.GetUtcNow();
         var expires = now + _options.TokenLifetime;
         var identity = grant.UserId.ToString("D");
+        var sources = PublishableSources(grant.CanSpeak, grant.CanPublishCamera);
 
         var claims = new JsonObject
         {
@@ -64,17 +66,35 @@ public sealed class LiveKitJwt
                 ["room"] = RoomFor(grant.ChannelId),
                 ["roomJoin"] = true,
                 ["canSubscribe"] = true,
-                ["canPublish"] = grant.CanSpeak,
+                ["canPublish"] = grant.CanSpeak || grant.CanPublishCamera,
                 // No data channel at all. Calls are end-to-end encrypted with keys from the voice
                 // channel's MLS group, which travel through Raindrop's delivery service, never
                 // through LiveKit: nothing that could carry key material passes through it.
                 ["canPublishData"] = false,
-                ["canPublishSources"] = new JsonArray("microphone"),
+                ["canPublishSources"] = new JsonArray(sources.Select(name => (JsonNode?)name).ToArray()),
                 ["canUpdateOwnMetadata"] = false
             }
         };
 
         return (Sign(claims), expires.UtcDateTime);
+    }
+
+    /// <summary>
+    /// The sources a participant may publish, as LiveKit names them.
+    /// </summary>
+    /// <remarks>
+    /// Never empty, which is the point of this living in one place: LiveKit reads an empty
+    /// <c>canPublishSources</c> as "every source", so a participant allowed nothing would be allowed
+    /// everything. Paired with <c>canPublish: false</c> that is harmless today, but the pairing is
+    /// exactly the kind of thing a LiveKit upgrade changes, so the list always names something and
+    /// <c>canPublish</c> is what actually says no.
+    /// </remarks>
+    public static IReadOnlyList<string> PublishableSources(bool canSpeak, bool canPublishCamera)
+    {
+        if (canSpeak && canPublishCamera)
+            return ["microphone", "camera"];
+
+        return canPublishCamera ? ["camera"] : ["microphone"];
     }
 
     /// <summary>A token for Raindrop's own call to the room API, scoped to <paramref name="room"/> when given.</summary>

@@ -14,7 +14,7 @@ public sealed class RoleOptions
     /// </summary>
     public Permission DefaultMemberPermissions { get; set; } =
         Permission.ViewChannel | Permission.SendMessages | Permission.AttachFiles | Permission.CreateChannels |
-        Permission.Connect | Permission.Speak;
+        Permission.Connect | Permission.Speak | Permission.Video;
 
     /// <summary>
     /// Whether creating a channel makes you its moderator: able to rename it, delete it, and delete
