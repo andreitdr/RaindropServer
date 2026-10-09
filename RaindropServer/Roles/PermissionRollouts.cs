@@ -35,6 +35,7 @@ public static class PermissionRollouts
     [
         new("voice", Permission.Connect | Permission.Speak),
         new("attachments", Permission.AttachFiles),
-        new("voice-video", Permission.Video)
+        new("voice-video", Permission.Video),
+        new("voice-screen-share", Permission.ScreenShare)
     ];
 }

@@ -172,7 +172,11 @@ internal static class ToWire
         Connected = participant.Connected,
         JoinedAt = Time(participant.JoinedAtUtc),
         CameraOn = participant.CameraOn,
-        CameraSuppressed = participant.CameraSuppressed
+        CameraSuppressed = participant.CameraSuppressed,
+        ScreenShareOn = participant.ScreenShareOn,
+        ScreenShareKind = ScreenShareKind(participant.ScreenShareKind),
+        ScreenShareAudio = participant.ScreenShareAudio,
+        ScreenShareSuppressed = participant.ScreenShareSuppressed
     };
 
     // ── E2EE ─────────────────────────────────────────────────────────────────

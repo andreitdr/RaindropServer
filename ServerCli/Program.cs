@@ -123,6 +123,10 @@ services.AddSingleton(new ServerIdentity(
         .. config.Voice.Provider is not null && config.Voice.MaximumCameraPublishers > 0
             ? [ServerIdentity.VoiceVideoCapability]
             : Array.Empty<string>(),
+        // The same for screen sharing, with its own cap.
+        .. config.Voice.Provider is not null && config.Voice.MaximumScreenShares > 0
+            ? [ServerIdentity.VoiceScreenCapability]
+            : Array.Empty<string>(),
         .. config.Attachments.Enabled ? [ServerIdentity.AttachmentsCapability] : Array.Empty<string>()
     ]
 });
@@ -340,9 +344,15 @@ async Task PrintVoiceCallsAsync()
         var channel = await channelStore.FindByIdAsync(call.Key, CancellationToken.None);
         var cameras = call.Count(participant => participant.CameraOn);
         var cap = config.Voice.MaximumCameraPublishers;
+        var shares = call.Count(participant => participant.ScreenShareOn);
+        var shareCap = config.Voice.MaximumScreenShares;
+
+        var counts = new List<string>();
+        if (cap > 0) counts.Add($"{cameras}/{cap} camera(s)");
+        if (shareCap > 0) counts.Add($"{shares}/{shareCap} screen share(s)");
 
         Console.WriteLine($"  {channel?.Name ?? call.Key.ToString()}" +
-                          (cap == 0 ? "" : $"  ({cameras}/{cap} camera(s))"));
+                          (counts.Count == 0 ? "" : $"  ({string.Join(", ", counts)})"));
 
         foreach (var participant in call)
         {
@@ -355,6 +365,10 @@ async Task PrintVoiceCallsAsync()
             if (participant.Suppressed) flags.Add("cannot speak");
             if (participant.CameraOn) flags.Add("camera on");
             else if (participant.CameraSuppressed) flags.Add("no camera");
+            if (participant.ScreenShareOn)
+                flags.Add(participant.ScreenShareKind == ScreenShareKinds.Window
+                    ? participant.ScreenShareAudio ? "sharing a window with sound" : "sharing a window"
+                    : "sharing a screen");
 
             Console.WriteLine($"      {user?.Username ?? participant.UserId.ToString()}" +
                               (flags.Count == 0 ? "" : $"  ({string.Join(", ", flags)})"));

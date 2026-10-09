@@ -41,17 +41,16 @@ public sealed class LiveKitJwt
             : null;
 
     /// <summary>
-    /// A token that lets one member into one room. They may publish their microphone only when
-    /// <see cref="VoiceGrant.CanSpeak"/> and their camera only when
-    /// <see cref="VoiceGrant.CanPublishCamera"/>, and nothing else of either kind; they cannot send
-    /// data or rewrite their own metadata, so nothing about them in the call is theirs to forge.
+    /// A token that lets one member into one room. They may publish exactly the sources
+    /// <see cref="VoiceGrant.Publish"/> allows and nothing else; they cannot send data or rewrite
+    /// their own metadata, so nothing about them in the call is theirs to forge.
     /// </summary>
     public (string Token, DateTime ExpiresAtUtc) CreateParticipantToken(VoiceGrant grant)
     {
         var now = _time.GetUtcNow();
         var expires = now + _options.TokenLifetime;
         var identity = grant.UserId.ToString("D");
-        var sources = PublishableSources(grant.CanSpeak, grant.CanPublishCamera);
+        var sources = PublishableSources(grant.Publish);
 
         var claims = new JsonObject
         {
@@ -66,7 +65,7 @@ public sealed class LiveKitJwt
                 ["room"] = RoomFor(grant.ChannelId),
                 ["roomJoin"] = true,
                 ["canSubscribe"] = true,
-                ["canPublish"] = grant.CanSpeak || grant.CanPublishCamera,
+                ["canPublish"] = grant.Publish.Any,
                 // No data channel at all. Calls are end-to-end encrypted with keys from the voice
                 // channel's MLS group, which travel through Raindrop's delivery service, never
                 // through LiveKit: nothing that could carry key material passes through it.
@@ -89,13 +88,35 @@ public sealed class LiveKitJwt
     /// exactly the kind of thing a LiveKit upgrade changes, so the list always names something and
     /// <c>canPublish</c> is what actually says no.
     /// </remarks>
-    public static IReadOnlyList<string> PublishableSources(bool canSpeak, bool canPublishCamera)
+    public static IReadOnlyList<string> PublishableSources(VoicePublishGrant grant)
     {
-        if (canSpeak && canPublishCamera)
-            return ["microphone", "camera"];
+        var sources = new List<string>(4);
 
-        return canPublishCamera ? ["camera"] : ["microphone"];
+        if (grant.Microphone)
+            sources.Add(MicrophoneSource);
+        if (grant.Camera)
+            sources.Add(CameraSource);
+        if (grant.Screen)
+            sources.Add(ScreenShareSource);
+        // A window's sound only ever travels with its picture; a grant that somehow names one without
+        // the other gets neither, rather than a sound track with nothing to belong to.
+        if (grant.Screen && grant.ScreenAudio)
+            sources.Add(ScreenShareAudioSource);
+
+        return sources.Count == 0 ? [MicrophoneSource] : sources;
     }
+
+    /// <summary>LiveKit's names for the sources, as a join token's <c>canPublishSources</c> carries them.</summary>
+    public const string MicrophoneSource = "microphone";
+
+    /// <inheritdoc cref="MicrophoneSource"/>
+    public const string CameraSource = "camera";
+
+    /// <inheritdoc cref="MicrophoneSource"/>
+    public const string ScreenShareSource = "screen_share";
+
+    /// <inheritdoc cref="MicrophoneSource"/>
+    public const string ScreenShareAudioSource = "screen_share_audio";
 
     /// <summary>A token for Raindrop's own call to the room API, scoped to <paramref name="room"/> when given.</summary>
     public string CreateAdminToken(string? room)

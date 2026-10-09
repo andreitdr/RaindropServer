@@ -101,6 +101,55 @@ public sealed class InMemoryVoiceStateStore : IVoiceStateStore
         }
     }
 
+    public ValueTask<VoiceScreenShareOutcome> SetScreenShareAsync(
+        Guid userId,
+        bool on,
+        string? kind,
+        bool audio,
+        int shareCapacity,
+        Func<VoiceParticipantRecord, bool>? predicate,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (!_byUser.TryGetValue(userId, out var record) || predicate?.Invoke(record) == false)
+                return ValueTask.FromResult(new VoiceScreenShareOutcome(false, false, false, null));
+
+            // Stopping clears what was shared along with it, so a record never names a kind or sound
+            // for a share that is not happening.
+            var wanted = on
+                ? record with { ScreenShareOn = true, ScreenShareKind = kind, ScreenShareAudio = audio }
+                : record with { ScreenShareOn = false, ScreenShareKind = null, ScreenShareAudio = false };
+
+            if (wanted == record)
+                return ValueTask.FromResult(new VoiceScreenShareOutcome(false, false, false, record));
+
+            if (on)
+            {
+                if (record.ScreenShareSuppressed)
+                    return ValueTask.FromResult(new VoiceScreenShareOutcome(false, true, false, null));
+
+                if (audio && !record.CanSpeak)
+                    return ValueTask.FromResult(new VoiceScreenShareOutcome(false, false, true, null));
+
+                // Only a share that is starting takes a place. One already running that changes what
+                // it carries holds the place it has, and must not be told the call is full because it
+                // is counted in it itself.
+                if (!record.ScreenShareOn)
+                {
+                    var others = _byUser.Values.Count(other =>
+                        other.ChannelId == record.ChannelId && other.UserId != userId && other.ScreenShareOn);
+
+                    if (others >= shareCapacity)
+                        return ValueTask.FromResult(new VoiceScreenShareOutcome(true, false, false, null));
+                }
+            }
+
+            _byUser[userId] = wanted;
+            return ValueTask.FromResult(new VoiceScreenShareOutcome(false, false, false, wanted));
+        }
+    }
+
     public ValueTask<VoiceParticipantRecord?> FindAsync(Guid userId, CancellationToken cancellationToken)
     {
         lock (_gate)

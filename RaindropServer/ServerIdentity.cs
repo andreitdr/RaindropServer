@@ -71,6 +71,18 @@ public sealed record ServerIdentity(
     public const string VoiceVideoCapability = "voice.video.v1";
 
     /// <summary>
+    /// Advertised when calls on this server carry screen sharing: a member with the
+    /// <c>screen_share</c> permission may share a screen or a window, and a window's own sound, within
+    /// the server's cap on how many shares one call carries at once. The same key and the same
+    /// guarantee as <see cref="E2eeVoiceCapability"/> again.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="VoiceVideoCapability"/> because an owner can switch either off without
+    /// the other, and a client has to know which buttons to offer.
+    /// </remarks>
+    public const string VoiceScreenCapability = "voice.screen.v1";
+
+    /// <summary>
     /// Advertised when members may add end-to-end encrypted files to messages
     /// (<c>AttachmentService</c>, and <c>attachment_ids</c> on <c>SendEncryptedMessage</c>). Left out when the
     /// owner has switched attachments off.

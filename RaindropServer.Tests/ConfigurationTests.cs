@@ -148,6 +148,26 @@ public class ServerConfigTests : IDisposable
     }
 
     [Fact]
+    public void The_screen_share_cap_is_read_from_the_file_and_reaches_the_voice_rules()
+    {
+        var (config, report) = Read("""{ "voice": { "maximumScreenShares": 1 } }""");
+
+        var options = new VoiceOptions();
+        config.ApplyTo(options);
+
+        Assert.DoesNotContain(report.Problems, problem => problem.Setting.StartsWith("voice.maximumScreen"));
+        Assert.Equal(1, options.MaximumScreenSharesPerChannel);
+    }
+
+    [Fact]
+    public void A_misspelled_screen_share_cap_is_pointed_at_the_real_one()
+    {
+        var (_, report) = Read("""{ "voice": { "maximumScreenShare": 1 } }""");
+
+        Assert.Contains("maximumScreenShares", Find(report, "voice.maximumScreenShare").Remedy);
+    }
+
+    [Fact]
     public void Json_that_does_not_parse_is_reported_with_the_line_to_look_at()
     {
         var (_, report) = Read("{\n  \"urls\": [ \"https://localhost:5001\" ,\n}");
@@ -345,6 +365,47 @@ public class ComponentOptionsTests
 
         Assert.False(report.HasErrors);
         Assert.Contains(report.Problems, problem => problem.Setting == "maximumCameraPublishers");
+    }
+
+    /// <summary>Zero is the documented way to switch screen sharing off, so it has to be in range.</summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(-1, true)]
+    [InlineData(11, true)]
+    public void The_screen_share_cap_takes_zero_but_not_a_negative_or_an_absurd_number(int cap, bool error) =>
+        Assert.Equal(error,
+            Check(new VoiceOptions { MaximumScreenSharesPerChannel = cap }.Validate).HasErrors);
+
+    [Fact]
+    public void A_screen_share_cap_larger_than_the_call_can_never_be_reached_and_is_said_out_loud()
+    {
+        var report = Check(new VoiceOptions
+        {
+            MaximumParticipantsPerChannel = 2,
+            MaximumCameraPublishersPerChannel = 2,
+            MaximumScreenSharesPerChannel = 3
+        }.Validate);
+
+        Assert.False(report.HasErrors);
+        Assert.Contains(report.Problems, problem => problem.Setting == "maximumScreenShares");
+    }
+
+    [Fact]
+    public void Several_screen_shares_at_once_are_allowed_but_said_out_loud()
+    {
+        var report = Check(new VoiceOptions { MaximumScreenSharesPerChannel = 5 }.Validate);
+
+        Assert.False(report.HasErrors);
+        Assert.Contains(report.Problems, problem => problem.Setting == "maximumScreenShares");
+    }
+
+    [Fact]
+    public void The_default_screen_share_cap_says_nothing()
+    {
+        var report = Check(new VoiceOptions().Validate);
+
+        Assert.DoesNotContain(report.Problems, problem => problem.Setting == "maximumScreenShares");
     }
 
     [Fact]

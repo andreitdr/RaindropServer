@@ -25,6 +25,7 @@ has to exist from day one. The permissions today:
 | `Connect` | `connect` | Join voice channels and hear the people in them |
 | `Speak` | `speak` | Talk in voice channels (without it, a member joins as a listener) |
 | `Video` | `video` | Turn their camera on in voice channels. Separate from `speak`, so a member can be heard without being seen; the media server refuses their camera without it |
+| `ScreenShare` | `screen_share` | Share a screen or a window in voice channels. Separate from `video`; the media server refuses their share without it, and a window's sound additionally needs them to be able to speak |
 | `ManageMessages` | `manage_messages` | Delete other members' messages |
 | `MuteMembers` | `mute_members` | Mute other members in voice channels, for everyone — checked server-wide, never per channel |
 | `CreateChannels` | `create_channels` | Create new channels on this server |
@@ -96,7 +97,8 @@ owner can rejoin, by UUID or by username, and keeps the role.
 
 [`PermissionRollouts.All`](../RaindropServer/Roles/PermissionRollouts.cs) lists what newer builds hand
 to `everyone` on servers seeded before those permissions existed — today
-`new("voice", Connect | Speak)`, `new("attachments", AttachFiles)` and `new("voice-video", Video)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
+`new("voice", Connect | Speak)`, `new("attachments", AttachFiles)`, `new("voice-video", Video)` and
+`new("voice-screen-share", ScreenShare)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
 `raindrop_permission_rollouts`, then records it: grant first, record second, so a crash between the
 two re-applies an OR that changes nothing. Each one is offered **exactly once**, so an owner who takes
 the permissions away afterwards keeps them away. A fresh server records every rollout without granting

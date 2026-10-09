@@ -18,15 +18,18 @@ page covers what the server *does* hold and do:
 | Encrypted text messages | Implemented — see [Messages](messages.md#end-to-end-encryption) |
 | Encrypted voice | Implemented — see [Voice](voice.md#end-to-end-encrypted-calls) |
 | Encrypted camera video | Implemented, on the same key — see [Voice](voice.md#camera-video) |
+| Encrypted screen sharing | Implemented, on the same key — see [Voice](voice.md#screen-sharing) |
 
-A call's camera video is encrypted with the **same** key as its voice: one exported secret
-(`raindrop/voice/v1`) per call per epoch, in one key slot, covering every track. There is no second
-label for video, and there could not usefully be one — LiveKit's shared-key provider holds one key per
-ring slot for the whole room, and moving a participant to a new slot moves their microphone and camera
-together. So camera video needed no change here at all.
+A call's camera video and screen shares are encrypted with the **same** key as its voice: one
+exported secret (`raindrop/voice/v1`) per call per epoch, in one key slot, covering every track — a
+shared window's sound included. There is no second label for video, and there could not usefully be
+one — LiveKit's shared-key provider holds one key per ring slot for the whole room, and moving a
+participant to a new slot moves their microphone, camera and share together. So neither camera video
+nor screen sharing needed any change here.
 
 What stays visible to the server is metadata: who talks in which channel and call, when, whether a
-camera is on, and roughly how much. **Files** are encrypted too, each under a key of its own that travels inside the message
+camera is on, whether they are sharing a screen or a window and whether it has sound, and roughly how
+much. **Files** are encrypted too, each under a key of its own that travels inside the message
 (see [Attachments](attachments.md)); the server additionally learns a file's declared extension and its
 exact size, which is what the owner's attachment rules are enforced on. A message carrying files is
 attested under `raindrop/message-attestation/v2`, which also binds each file's id and ciphertext hash

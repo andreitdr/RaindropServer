@@ -41,11 +41,9 @@ public sealed class LiveKitVoiceTransport : IVoiceTransport
     public Task SetPublishAsync(
         Guid channelId,
         Guid userId,
-        bool canSpeak,
-        bool canPublishCamera,
+        VoicePublishGrant grant,
         CancellationToken cancellationToken) =>
-        _rooms.UpdatePermissionAsync(
-            _jwt.RoomFor(channelId), userId.ToString("D"), canSpeak, canPublishCamera, cancellationToken);
+        _rooms.UpdatePermissionAsync(_jwt.RoomFor(channelId), userId.ToString("D"), grant, cancellationToken);
 
     public Task DisconnectAsync(Guid channelId, Guid userId, CancellationToken cancellationToken) =>
         _rooms.RemoveParticipantAsync(_jwt.RoomFor(channelId), userId.ToString("D"), cancellationToken);
@@ -68,8 +66,7 @@ public sealed class LiveKitVoiceTransport : IVoiceTransport
             {
                 if (Guid.TryParse(participant.Identity, out var userId))
                 {
-                    participants.Add(new TransportParticipant(
-                        userId, participant.CanPublish, participant.CanPublishCamera));
+                    participants.Add(new TransportParticipant(userId, participant.Publish));
                     continue;
                 }
 

@@ -48,6 +48,7 @@ is how the Docker container is configured without editing the file.
     "provider": null,
     "maximumParticipants": 25,
     "maximumCameraPublishers": 6,
+    "maximumScreenShares": 2,
     "startupCheck": "warn",
     "livekit": {
       "apiUrl": "http://localhost:7880",
@@ -156,6 +157,11 @@ See [Voice](voice.md) for the model these configure.
   switches camera video off** on this server — no member is granted a camera, and `voice.video.v1` is
   not advertised, so clients show no camera button. A value above `maximumParticipants` is reported as
   unreachable, and one above 12 is reported with the number of video streams it implies.
+- `maximumScreenShares` — how many members of one call may share a screen or a window at once
+  (`screen_share_limit_reached` beyond it), 0–10, 2 by default. A share is sent at up to 1080p, about
+  3 Mbit/s from its sharer and up to 2.5 Mbit/s to each member who watches it. **0 switches screen
+  sharing off** — nobody is granted a share and `voice.screen.v1` is not advertised. A value above
+  `maximumParticipants` is reported as unreachable, and one above 3 with what it costs.
 - `startupCheck` — how hard the server looks for the media server before it starts listening: `off`
   not at all, `warn` (the default) to report an unreachable one and start anyway, `require` to refuse
   to start without it. A media server that answers and *refuses* these credentials stops the server
