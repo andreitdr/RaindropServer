@@ -280,6 +280,7 @@ public sealed class VoiceGrpcService : Proto.VoiceService.VoiceServiceBase
             Available = status.Available,
             Transport = status.Transport,
             MaximumParticipants = status.MaximumParticipants,
+            MaximumCameraPublishers = status.MaximumCameraPublishers,
             Participants = { status.Participants.Select(participant => participant.ToProto()) }
         };
     }
@@ -321,7 +322,8 @@ public sealed class VoiceGrpcService : Proto.VoiceService.VoiceServiceBase
         new()
         {
             Participant = (await _voice.UpdateSelfStateAsync(context.Session(),
-                new VoiceSelfStateRequest(request.SelfMute, request.SelfDeaf), context.CancellationToken)).ToProto()
+                new VoiceSelfStateRequest(request.SelfMute, request.SelfDeaf, request.CameraOn),
+                context.CancellationToken)).ToProto()
         };
 
     public override async Task<Proto.MuteVoiceMemberResponse> MuteVoiceMember(

@@ -71,7 +71,7 @@ same formats is [E2EE](e2ee.md).
   A server advertises `e2ee.devices.v1`, `e2ee.delivery.v1` and `e2ee.voice.v1` so a client can tell
   what it supports.
 - **What's not implemented yet:** message editing, reactions, threads, read state, direct messages,
-  invites/bans, camera and screen sharing in voice channels, per-channel permission overrides, schema
+  invites/bans, screen sharing in voice channels, per-channel permission overrides, schema
   migrations, and event replay/resume (a reconnecting client re-reads instead). The full list, with
   the seams each one would go through, is in [Roadmap](roadmap.md).
 

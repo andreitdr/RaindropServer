@@ -24,6 +24,7 @@ has to exist from day one. The permissions today:
 | `AttachFiles` | `attach_files` | Add files to the messages they post (checked in the channel alongside `send_messages`; see [Attachments](attachments.md)) |
 | `Connect` | `connect` | Join voice channels and hear the people in them |
 | `Speak` | `speak` | Talk in voice channels (without it, a member joins as a listener) |
+| `Video` | `video` | Turn their camera on in voice channels. Separate from `speak`, so a member can be heard without being seen; the media server refuses their camera without it |
 | `ManageMessages` | `manage_messages` | Delete other members' messages |
 | `MuteMembers` | `mute_members` | Mute other members in voice channels, for everyone — checked server-wide, never per channel |
 | `CreateChannels` | `create_channels` | Create new channels on this server |
@@ -56,7 +57,7 @@ registering and expecting to own it.
   everyone. It's refused as a target for `assign`/`unassign`. Its permissions **are** editable (that's
   how an owner closes a server down to read-only); its name is not, and it cannot be deleted. It's
   seeded from `RoleOptions.DefaultMemberPermissions` (view, post, attach files, create channels,
-  connect and speak by default) and *only* seeded — changing that config setting later doesn't reach back and overwrite
+  connect, speak and video by default) and *only* seeded — changing that config setting later doesn't reach back and overwrite
   what administrators have since made it. A permission a later build introduces for everybody reaches
   an already-seeded `everyone` role exactly once instead, through a **permission rollout** — see below.
 - **`owner`** — holds `Administrator`, and is neither editable nor deletable. A server whose
@@ -95,7 +96,7 @@ owner can rejoin, by UUID or by username, and keeps the role.
 
 [`PermissionRollouts.All`](../RaindropServer/Roles/PermissionRollouts.cs) lists what newer builds hand
 to `everyone` on servers seeded before those permissions existed — today
-`new("voice", Connect | Speak)` and `new("attachments", AttachFiles)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
+`new("voice", Connect | Speak)`, `new("attachments", AttachFiles)` and `new("voice-video", Video)`. `EnsureBuiltInRolesAsync` grants each rollout not yet recorded in
 `raindrop_permission_rollouts`, then records it: grant first, record second, so a crash between the
 two re-applies an OR that changes nothing. Each one is offered **exactly once**, so an owner who takes
 the permissions away afterwards keeps them away. A fresh server records every rollout without granting

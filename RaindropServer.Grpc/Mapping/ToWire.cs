@@ -170,7 +170,9 @@ internal static class ToWire
         ServerMute = participant.ServerMute,
         Suppressed = participant.Suppressed,
         Connected = participant.Connected,
-        JoinedAt = Time(participant.JoinedAtUtc)
+        JoinedAt = Time(participant.JoinedAtUtc),
+        CameraOn = participant.CameraOn,
+        CameraSuppressed = participant.CameraSuppressed
     };
 
     // ── E2EE ─────────────────────────────────────────────────────────────────

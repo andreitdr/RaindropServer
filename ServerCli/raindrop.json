@@ -40,7 +40,7 @@
   // defaultMemberPermissions the first time the server runs; after that it is
   // edited through the API, and changing this setting leaves it alone.
   "roles": {
-    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak" ],
+    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak", "video" ],
     "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
   },
@@ -84,6 +84,11 @@
   "voice": {
     "provider": "livekit",
     "maximumParticipants": 25,
+    // How many members of one call may send their camera at once. Every camera goes to everybody
+    // else in the call, so this costs far more bandwidth than voice does and is deliberately much
+    // smaller than maximumParticipants. 0 switches camera video off: clients then see no camera
+    // button at all, because the server stops advertising voice.video.v1.
+    "maximumCameraPublishers": 6,
     // How hard the server looks for the media server before it starts listening: "off" not at all,
     // "warn" to report an unreachable one and start anyway, "require" to refuse to start without it.
     // A media server that answers and refuses these credentials stops the server whichever this is.

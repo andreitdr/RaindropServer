@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using RaindropServer.Attachments;
+using RaindropServer.Channels.Voice;
 using RaindropServer.Events;
 using RaindropServer.Grpc;
 using RaindropServer.Grpc.Services;
@@ -38,13 +39,23 @@ public sealed class GrpcServer : IAsyncDisposable
 
     public IServiceProvider Services => _app.Services;
 
-    public static async Task<GrpcServer> StartAsync(Action<EventOptions>? events = null)
+    public static async Task<GrpcServer> StartAsync(
+        Action<EventOptions>? events = null,
+        IVoiceTransport? voice = null,
+        Action<VoiceOptions>? configureVoice = null)
     {
         var folder = Path.Combine(Path.GetTempPath(), $"raindrop-grpc-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
 
         var services = new ServiceCollection();
+
+        // Before AddRaindropServer, which only fills in UnavailableVoiceTransport when nothing else
+        // claimed the seam — the same ordering AddRaindropLiveKit relies on.
+        if (voice is not null)
+            services.AddSingleton(voice);
+
         services.AddRaindropServer(
+            configureVoice: configureVoice,
             configureEvents: events,
             configureAttachments: attachments => attachments.StoragePath = Path.Combine(folder, "attachments"));
         services.AddRaindropGrpc();
@@ -449,5 +460,325 @@ public class GrpcTests
 
         var refused = await Refused(async () => await download.ResponseStream.MoveNext());
         Assert.Equal("attachment_not_found", ReasonOf(refused));
+    }
+}
+
+/// <summary>
+/// A voice transport that carries nothing and remembers everything it was told — the seam
+/// <c>IVoiceTransport</c> exists for, standing in for a LiveKit sidecar. Not a mock: it is a real
+/// implementation whose "media server" is a dictionary, which is what lets the voice control plane
+/// be tested through the wire at all.
+/// </summary>
+public sealed class FakeVoiceTransport : IVoiceTransport
+{
+    private readonly Lock _gate = new();
+    private readonly Dictionary<(Guid Channel, Guid User), TransportParticipant> _participants = new();
+
+    public string Name => "fake";
+
+    public bool IsAvailable => true;
+
+    /// <summary>Every grant minted, in order — what a client's token would have allowed.</summary>
+    public List<VoiceGrant> Grants { get; } = [];
+
+    /// <summary>Every mid-call permission change pushed, in order.</summary>
+    public List<(Guid Channel, Guid User, bool CanSpeak, bool CanPublishCamera)> Pushed { get; } = [];
+
+    public Task<VoiceConnection> CreateConnectionAsync(VoiceGrant grant, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            Grants.Add(grant);
+            _participants[(grant.ChannelId, grant.UserId)] =
+                new TransportParticipant(grant.UserId, grant.CanSpeak, grant.CanPublishCamera);
+        }
+
+        return Task.FromResult(new VoiceConnection(Name, null, "/api/channels/voice/signal", "token", DateTime.UtcNow.AddMinutes(2)));
+    }
+
+    public Task SetPublishAsync(
+        Guid channelId, Guid userId, bool canSpeak, bool canPublishCamera, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            Pushed.Add((channelId, userId, canSpeak, canPublishCamera));
+            if (_participants.ContainsKey((channelId, userId)))
+                _participants[(channelId, userId)] = new TransportParticipant(userId, canSpeak, canPublishCamera);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task DisconnectAsync(Guid channelId, Guid userId, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+            _participants.Remove((channelId, userId));
+
+        return Task.CompletedTask;
+    }
+
+    public Task CloseCallAsync(Guid channelId, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+            foreach (var key in _participants.Keys.Where(key => key.Channel == channelId).ToList())
+                _participants.Remove(key);
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<TransportCall>> ListCallsAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<TransportCall> calls = _participants
+                .GroupBy(entry => entry.Key.Channel)
+                .Select(call => new TransportCall(call.Key, call.Select(entry => entry.Value).ToList()))
+                .ToList();
+
+            return Task.FromResult(calls);
+        }
+    }
+
+    /// <summary>What this "media server" currently allows a participant, or null when it has none.</summary>
+    public TransportParticipant? Allows(Guid channelId, Guid userId)
+    {
+        lock (_gate)
+            return _participants.GetValueOrDefault((channelId, userId));
+    }
+
+    /// <summary>
+    /// Waits for the push the work queue makes after a camera or mute change. The queue is
+    /// deliberately off the request path, so a test that asserts straight after the call races it.
+    /// </summary>
+    public async Task<bool> WaitForPushAsync(Guid channelId, Guid userId, bool canPublishCamera)
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            if (Allows(channelId, userId)?.CanPublishCamera == canPublishCamera)
+                return true;
+
+            await Task.Delay(20);
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// Camera video in a call, over the wire: the <c>video</c> permission, the cap on how many cameras
+/// one call carries, and the publishing grant the media server is given. The voice control plane had
+/// no wire-level tests before camera video gave it a decision that can be refused.
+/// </summary>
+public class VoiceCameraGrpcTests
+{
+    private static string ReasonOf(RpcException exception) =>
+        exception.GetRpcStatus()?.GetDetail<ErrorInfo>() is { Domain: RaindropInterceptor.ErrorDomain } info
+            ? info.Reason
+            : throw new Xunit.Sdk.XunitException($"No Raindrop ErrorInfo on {exception.Status}.");
+
+    /// <summary>A server with a voice transport, one voice channel, and the owner in the call.</summary>
+    private static async Task<(GrpcServer Server, FakeVoiceTransport Transport, string Channel, string Token, string UserId)>
+        InCallAsync(int cameraCap = 6)
+    {
+        var transport = new FakeVoiceTransport();
+        var server = await GrpcServer.StartAsync(
+            voice: transport,
+            configureVoice: options => options.MaximumCameraPublishersPerChannel = cameraCap);
+
+        var (token, userId) = await server.RegisterAsync();
+
+        var channel = await new Proto.ChannelService.ChannelServiceClient(server.Channel).CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "voice", Name = $"call-{Guid.NewGuid():N}"[..20] },
+            GrpcServer.As(token));
+
+        await new Proto.VoiceService.VoiceServiceClient(server.Channel).JoinVoiceAsync(
+            new Proto.JoinVoiceRequest { ChannelId = channel.Channel.ChannelId }, GrpcServer.As(token));
+
+        return (server, transport, channel.Channel.ChannelId, token, userId);
+    }
+
+    [Fact]
+    public async Task A_call_reports_how_many_cameras_it_carries()
+    {
+        var (server, _, _, token, _) = await InCallAsync(cameraCap: 4);
+        await using var _server = server;
+
+        var status = await new Proto.VoiceService.VoiceServiceClient(server.Channel)
+            .GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(token));
+
+        Assert.Equal(4, status.MaximumCameraPublishers);
+    }
+
+    /// <summary>
+    /// Joining never starts the camera, so the token a client gets is for the microphone alone. The
+    /// camera is added only once they ask, which is what makes the cap real rather than advisory.
+    /// </summary>
+    [Fact]
+    public async Task Joining_grants_the_microphone_and_not_the_camera()
+    {
+        var (server, transport, _, _, userId) = await InCallAsync();
+        await using var _server = server;
+
+        var grant = Assert.Single(transport.Grants);
+
+        Assert.Equal(Guid.Parse(userId), grant.UserId);
+        Assert.True(grant.CanSpeak);
+        Assert.False(grant.CanPublishCamera);
+    }
+
+    [Fact]
+    public async Task Turning_a_camera_on_grants_it_at_the_media_server_and_tells_everybody()
+    {
+        var (server, transport, channelId, token, userId) = await InCallAsync();
+        await using var _server = server;
+
+        var updated = await new Proto.VoiceService.VoiceServiceClient(server.Channel).SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(token));
+
+        Assert.True(updated.Participant.CameraOn);
+        Assert.False(updated.Participant.CameraSuppressed);
+
+        Assert.True(await transport.WaitForPushAsync(Guid.Parse(channelId), Guid.Parse(userId), true),
+            "the camera grant never reached the media server");
+
+        var allowed = transport.Allows(Guid.Parse(channelId), Guid.Parse(userId))!;
+        Assert.True(allowed.CanPublishCamera);
+        Assert.True(allowed.CanSpeak);
+    }
+
+    [Fact]
+    public async Task Turning_a_camera_off_takes_the_grant_away_again()
+    {
+        var (server, transport, channelId, token, userId) = await InCallAsync();
+        await using var _server = server;
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+
+        await voice.SetVoiceSelfStateAsync(new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(token));
+        Assert.True(await transport.WaitForPushAsync(Guid.Parse(channelId), Guid.Parse(userId), true));
+
+        var off = await voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { CameraOn = false }, GrpcServer.As(token));
+
+        Assert.False(off.Participant.CameraOn);
+        Assert.True(await transport.WaitForPushAsync(Guid.Parse(channelId), Guid.Parse(userId), false));
+    }
+
+    /// <summary>
+    /// Mute and deafen are only icons and are always accepted; the camera is a decision and can be
+    /// refused. A refused camera must leave the mute in the same request standing.
+    /// </summary>
+    [Fact]
+    public async Task A_mute_in_the_same_request_still_applies_when_the_camera_is_refused()
+    {
+        var (server, _, _, token, _) = await InCallAsync(cameraCap: 0);
+        await using var _server = server;
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() => voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { SelfMute = true, CameraOn = true }, GrpcServer.As(token)).ResponseAsync);
+
+        Assert.Equal("missing_permission", ReasonOf(refused));
+
+        var status = await voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(token));
+        var me = Assert.Single(status.Participants);
+        Assert.True(me.SelfMute);
+        Assert.False(me.CameraOn);
+    }
+
+    [Fact]
+    public async Task A_server_that_carries_no_camera_video_refuses_one()
+    {
+        var (server, _, _, token, _) = await InCallAsync(cameraCap: 0);
+        await using var _server = server;
+
+        var status = await new Proto.VoiceService.VoiceServiceClient(server.Channel)
+            .GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(token));
+
+        // Suppressed from the moment they joined, so a client knows before it asks.
+        Assert.Equal(0, status.MaximumCameraPublishers);
+        Assert.True(Assert.Single(status.Participants).CameraSuppressed);
+    }
+
+    [Fact]
+    public async Task A_member_without_the_video_permission_is_refused()
+    {
+        var transport = new FakeVoiceTransport();
+        await using var server = await GrpcServer.StartAsync(voice: transport);
+
+        var (owner, _) = await server.RegisterAsync();
+        var channel = await new Proto.ChannelService.ChannelServiceClient(server.Channel).CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "voice", Name = "call" }, GrpcServer.As(owner));
+
+        // Take `video` away from everyone, which is the only role an ordinary member holds.
+        var roles = new Proto.RoleService.RoleServiceClient(server.Channel);
+        var listed = await roles.ListRolesAsync(new Proto.ListRolesRequest(), GrpcServer.As(owner));
+        var everyone = listed.Roles.Single(role => role.Kind == Proto.RoleKind.Everyone);
+
+        var kept = new Proto.PermissionSet();
+        kept.Permissions.AddRange(everyone.Permissions.Where(name => name != "video"));
+        await roles.UpdateRoleAsync(
+            new Proto.UpdateRoleRequest { RoleId = everyone.RoleId, Permissions = kept }, GrpcServer.As(owner));
+
+        var (bob, _) = await server.RegisterAsync();
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+        var joined = await voice.JoinVoiceAsync(
+            new Proto.JoinVoiceRequest { ChannelId = channel.Channel.ChannelId }, GrpcServer.As(bob));
+
+        Assert.True(joined.You.CameraSuppressed);
+        Assert.False(joined.You.Suppressed);
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() => voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(bob)).ResponseAsync);
+
+        Assert.Equal("missing_permission", ReasonOf(refused));
+        Assert.Equal(StatusCode.PermissionDenied, refused.StatusCode);
+    }
+
+    [Fact]
+    public async Task The_camera_after_the_last_place_is_refused_as_camera_limit_reached()
+    {
+        var transport = new FakeVoiceTransport();
+        await using var server = await GrpcServer.StartAsync(
+            voice: transport, configureVoice: options => options.MaximumCameraPublishersPerChannel = 1);
+
+        var (owner, _) = await server.RegisterAsync();
+        var channel = await new Proto.ChannelService.ChannelServiceClient(server.Channel).CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "voice", Name = "call" }, GrpcServer.As(owner));
+
+        var (bob, _) = await server.RegisterAsync();
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+
+        foreach (var token in new[] { owner, bob })
+            await voice.JoinVoiceAsync(
+                new Proto.JoinVoiceRequest { ChannelId = channel.Channel.ChannelId }, GrpcServer.As(token));
+
+        await voice.SetVoiceSelfStateAsync(new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(owner));
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() => voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(bob)).ResponseAsync);
+
+        Assert.Equal("camera_limit_reached", ReasonOf(refused));
+        Assert.Equal(StatusCode.FailedPrecondition, refused.StatusCode);
+
+        // And the place frees up when the first camera goes off.
+        await voice.SetVoiceSelfStateAsync(new Proto.SetVoiceSelfStateRequest { CameraOn = false }, GrpcServer.As(owner));
+        var now = await voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(bob));
+
+        Assert.True(now.Participant.CameraOn);
+    }
+
+    [Fact]
+    public async Task Turning_a_camera_on_without_being_in_a_call_is_not_in_voice()
+    {
+        var transport = new FakeVoiceTransport();
+        await using var server = await GrpcServer.StartAsync(voice: transport);
+        var (token, _) = await server.RegisterAsync();
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() =>
+            new Proto.VoiceService.VoiceServiceClient(server.Channel).SetVoiceSelfStateAsync(
+                new Proto.SetVoiceSelfStateRequest { CameraOn = true }, GrpcServer.As(token)).ResponseAsync);
+
+        Assert.Equal("not_in_voice", ReasonOf(refused));
     }
 }

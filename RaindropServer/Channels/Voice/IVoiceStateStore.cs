@@ -41,6 +41,24 @@ public interface IVoiceStateStore
         Func<VoiceParticipantRecord, bool>? predicate,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Turns a member's camera on or off in whichever call they are in, as long as
+    /// <paramref name="predicate"/> (if given) still holds for their record. Refuses, changing
+    /// nothing, when turning it on and <paramref name="cameraCapacity"/> other members in that call
+    /// already have theirs on, or when they may not use their camera at all.
+    /// </summary>
+    /// <remarks>
+    /// Its own operation rather than a <see cref="UpdateAsync"/> call because the cap has to be
+    /// counted and the record written together — two members racing for the last camera place must
+    /// not both win, for the same reason capacity lives inside <see cref="JoinAsync"/>.
+    /// </remarks>
+    ValueTask<VoiceCameraOutcome> SetCameraAsync(
+        Guid userId,
+        bool on,
+        int cameraCapacity,
+        Func<VoiceParticipantRecord, bool>? predicate,
+        CancellationToken cancellationToken);
+
     /// <summary>The call a member is in, or null when they are in none.</summary>
     ValueTask<VoiceParticipantRecord?> FindAsync(Guid userId, CancellationToken cancellationToken);
 
@@ -76,6 +94,15 @@ public sealed record VoiceParticipantRecord
     /// <summary>They may listen but not talk: they lack the <c>speak</c> permission.</summary>
     public bool Suppressed { get; init; }
 
+    /// <summary>They asked for their camera to be on, and were allowed it.</summary>
+    public bool CameraOn { get; init; }
+
+    /// <summary>
+    /// They may not turn their camera on: they lack the <c>video</c> permission, or every camera
+    /// place in the call is taken. The counterpart of <see cref="Suppressed"/> for the camera.
+    /// </summary>
+    public bool CameraSuppressed { get; init; }
+
     /// <summary>
     /// The media server has confirmed their connection. False from the moment they are admitted until
     /// the reconciler sees them in the call; a record that stays unconfirmed is dropped.
@@ -92,6 +119,13 @@ public sealed record VoiceParticipantRecord
 
     /// <summary>Whether the media server should accept their microphone.</summary>
     public bool CanSpeak => !ServerMute && !Suppressed;
+
+    /// <summary>
+    /// Whether the media server should accept their camera. Unlike <see cref="CanSpeak"/> this also
+    /// requires them to have asked: the camera grant follows the camera being on, so a member who
+    /// may use their camera but has it off cannot send one.
+    /// </summary>
+    public bool CanPublishCamera => CameraOn && !CameraSuppressed;
 }
 
 /// <summary>What <see cref="IVoiceStateStore.JoinAsync"/> decided.</summary>
@@ -103,4 +137,21 @@ public readonly record struct VoiceJoinOutcome(
     bool Full,
     VoiceParticipantRecord? MovedFrom,
     VoiceParticipantRecord? Replaced,
+    VoiceParticipantRecord? Participant);
+
+/// <summary>What <see cref="IVoiceStateStore.SetCameraAsync"/> decided.</summary>
+/// <param name="Full">
+/// Every camera place in the call was taken; nothing changed. Never set when turning a camera off.
+/// </param>
+/// <param name="NotAllowed">
+/// They may not use their camera here (<see cref="VoiceParticipantRecord.CameraSuppressed"/>);
+/// nothing changed.
+/// </param>
+/// <param name="Participant">
+/// Their record now — unchanged when it already said what was asked for — or null when they were in
+/// no call, or the predicate did not hold.
+/// </param>
+public readonly record struct VoiceCameraOutcome(
+    bool Full,
+    bool NotAllowed,
     VoiceParticipantRecord? Participant);

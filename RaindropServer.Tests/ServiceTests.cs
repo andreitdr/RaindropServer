@@ -396,7 +396,15 @@ public class LiveKitRoomClientTests
                 {
                     Identity = Member,
                     State = Voice.LiveKit.Protocol.ParticipantInfo.Types.State.Active,
-                    Permission = new Voice.LiveKit.Protocol.ParticipantPermission { CanPublish = true }
+                    Permission = new Voice.LiveKit.Protocol.ParticipantPermission
+                    {
+                        CanPublish = true,
+                        CanPublishSources =
+                        {
+                            Voice.LiveKit.Protocol.TrackSource.Microphone,
+                            Voice.LiveKit.Protocol.TrackSource.Camera
+                        }
+                    }
                 },
                 new Voice.LiveKit.Protocol.ParticipantInfo
                 {
@@ -410,10 +418,86 @@ public class LiveKitRoomClientTests
 
         var participants = await client.ListParticipantsAsync("raindrop-" + Channel, default);
 
-        Assert.Equal([new LiveKitParticipant(Member, "ACTIVE", true)], participants);
+        // The sources are read back, not discarded: the reconciler compares the camera grant too.
+        Assert.Equal([new LiveKitParticipant(Member, "ACTIVE", true, true)], participants);
         Assert.Equal(["application/protobuf"], livekit.RequestTypes);
         Assert.Equal("raindrop-" + Channel,
             Voice.LiveKit.Protocol.ListParticipantsRequest.Parser.ParseFrom(livekit.Requests[0]).Room);
+    }
+
+    /// <summary>
+    /// What a mid-call permission change actually puts on the wire. The sources matter as much as
+    /// <c>can_publish</c>: Raindrop's cap on simultaneous cameras is only real because the camera is
+    /// absent from this list until a member is allowed one.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false, true, new[] { "microphone" })]
+    [InlineData(true, true, true, new[] { "microphone", "camera" })]
+    [InlineData(false, true, true, new[] { "camera" })]
+    [InlineData(false, false, false, new[] { "microphone" })]
+    public async Task A_permission_update_names_exactly_the_sources_the_member_may_publish(
+        bool canSpeak, bool canPublishCamera, bool canPublish, string[] expected)
+    {
+        using var livekit = new StubLiveKit(
+            HttpStatusCode.OK, new Voice.LiveKit.Protocol.ParticipantInfo().ToByteArray(), "application/protobuf");
+        using var client = Client(livekit);
+
+        await client.UpdatePermissionAsync("raindrop-" + Channel, Member, canSpeak, canPublishCamera, default);
+
+        var sent = Voice.LiveKit.Protocol.UpdateParticipantRequest.Parser.ParseFrom(livekit.Requests[0]);
+        Assert.Equal(canPublish, sent.Permission.CanPublish);
+        Assert.Equal(expected, sent.Permission.CanPublishSources.Select(source => source switch
+        {
+            Voice.LiveKit.Protocol.TrackSource.Microphone => "microphone",
+            Voice.LiveKit.Protocol.TrackSource.Camera => "camera",
+            _ => source.ToString()
+        }));
+
+        // The data channel stays shut whatever else changes: it is what keeps key material off
+        // LiveKit entirely.
+        Assert.False(sent.Permission.CanPublishData);
+        Assert.True(sent.Permission.CanSubscribe);
+        Assert.False(sent.Permission.CanUpdateMetadata);
+    }
+
+    /// <summary>
+    /// LiveKit reads an empty <c>can_publish_sources</c> as "every source", so a member allowed
+    /// nothing must still have the list name something — <c>can_publish: false</c> is what says no.
+    /// </summary>
+    [Fact]
+    public void A_member_allowed_nothing_is_never_sent_an_empty_source_list()
+    {
+        Assert.NotEmpty(LiveKitJwt.PublishableSources(canSpeak: false, canPublishCamera: false));
+
+        foreach (var speak in new[] { true, false })
+        foreach (var camera in new[] { true, false })
+            Assert.NotEmpty(LiveKitJwt.PublishableSources(speak, camera));
+    }
+
+    /// <summary>The join token carries the same rule as a mid-call update, from the same helper.</summary>
+    [Fact]
+    public void A_join_token_grants_the_camera_only_when_the_grant_does()
+    {
+        var options = new LiveKitOptions { ApiUrl = "http://localhost:7880", ApiKey = "key", ApiSecret = new string('s', 48) };
+        var jwt = new LiveKitJwt(options);
+        var member = Guid.Parse(Member);
+
+        Assert.Equal(["microphone"], Sources(canSpeak: true, canPublishCamera: false));
+        Assert.Equal(["microphone", "camera"], Sources(canSpeak: true, canPublishCamera: true));
+
+        IEnumerable<string> Sources(bool canSpeak, bool canPublishCamera)
+        {
+            var (token, _) = jwt.CreateParticipantToken(
+                new VoiceGrant(Channel, member, "alice", canSpeak, canPublishCamera));
+
+            var payload = token.Split('.')[1];
+            var json = Convert.FromBase64String(payload.PadRight((payload.Length + 3) / 4 * 4, '=')
+                .Replace('-', '+').Replace('_', '/'));
+
+            return System.Text.Json.JsonDocument.Parse(json)
+                .RootElement.GetProperty("video").GetProperty("canPublishSources")
+                .EnumerateArray().Select(entry => entry.GetString()!);
+        }
     }
 
     [Fact]
@@ -440,7 +524,8 @@ public class LiveKitRoomClientTests
         using var client = Client(livekit);
 
         await client.RemoveParticipantAsync("raindrop-" + Channel, Member, default);
-        await client.UpdatePermissionAsync("raindrop-" + Channel, Member, canPublish: true, default);
+        await client.UpdatePermissionAsync(
+            "raindrop-" + Channel, Member, canSpeak: true, canPublishCamera: false, default);
         await client.DeleteRoomAsync("raindrop-" + Channel, default);
     }
 
@@ -556,5 +641,175 @@ public class ReturningMemberTests
         var left = await setup.Users.LeaveAsync(SessionOf(owner), new LeaveRequest(Password, PreserveData: false), default);
 
         Assert.Equal(StateNames.Erased, left.State);
+    }
+}
+
+/// <summary>
+/// The voice state store's whole-decision operations. Every one of them has to settle a race, so the
+/// tests run them in parallel rather than in sequence: a cap enforced by a read followed by a write
+/// passes a sequential test and fails in production.
+/// </summary>
+public class VoiceStateStoreTests
+{
+    private static readonly Guid Channel = Guid.Parse("d592c66e-d5fe-47df-a103-5e77e77eefa9");
+
+    private static VoiceParticipantRecord Participant(Guid userId, bool cameraSuppressed = false)
+    {
+        var now = DateTime.UtcNow;
+        return new VoiceParticipantRecord
+        {
+            ChannelId = Channel,
+            UserId = userId,
+            SessionToken = userId.ToString("N"),
+            CameraSuppressed = cameraSuppressed,
+            JoinedAtUtc = now,
+            LastSeenUtc = now
+        };
+    }
+
+    private static async Task<InMemoryVoiceStateStore> CallOf(params Guid[] members)
+    {
+        var store = new InMemoryVoiceStateStore();
+        foreach (var member in members)
+            await store.JoinAsync(Participant(member), capacity: 25, default);
+
+        return store;
+    }
+
+    [Fact]
+    public async Task A_camera_goes_on_and_off()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+
+        var on = await store.SetCameraAsync(alice, true, 6, null, default);
+        Assert.True(on.Participant!.CameraOn);
+        Assert.True(on.Participant.CanPublishCamera);
+        Assert.False(on.Full);
+        Assert.False(on.NotAllowed);
+
+        var off = await store.SetCameraAsync(alice, false, 6, null, default);
+        Assert.False(off.Participant!.CameraOn);
+        Assert.False(off.Participant.CanPublishCamera);
+    }
+
+    [Fact]
+    public async Task A_member_who_may_not_use_their_camera_is_refused()
+    {
+        var alice = Guid.NewGuid();
+        var store = new InMemoryVoiceStateStore();
+        await store.JoinAsync(Participant(alice, cameraSuppressed: true), capacity: 25, default);
+
+        var outcome = await store.SetCameraAsync(alice, true, 6, null, default);
+
+        Assert.True(outcome.NotAllowed);
+        Assert.False(outcome.Full);
+        Assert.Null(outcome.Participant);
+        Assert.False((await store.FindAsync(alice, default))!.CameraOn);
+    }
+
+    /// <summary>
+    /// Turning off a camera is never refused, even by somebody who has since lost the permission —
+    /// otherwise losing it would leave a camera nobody could switch off.
+    /// </summary>
+    [Fact]
+    public async Task A_camera_can_always_be_turned_off()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+        await store.SetCameraAsync(alice, true, 6, null, default);
+        await store.UpdateAsync(alice, record => record with { CameraSuppressed = true }, null, default);
+
+        var outcome = await store.SetCameraAsync(alice, false, 0, null, default);
+
+        Assert.False(outcome.NotAllowed);
+        Assert.False(outcome.Full);
+        Assert.False(outcome.Participant!.CameraOn);
+    }
+
+    /// <summary>
+    /// A member whose camera is already on must not be told the call is full: they are counted in it
+    /// themselves, so a re-assertion of the same state would refuse at exactly the cap.
+    /// </summary>
+    [Fact]
+    public async Task Asking_for_the_state_it_already_has_is_not_refused()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+        await store.SetCameraAsync(alice, true, 1, null, default);
+
+        var again = await store.SetCameraAsync(alice, true, 1, null, default);
+
+        Assert.False(again.Full);
+        Assert.True(again.Participant!.CameraOn);
+    }
+
+    [Fact]
+    public async Task The_cap_counts_only_this_call()
+    {
+        var elsewhere = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var alice = Guid.NewGuid();
+        var bob = Guid.NewGuid();
+
+        var store = new InMemoryVoiceStateStore();
+        await store.JoinAsync(Participant(alice), capacity: 25, default);
+        await store.JoinAsync(Participant(bob) with { ChannelId = elsewhere }, capacity: 25, default);
+
+        await store.SetCameraAsync(bob, true, 1, null, default);
+        var outcome = await store.SetCameraAsync(alice, true, 1, null, default);
+
+        Assert.False(outcome.Full);
+        Assert.True(outcome.Participant!.CameraOn);
+    }
+
+    [Fact]
+    public async Task A_camera_is_not_turned_on_for_a_session_that_has_since_been_replaced()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+
+        var outcome = await store.SetCameraAsync(
+            alice, true, 6, record => record.SessionToken == "another device", default);
+
+        Assert.Null(outcome.Participant);
+        Assert.False((await store.FindAsync(alice, default))!.CameraOn);
+    }
+
+    /// <summary>
+    /// The race the operation exists for: more members than places, all asking at once. Exactly the
+    /// cap may win, and every loser must be told so rather than left half-changed.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(6)]
+    public async Task Only_as_many_cameras_as_the_cap_allows_can_win_a_race(int cap)
+    {
+        var members = Enumerable.Range(0, 12).Select(_ => Guid.NewGuid()).ToArray();
+        var store = await CallOf(members);
+
+        var outcomes = await Task.WhenAll(members.Select(member =>
+            Task.Run(() => store.SetCameraAsync(member, true, cap, null, default).AsTask())));
+
+        Assert.Equal(cap, outcomes.Count(outcome => outcome.Participant?.CameraOn == true));
+        Assert.Equal(members.Length - cap, outcomes.Count(outcome => outcome.Full));
+        Assert.DoesNotContain(outcomes, outcome => outcome.NotAllowed);
+
+        // And the store agrees with what it told the callers.
+        var records = await store.ListAsync(Channel, default);
+        Assert.Equal(cap, records.Count(record => record.CameraOn));
+    }
+
+    /// <summary>A cap of zero is how a server switches camera video off: nobody wins.</summary>
+    [Fact]
+    public async Task A_cap_of_zero_lets_nobody_publish()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+
+        var outcome = await store.SetCameraAsync(alice, true, 0, null, default);
+
+        Assert.True(outcome.Full);
+        Assert.Null(outcome.Participant);
     }
 }

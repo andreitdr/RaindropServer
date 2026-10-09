@@ -17,7 +17,8 @@ public sealed class UnavailableVoiceTransport : IVoiceTransport
     public Task<VoiceConnection> CreateConnectionAsync(VoiceGrant grant, CancellationToken cancellationToken) =>
         throw VoiceService.Unavailable();
 
-    public Task SetCanSpeakAsync(Guid channelId, Guid userId, bool canSpeak, CancellationToken cancellationToken) =>
+    public Task SetPublishAsync(
+        Guid channelId, Guid userId, bool canSpeak, bool canPublishCamera, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 
     public Task DisconnectAsync(Guid channelId, Guid userId, CancellationToken cancellationToken) =>

@@ -15,7 +15,7 @@ namespace RaindropServer.Channels.Voice;
 /// <list type="bullet">
 /// <item>
 /// Decisions go to the media server as grants: a member's credential says whether their microphone is
-/// accepted, and a change mid-call is pushed with <see cref="IVoiceTransport.SetCanSpeakAsync"/>.
+/// accepted, and a change mid-call is pushed with <see cref="IVoiceTransport.SetPublishAsync"/>.
 /// </item>
 /// <item>
 /// <see cref="ReconcileAsync"/> compares the two records on a timer, both ways. A participant Raindrop
@@ -105,7 +105,10 @@ public sealed class VoiceService
             _transport.IsAvailable,
             _transport.Name,
             _options.MaximumParticipantsPerChannel,
-            visible);
+            visible,
+            // 0 when there is no media server at all, so a client reads "no camera here" from one
+            // number rather than having to combine it with `available`.
+            _transport.IsAvailable ? _options.MaximumCameraPublishersPerChannel : 0);
     }
 
     // ── Joining and leaving ──────────────────────────────────────────────────
@@ -136,6 +139,11 @@ public sealed class VoiceService
             SelfDeaf = request.SelfDeaf,
             ServerMute = await _mutes.FindAsync(session.UserId, cancellationToken) is not null,
             Suppressed = !access.Permissions.Allows(Permission.Speak),
+            // Joining never starts the camera, so the grant below carries no camera either. It is
+            // added when they ask for it, which is where the cap on simultaneous cameras applies.
+            CameraOn = false,
+            CameraSuppressed = !access.Permissions.Allows(Permission.Video)
+                               || _options.MaximumCameraPublishersPerChannel == 0,
             Connected = false,
             JoinedAtUtc = now,
             LastSeenUtc = now
@@ -143,7 +151,9 @@ public sealed class VoiceService
 
         // Minted before admitting, so a transport that refuses leaves nothing behind to clean up.
         var connection = await _transport.CreateConnectionAsync(
-            new VoiceGrant(record.ChannelId, record.UserId, session.Username, record.CanSpeak), cancellationToken);
+            new VoiceGrant(
+                record.ChannelId, record.UserId, session.Username, record.CanSpeak, record.CanPublishCamera),
+            cancellationToken);
 
         var outcome = await _state.JoinAsync(record, _options.MaximumParticipantsPerChannel, cancellationToken);
 
@@ -193,7 +203,18 @@ public sealed class VoiceService
         return new LeaveVoiceResponse(true);
     }
 
-    /// <summary>Mutes or deafens the caller in the call they are in. Deafening always mutes too.</summary>
+    /// <summary>
+    /// Mutes or deafens the caller in the call they are in, and turns their camera on or off.
+    /// Deafening always mutes too.
+    /// </summary>
+    /// <remarks>
+    /// Mute and deafen are only what everybody's icons show, so they are always accepted. The camera
+    /// is not: turning it on is what adds the camera to this member's publishing grant, so it is
+    /// refused without <see cref="Permission.Video"/> and when every camera place in the call is
+    /// taken. The two are applied separately, and a refused camera leaves a mute or deafen in the
+    /// same request standing — a member who asked for both should not be left unmuted because the
+    /// call was full of cameras.
+    /// </remarks>
     public async Task<VoiceParticipant> UpdateSelfStateAsync(
         UserSession session, VoiceSelfStateRequest request, CancellationToken cancellationToken)
     {
@@ -206,6 +227,45 @@ public sealed class VoiceService
             throw ApiException.Conflict("not_in_voice", "You are not in a voice call from this session.");
 
         var channel = await _channelStore.FindByIdAsync(updated.ChannelId, cancellationToken);
+
+        if (request.CameraOn != updated.CameraOn)
+        {
+            var camera = await _state.SetCameraAsync(
+                session.UserId,
+                request.CameraOn,
+                _options.MaximumCameraPublishersPerChannel,
+                record => record.SessionToken == session.Token,
+                cancellationToken);
+
+            if (camera.NotAllowed)
+            {
+                // Published first: the mute half of this request did go through, and a client that
+                // throws the refusal away must not be left with a stale icon.
+                await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
+                throw ApiException.Forbidden("missing_permission",
+                    _options.MaximumCameraPublishersPerChannel == 0
+                        ? "This server does not carry camera video in calls."
+                        : "You do not have permission to turn your camera on in voice channels.");
+            }
+
+            if (camera.Full)
+            {
+                await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
+                throw ApiException.Conflict("camera_limit_reached",
+                    $"At most {_options.MaximumCameraPublishersPerChannel} members of a call can have their camera " +
+                    "on at once. Wait for somebody to turn theirs off.");
+            }
+
+            if (camera.Participant is { } withCamera)
+            {
+                updated = withCamera;
+                // The grant has to reach the media server before the client publishes, so this is
+                // queued rather than awaited only because the work queue is what owns transport
+                // calls; the client waits for the permission update, not for this method.
+                EnqueuePublishSync(updated.UserId);
+            }
+        }
+
         await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
 
         return VoiceEvents.ToContract(updated);
@@ -256,7 +316,7 @@ public sealed class VoiceService
 
         if (updated is not null)
         {
-            EnqueueSpeakSync(updated.UserId);
+            EnqueuePublishSync(updated.UserId);
 
             var channel = await _channelStore.FindByIdAsync(updated.ChannelId, cancellationToken);
             await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
@@ -304,18 +364,29 @@ public sealed class VoiceService
             }
 
             var suppressed = !permissions.Allows(Permission.Speak);
-            if (suppressed == record.Suppressed)
+            var cameraSuppressed = !permissions.Allows(Permission.Video)
+                                   || _options.MaximumCameraPublishersPerChannel == 0;
+
+            if (suppressed == record.Suppressed && cameraSuppressed == record.CameraSuppressed)
                 continue;
 
             var updated = await _state.UpdateAsync(record.UserId,
-                current => current with { Suppressed = suppressed },
+                // Losing the camera permission mid-call turns the camera off as well as forbidding
+                // it, so the grant that goes to the media server stops accepting one and the record
+                // does not claim a camera nobody can see.
+                current => current with
+                {
+                    Suppressed = suppressed,
+                    CameraSuppressed = cameraSuppressed,
+                    CameraOn = current.CameraOn && !cameraSuppressed
+                },
                 current => current.SessionToken == record.SessionToken,
                 cancellationToken);
 
             if (updated is null)
                 continue;
 
-            await SyncSpeakAsync(updated, cancellationToken);
+            await SyncPublishAsync(updated, cancellationToken);
             await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
         }
     }
@@ -374,8 +445,8 @@ public sealed class VoiceService
             if (updated is null)
                 continue;
 
-            if (seen.CanSpeak != updated.CanSpeak)
-                await SyncSpeakAsync(updated, cancellationToken);
+            if (seen.CanSpeak != updated.CanSpeak || seen.CanPublishCamera != updated.CanPublishCamera)
+                await SyncPublishAsync(updated, cancellationToken);
 
             if (!record.Connected)
             {
@@ -468,16 +539,21 @@ public sealed class VoiceService
             await TryTransportAsync(ct => _transport.DisconnectAsync(channelId, userId, ct), cancellationToken);
         });
 
-    /// <summary>Pushes whatever a member's record now says about speaking to the media server.</summary>
-    private void EnqueueSpeakSync(Guid userId) =>
+    /// <summary>
+    /// Pushes whatever a member's record now says they may send — microphone and camera — to the
+    /// media server.
+    /// </summary>
+    private void EnqueuePublishSync(Guid userId) =>
         _work.Enqueue(async cancellationToken =>
         {
             if (await _state.FindAsync(userId, cancellationToken) is { } current)
-                await SyncSpeakAsync(current, cancellationToken);
+                await SyncPublishAsync(current, cancellationToken);
         });
 
-    private Task SyncSpeakAsync(VoiceParticipantRecord record, CancellationToken cancellationToken) =>
-        TryTransportAsync(ct => _transport.SetCanSpeakAsync(record.ChannelId, record.UserId, record.CanSpeak, ct),
+    private Task SyncPublishAsync(VoiceParticipantRecord record, CancellationToken cancellationToken) =>
+        TryTransportAsync(
+            ct => _transport.SetPublishAsync(
+                record.ChannelId, record.UserId, record.CanSpeak, record.CanPublishCamera, ct),
             cancellationToken);
 
     /// <summary>

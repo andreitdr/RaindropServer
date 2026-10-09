@@ -35,7 +35,9 @@ public static class VoiceEvents
         record.ServerMute,
         record.Suppressed,
         record.Connected,
-        record.JoinedAtUtc);
+        record.JoinedAtUtc,
+        record.CameraOn,
+        record.CameraSuppressed);
 
     /// <summary>Publishes <c>voice.state</c> for one participant.</summary>
     public static Task PublishStateAsync(

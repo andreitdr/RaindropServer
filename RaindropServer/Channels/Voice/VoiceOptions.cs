@@ -32,6 +32,23 @@ public sealed class VoiceOptions
     public int MaximumParticipantsPerChannel { get; set; } = 25;
 
     /// <summary>
+    /// How many members of one call may send their camera at once. Every camera goes to everybody
+    /// else, and video costs an order of magnitude more than speech, so this is deliberately a much
+    /// smaller number than <see cref="MaximumParticipantsPerChannel"/> — a call can be larger than
+    /// the number of people in it who can be seen.
+    /// </summary>
+    /// <remarks>
+    /// 0 switches camera video off on this server: no member is granted the camera, and
+    /// <c>voice.video.v1</c> is not advertised, so clients show no camera button at all.
+    /// <para>
+    /// This is enforced at the media server, not only in the UI: the camera is added to a
+    /// participant's publishing grant when they say their camera is on and refused when every place
+    /// is taken, so a client that ignores the answer still cannot send.
+    /// </para>
+    /// </remarks>
+    public int MaximumCameraPublishersPerChannel { get; set; } = 6;
+
+    /// <summary>
     /// How long a member may hold a place in a call after joining before the media server has seen
     /// them connect. A client that got its token and then crashed, or could not reach the media server
     /// at all, is dropped once this passes rather than showing as present forever.
@@ -70,6 +87,21 @@ public sealed class VoiceOptions
             report.Warn("maximumParticipants",
                 $"is {MaximumParticipantsPerChannel}. Every participant receives everybody else's audio, so a full " +
                 "call costs the media server roughly the square of this in bandwidth.");
+
+        report.Range("maximumCameraPublishers", MaximumCameraPublishersPerChannel, 0, 50, "publisher(s)");
+
+        // A cap above the call's own capacity is not wrong, only unreachable — and an owner who wrote
+        // one probably meant the call to hold that many people.
+        if (MaximumCameraPublishersPerChannel > MaximumParticipantsPerChannel)
+            report.Warn("maximumCameraPublishers",
+                $"is {MaximumCameraPublishersPerChannel}, more than the {MaximumParticipantsPerChannel} members a " +
+                "call holds, so it can never be reached.");
+
+        if (MaximumCameraPublishersPerChannel > 12)
+            report.Warn("maximumCameraPublishers",
+                $"is {MaximumCameraPublishersPerChannel}. Every camera is sent to everybody else in the call, so " +
+                $"that many cameras is up to {MaximumCameraPublishersPerChannel * (MaximumParticipantsPerChannel - 1)} " +
+                "video streams out of the media server at once — far more than the audio costs.");
 
         report.Range("joinGrace", JoinGrace, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(10));
         report.Range("reconcileInterval", ReconcileInterval, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));

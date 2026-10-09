@@ -16,6 +16,11 @@ namespace RaindropServer.Channels.Voice;
 /// The media server has seen them connect. False for the moment between joining and connecting.
 /// </param>
 /// <param name="JoinedAtUtc">When they joined, which is also the order a call lists them in.</param>
+/// <param name="CameraOn">They are sending their camera to the call.</param>
+/// <param name="CameraSuppressed">
+/// They may listen and talk but not turn their camera on: they lack <c>video</c>, or every camera
+/// place in this call is taken.
+/// </param>
 public record VoiceParticipant(
     Guid ChannelId,
     Guid UserId,
@@ -24,7 +29,9 @@ public record VoiceParticipant(
     bool ServerMute,
     bool Suppressed,
     bool Connected,
-    DateTime JoinedAtUtc);
+    DateTime JoinedAtUtc,
+    bool CameraOn = false,
+    bool CameraSuppressed = false);
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
@@ -41,7 +48,12 @@ public record LeaveVoiceRequest(Guid ChannelId);
 
 /// <param name="SelfMute">Whether your microphone is muted.</param>
 /// <param name="SelfDeaf">Whether you have stopped hearing the call; implies <paramref name="SelfMute"/>.</param>
-public record VoiceSelfStateRequest(bool SelfMute, bool SelfDeaf);
+/// <param name="CameraOn">
+/// Whether your camera is on. Unlike mute and deafen this is not only an icon: it is what earns the
+/// media server's permission to send a camera, so it can be refused (<c>missing_permission</c>
+/// without <c>video</c>, <c>camera_limit_reached</c> when every camera place is taken).
+/// </param>
+public record VoiceSelfStateRequest(bool SelfMute, bool SelfDeaf, bool CameraOn = false);
 
 /// <param name="UserId">The member to mute or unmute for everyone.</param>
 /// <param name="Muted">True to mute, false to lift the mute.</param>
@@ -84,11 +96,16 @@ public record VoiceMuteResponse(Guid UserId, bool Muted, bool Changed);
 /// <param name="Transport">The transport joining would use, e.g. <c>livekit</c>; <c>none</c> when unavailable.</param>
 /// <param name="MaximumParticipants">The most members one call holds.</param>
 /// <param name="Participants">Everybody in a call in a channel the caller may see, by channel then join time.</param>
+/// <param name="MaximumCameraPublishers">
+/// How many members of one call may send their camera at once; 0 when this server carries no camera
+/// video, which is also when it does not advertise <c>voice.video.v1</c>.
+/// </param>
 public record VoiceStatusResponse(
     bool Available,
     string Transport,
     int MaximumParticipants,
-    IReadOnlyList<VoiceParticipant> Participants);
+    IReadOnlyList<VoiceParticipant> Participants,
+    int MaximumCameraPublishers = 0);
 
 // ── Events ───────────────────────────────────────────────────────────────────
 

@@ -3,8 +3,9 @@ using Microsoft.AspNetCore.Http;
 namespace RaindropServer.Channels.Voice;
 
 /// <summary>
-/// Whatever actually carries the audio of a voice call. Raindrop decides who may join, speak and
-/// moderate; the transport only moves media, and is told the outcome of those decisions.
+/// Whatever actually carries the media of a voice call. Raindrop decides who may join, speak, show
+/// their camera and moderate; the transport only moves media, and is told the outcome of those
+/// decisions.
 /// </summary>
 /// <remarks>
 /// The seam a media server plugs in behind. The built-in implementation drives a LiveKit sidecar
@@ -37,10 +38,19 @@ public interface IVoiceTransport
     Task<VoiceConnection> CreateConnectionAsync(VoiceGrant grant, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Lets a participant who is already connected talk, or stops them, without disconnecting them —
-    /// how a server mute or a lost <c>speak</c> permission takes effect mid-call.
+    /// Changes what a participant who is already connected may send, without disconnecting them —
+    /// how a server mute, a lost permission, or turning a camera on and off takes effect mid-call.
     /// </summary>
-    Task SetCanSpeakAsync(Guid channelId, Guid userId, bool canSpeak, CancellationToken cancellationToken);
+    /// <remarks>
+    /// One call rather than one per source, because a transport that replaces a participant's whole
+    /// permission set (LiveKit does) would have two calls racing to describe the same participant.
+    /// </remarks>
+    Task SetPublishAsync(
+        Guid channelId,
+        Guid userId,
+        bool canSpeak,
+        bool canPublishCamera,
+        CancellationToken cancellationToken);
 
     /// <summary>Removes one participant from a call. Succeeds quietly when they are not in it.</summary>
     Task DisconnectAsync(Guid channelId, Guid userId, CancellationToken cancellationToken);
@@ -78,7 +88,17 @@ public interface IVoiceSignalRelay
 /// can be renamed mid-call — and resolve names from the UUID instead.
 /// </param>
 /// <param name="CanSpeak">Whether the transport should accept their microphone.</param>
-public sealed record VoiceGrant(Guid ChannelId, Guid UserId, string DisplayName, bool CanSpeak);
+/// <param name="CanPublishCamera">
+/// Whether the transport should accept their camera. False at join whatever their permissions say:
+/// the camera is granted only once a member says their camera is on, which is also where the
+/// server's cap on simultaneous cameras is applied.
+/// </param>
+public sealed record VoiceGrant(
+    Guid ChannelId,
+    Guid UserId,
+    string DisplayName,
+    bool CanSpeak,
+    bool CanPublishCamera);
 
 /// <summary>What a client needs to connect its media to the call.</summary>
 /// <param name="Transport">The transport's <see cref="IVoiceTransport.Name"/>.</param>
@@ -97,7 +117,8 @@ public sealed record TransportCall(Guid ChannelId, IReadOnlyList<TransportPartic
 /// <summary>One connected participant as the media server sees them.</summary>
 /// <param name="UserId">Their identity in the call.</param>
 /// <param name="CanSpeak">Whether the media server currently accepts their microphone.</param>
-public sealed record TransportParticipant(Guid UserId, bool CanSpeak);
+/// <param name="CanPublishCamera">Whether the media server currently accepts their camera.</param>
+public sealed record TransportParticipant(Guid UserId, bool CanSpeak, bool CanPublishCamera);
 
 /// <summary>The media server could not be reached, or refused a request it should have accepted.</summary>
 public sealed class VoiceTransportException : Exception

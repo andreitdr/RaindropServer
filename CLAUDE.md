@@ -365,7 +365,7 @@ button rather than let a request fail — but it is never trusted about it: ever
 column, there is no migration mechanism here (see **Database modules**), so the room for another
 fifty permissions has to exist from the start. The permissions are `ViewChannel`, `SendMessages`,
 `AttachFiles` (add files to messages, checked in the channel beside `SendMessages`), `ManageMessages`, `CreateChannels`, `RenameChannels`, `DeleteChannels`, `ManageRoles`,
-`Administrator`, and for voice `Connect`, `Speak` and `MuteMembers` (the last checked server-wide,
+`Administrator`, and for voice `Connect`, `Speak`, `Video` and `MuteMembers` (the last checked server-wide,
 never per channel, and not part of the channel-creator rule — a mute for everyone follows its target
 into every call).
 
@@ -456,7 +456,7 @@ Channels are how members talk to each other. There are two kinds, and the split 
 down the code:
 
 - **Text channels** — messages in chronological order. Implemented.
-- **Voice channels** — a group call, later with camera and screen sharing. Implemented, with the
+- **Voice channels** — a group call with camera video, later with screen sharing. Implemented, with the
   audio on a LiveKit sidecar — see **Voice** below.
 
 `RaindropServer/Channels/` holds what every channel has in common — the record, the name policy,
@@ -532,10 +532,11 @@ has been kept out of.
 ### Voice
 
 `RaindropServer/Channels/Voice/`; full reference [`docs/voice.md`](docs/voice.md). **Raindrop is the
-authority, the media server only carries audio.** `VoiceService` decides who may join (`connect`),
-speak (`speak`, and no mute for everyone) and moderate (`mute_members`); the transport is told the
-outcome as a grant — a join token whose `canPublish` says whether the microphone is accepted,
-`UpdateParticipant` when that changes mid-call.
+authority, the media server only carries media.** `VoiceService` decides who may join (`connect`),
+speak (`speak`, and no mute for everyone), show their camera (`video`, within the server's per-call
+cap) and moderate (`mute_members`); the transport is told the outcome as a grant — a join token whose
+`canPublishSources` names the microphone and/or the camera, `UpdateParticipant` when that changes
+mid-call.
 
 - **Seams**: `IVoiceTransport` (LiveKit via `AddRaindropLiveKit`, registered *before*
   `AddRaindropServer`; otherwise `UnavailableVoiceTransport` refuses every join with
@@ -562,8 +563,18 @@ outcome as a grant — a join token whose `canPublish` says whether the micropho
   bodies are JSON, by the Twirp spec.
 - **Calls are end-to-end encrypted** (`e2ee.voice.v1`): clients' LiveKit frame cryptor encrypts every
   frame with a key exported from the voice channel's MLS group (`raindrop/voice/v1`, slot `epoch mod
-  16`), so LiveKit forwards audio it cannot hear; tokens grant no data channel, so no key material
-  crosses LiveKit. The server holds no key; see `docs/voice.md#end-to-end-encrypted-calls`.
+  16`), so LiveKit forwards media it cannot hear or see; tokens grant no data channel, so no key
+  material crosses LiveKit. One key per call covers voice and camera alike — LiveKit's shared-key
+  provider holds one key per ring slot for the whole room, so there is no second label for video and
+  camera needed no crypto change. The server holds no key; see
+  `docs/voice.md#end-to-end-encrypted-calls`.
+- **Camera video** (`voice.video.v1`, advertised when a transport is configured and
+  `voice.maximumCameraPublishers` is above zero): **the camera grant follows the camera being on, not
+  the permission.** A join token names `microphone` only; `SetVoiceSelfState(camera_on: true)` checks
+  `video`, counts the call's cameras against the cap inside `IVoiceStateStore.SetCameraAsync` (one
+  whole decision, so two members racing for the last place cannot both win), and only then is `camera`
+  added to the grant. A client that ignores a refusal still cannot send. See
+  `docs/voice.md#camera-video`.
 - **One call per member per server**, enforced atomically by the state store; joining from a second
   device takes the call over; a leave names its channel and must come from the joining session.
 - Anything slow (a role change re-checking every participant, telling LiveKit about a mute) goes
@@ -741,6 +752,8 @@ warning whenever it's on. `docker-compose.yml` wires it into the `server` servic
 see `docs/local-development-and-docker.md#wiping-the-database-on-every-start`.
 
 The `voice` section is `provider` (`livekit`, or null for no voice — the default), `maximumParticipants`,
+`maximumCameraPublishers` (how many cameras one call carries at once; 0 switches camera video off and
+withdraws `voice.video.v1`),
 `startupCheck` (`off`/`warn`/`require`) and `livekit` (`apiUrl`, a private address clients never reach;
 `apiKey`; `apiSecret`; `allowWeakSecret`). `livekit` with a missing key or secret is a startup error.
 
