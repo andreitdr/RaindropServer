@@ -21,6 +21,15 @@ namespace RaindropServer.Channels.Voice;
 /// They may listen and talk but not turn their camera on: they lack <c>video</c>, or every camera
 /// place in this call is taken.
 /// </param>
+/// <param name="ScreenShareOn">They are sharing a screen or a window.</param>
+/// <param name="ScreenShareKind">
+/// What they are sharing, a <see cref="ScreenShareKinds"/> value; null while they are not.
+/// </param>
+/// <param name="ScreenShareAudio">They are sending the shared window's own sound too.</param>
+/// <param name="ScreenShareSuppressed">
+/// They may not start a share: they lack <c>screen_share</c>, or every sharing place in this call is
+/// taken.
+/// </param>
 public record VoiceParticipant(
     Guid ChannelId,
     Guid UserId,
@@ -31,7 +40,11 @@ public record VoiceParticipant(
     bool Connected,
     DateTime JoinedAtUtc,
     bool CameraOn = false,
-    bool CameraSuppressed = false);
+    bool CameraSuppressed = false,
+    bool ScreenShareOn = false,
+    string? ScreenShareKind = null,
+    bool ScreenShareAudio = false,
+    bool ScreenShareSuppressed = false);
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
@@ -53,7 +66,25 @@ public record LeaveVoiceRequest(Guid ChannelId);
 /// media server's permission to send a camera, so it can be refused (<c>missing_permission</c>
 /// without <c>video</c>, <c>camera_limit_reached</c> when every camera place is taken).
 /// </param>
-public record VoiceSelfStateRequest(bool SelfMute, bool SelfDeaf, bool CameraOn = false);
+/// <param name="ScreenShareOn">
+/// Whether you are sharing. Like the camera, it earns the media server's permission to send one, so
+/// it can be refused (<c>missing_permission</c> without <c>screen_share</c>,
+/// <c>screen_share_limit_reached</c> when every sharing place is taken).
+/// </param>
+/// <param name="ScreenShareKind">
+/// What you are sharing, a <see cref="ScreenShareKinds"/> value. Required while sharing.
+/// </param>
+/// <param name="ScreenShareAudio">
+/// Send the shared window's own sound too. Refused for a whole screen, and refused while you may not
+/// speak.
+/// </param>
+public record VoiceSelfStateRequest(
+    bool SelfMute,
+    bool SelfDeaf,
+    bool CameraOn = false,
+    bool ScreenShareOn = false,
+    string? ScreenShareKind = null,
+    bool ScreenShareAudio = false);
 
 /// <param name="UserId">The member to mute or unmute for everyone.</param>
 /// <param name="Muted">True to mute, false to lift the mute.</param>
@@ -100,12 +131,30 @@ public record VoiceMuteResponse(Guid UserId, bool Muted, bool Changed);
 /// How many members of one call may send their camera at once; 0 when this server carries no camera
 /// video, which is also when it does not advertise <c>voice.video.v1</c>.
 /// </param>
+/// <param name="MaximumScreenShares">
+/// How many members of one call may share their screen at once; 0 when this server carries no screen
+/// sharing, which is also when it does not advertise <c>voice.screen.v1</c>.
+/// </param>
 public record VoiceStatusResponse(
     bool Available,
     string Transport,
     int MaximumParticipants,
     IReadOnlyList<VoiceParticipant> Participants,
-    int MaximumCameraPublishers = 0);
+    int MaximumCameraPublishers = 0,
+    int MaximumScreenShares = 0);
+
+/// <summary>
+/// What a screen share shows. A closed set — there is nothing else a share can be — carried as an
+/// enum on the wire and as these names everywhere else, like every other closed set here.
+/// </summary>
+public static class ScreenShareKinds
+{
+    /// <summary>A whole display. Never carries sound: the host's sound is never sent.</summary>
+    public const string Screen = "screen";
+
+    /// <summary>One window, and optionally that window's own sound.</summary>
+    public const string Window = "window";
+}
 
 // ── Events ───────────────────────────────────────────────────────────────────
 

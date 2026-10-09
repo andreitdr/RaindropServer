@@ -12,13 +12,13 @@ and [`VoiceSignalRoutes`](../RaindropServer/Channels/Voice/VoiceSignalRoutes.cs)
 
 ## Who does what
 
-Raindrop is the **authority**; a media server only **carries audio**.
+Raindrop is the **authority**; a media server only **carries media**.
 
 | Raindrop decides | The media server does |
 |---|---|
-| who may see, join and speak in a channel (roles and permissions) | receive each participant's microphone |
-| who is in which call, and their mute/deafen state | forward it to everybody else in the room (an SFU) |
-| moderator mutes, stored so they survive restarts | refuse a microphone its token does not allow |
+| who may see, join, speak, show their camera and share their screen in a channel (roles and permissions) | receive each participant's microphone, camera and screen share |
+| who is in which call, and their mute/deafen/camera/share state | forward them to everybody else in the room (an SFU) |
+| moderator mutes, stored so they survive restarts | refuse any source its grant does not allow |
 
 The media server shipped with Raindrop is **LiveKit**, running as a sidecar next to the server. It
 sits behind the `IVoiceTransport` seam, so nothing in `VoiceService` knows which one it is talking to.
@@ -43,21 +43,26 @@ Voice uses the same server-wide roles as everything else (see
 | `Connect` | `connect` | Join the call. |
 | `Speak` | `speak` | Be heard. Without it you join as a listener: the participant is `suppressed`, and LiveKit refuses your microphone. |
 | `Video` | `video` | Be seen. Without it the participant is `camera_suppressed` and LiveKit refuses their camera. Separate from `speak`, so a member can be heard without being seen. |
+| `ScreenShare` | `screen_share` | Share a screen or a window. Without it the participant is `screen_share_suppressed` and LiveKit refuses their share. Separate from `video`, so an owner can let members be seen without letting them put a film in front of the whole call. A window's sound additionally needs them to be able to speak. |
 | `MuteMembers` | `mute_members` | Mute or unmute somebody for everyone. Checked **server-wide**, never per channel, and not part of the channel-creator rule, because a mute follows its target into every call. |
 
-`connect`, `speak` and `video` are in the `everyone` role by default. An existing server gains them
+`connect`, `speak`, `video` and `screen_share` are in the `everyone` role by default. An existing server gains them
 once through a **permission rollout**; see below.
 
 Permissions are enforced by the media server, not just the UI:
 
-- A join token's `canPublish` is `(speak && !mutedForEveryone) || cameraGranted`.
-- `canPublishSources` names `microphone` and/or `camera`, and **never nothing** — LiveKit reads an
-  empty list as "every source", so `canPublish: false` is what actually says no
+- Everything a participant may send is one `VoicePublishGrant` — microphone, camera, screen, the
+  screen's sound — derived from their record (`VoiceParticipantRecord.Publish`) and handed to the
+  transport whole, because LiveKit replaces a participant's permission object rather than merging.
+- A token's `canPublish` is "any of those". `canPublishSources` names exactly the granted ones
+  (`microphone`, `camera`, `screen_share`, `screen_share_audio`), and **never nothing** — LiveKit
+  reads an empty list as "every source", so `canPublish: false` is what actually says no
   (`LiveKitJwt.PublishableSources`, used by the join token and by `UpdateParticipant` alike).
-  Screen share comes later, by widening it again.
-- A change mid-call is pushed with LiveKit's `UpdateParticipant`. Losing `view_channel` or `connect`
-  mid-call removes the participant with reason `permission_lost`; losing `video` turns their camera
-  off and takes the grant away without disturbing the rest of their call.
+  `screen_share_audio` is never named without `screen_share`.
+- A change mid-call is pushed with LiveKit's `UpdateParticipant`, and LiveKit withdraws any track
+  whose source the new grant no longer names. Losing `view_channel` or `connect` mid-call removes the
+  participant with reason `permission_lost`; losing `video` turns their camera off, and losing
+  `screen_share` ends their share, each without disturbing the rest of their call.
 
 **Nobody may mute an administrator for everyone unless they are one.** That is the same spirit as "you
 cannot hand out what you do not hold". It can never lock anybody out, because an administrator can
@@ -68,8 +73,9 @@ always unmute themselves.
 `RoleOptions.DefaultMemberPermissions` only seeds a **new** server, so an existing server upgraded to
 a build with voice would otherwise have nobody but its administrators able to join a call.
 `PermissionRollouts.All` (`Roles/PermissionRollouts.cs`) fixes that. It lists permissions a build
-introduces for everybody: `new("voice", Connect | Speak)`, and `new("voice-video", Video)` for the
-build that added camera video.
+introduces for everybody: `new("voice", Connect | Speak)`, `new("voice-video", Video)` for the
+build that added camera video, and `new("voice-screen-share", ScreenShare)` for the one that added
+screen sharing.
 
 - On startup, `EnsureBuiltInRolesAsync` ORs each rollout not yet recorded into the `everyone` role,
   then records it in `raindrop_permission_rollouts`.
@@ -87,9 +93,10 @@ sessions. A call cannot outlive the process that admitted its participants, beca
 not outlive it either.
 
 - The store's operations are whole decisions (`JoinAsync(record, capacity)` returns
-  full / moved-from / replaced; `SetCameraAsync(on, cameraCapacity)` returns full / not-allowed).
-  That enforces capacity, the camera cap and **one call per member per server** atomically — two
-  members racing for the last place, or the last camera place, cannot both win.
+  full / moved-from / replaced; `SetCameraAsync(on, cameraCapacity)` returns full / not-allowed;
+  `SetScreenShareAsync(on, kind, audio, shareCapacity)` returns full / not-allowed / muted). That
+  enforces capacity, both caps and **one call per member per server** atomically — two members
+  racing for the last place, the last camera place or the last sharing place cannot both win.
 - Each record keeps the **session token** that joined. Logging out on one device ends that device's
   call and no other.
 
@@ -130,7 +137,55 @@ is deliberately far below `maximumParticipants`: every camera is sent to everybo
 cameras in a call of 25 is already 150 video streams out of the media server. Zero switches camera
 video off entirely, and the capability with it.
 
-**What is *not* here.** Screen sharing — `canPublishSources` would be widened again the same way.
+## Screen sharing
+
+Advertised as the capability `voice.screen.v1`, when a media server is configured **and**
+`voice.maximumScreenShares` is above zero — separate from `voice.video.v1`, because an owner can
+switch either off without the other.
+
+A share is **a whole screen** or **one window** (`ScreenShareKind`, a closed set, so an enum on the
+wire and the names `screen` / `window` in the domain). A window may also carry **its own sound**; a
+screen never does, because the host's sound is never sent. The server cannot see what a client
+captures — the media is end-to-end encrypted — so that rule is enforced the only way it can be, as a
+*grant*: `screen_share_audio` is only ever added to a participant's grant for a window.
+
+It works exactly like the camera, and for the same reason:
+
+1. Joining grants no share. `SetVoiceSelfState(screen_share_on: true, screen_share_kind, screen_share_audio)`
+   checks `screen_share`, counts the shares already running in that call inside
+   `IVoiceStateStore.SetScreenShareAsync`, and either refuses (`missing_permission` /
+   `screen_share_limit_reached`) or records it.
+2. Having recorded it, the server pushes the grant to LiveKit, which adds `screen_share` — and
+   `screen_share_audio` for a window with sound — to `canPublishSources`. The client waits for that
+   grant and then publishes.
+3. Stopping reverses it; the client unpublishes first.
+
+`VoiceParticipantRecord.CanPublishScreen` is `ScreenShareOn && !ScreenShareSuppressed`.
+`CanPublishScreenAudio` is that **and** a window **and** sound asked for **and** `CanSpeak`:
+
+- **A window's sound follows the right to speak, not the share.** A member muted for everyone, or
+  without `speak`, sends no sound into the call whatever its source. Asking for it then is refused
+  (`missing_permission`, decided inside the store so a mute landing at the same moment cannot be
+  overtaken), and a mute for everyone — or losing `speak` — mid-share clears `screen_share_audio`
+  and withdraws just that source, leaving the picture. Lifting the mute does not bring the sound back:
+  LiveKit has withdrawn the track, and only the sharer can start it again.
+- **Their own mute does not stop it.** The window's sound is its own track, separate from their
+  microphone, which is the point of it being one.
+
+**The request is the whole state.** `SetVoiceSelfState` carries mute, deafen, camera *and* share, and
+every field is read: a client that leaves the share out of a mute toggle ends it. A share that is
+already running arrives again with every toggle and is only touched when something about it differs;
+a running share that changes what it carries (sound switched off because it could not be captured)
+keeps the place it has and is never told the call is full. A share with no kind, or a screen with
+sound, is `invalid_payload`, and none of that request is applied.
+
+**The cap** (`voice.maximumScreenShares`, 2 by default) is per call. A share is sent at up to 1080p —
+about 3 Mbit/s up from its sharer, and up to 2.5 Mbit/s to each member *watching* it (clients only
+receive a share once their user chooses to watch it). Zero switches screen sharing off, and the
+capability with it. Losing `screen_share` mid-call ends a running share (`ReevaluateAsync`).
+
+The 1080p ceiling, choosing what to share, and which platforms can capture a window's sound are all
+the client's: see `RaindropClient/docs/voice.md#screen-sharing`.
 
 ## Keeping Raindrop and LiveKit in step
 
@@ -244,17 +299,18 @@ All authenticated. `raindrop.v1.VoiceService`:
 
 | RPC | Purpose |
 |---|---|
-| `GetVoiceStatus` | → `{available, transport, maximum_participants, maximum_camera_publishers, participants}`: whether voice works here, how many cameras a call carries, and everybody in every call the caller can see |
+| `GetVoiceStatus` | → `{available, transport, maximum_participants, maximum_camera_publishers, maximum_screen_shares, participants}`: whether voice works here, how many cameras and shares a call carries, and everybody in every call the caller can see |
 | `JoinVoice` | `{channel_id, self_mute, self_deaf}` → `{channel_id, transport, url?, path?, token, expires_at, you, participants}`. Needs `connect`. Joining another call leaves the first; joining the same call from another device takes it over. |
 | `LeaveVoice` | `{channel_id}` → `{left}`. Idempotent, and only the session that joined can leave, so a late leave from one device cannot end another device's call. |
-| `SetVoiceSelfState` | `{self_mute, self_deaf, camera_on}` → `{participant}`. Deafening always mutes too. Mute and deafen are only icons and are always accepted; **the camera is a decision and can be refused** (`missing_permission`, `camera_limit_reached`), and a refused camera leaves a mute in the same request standing. |
+| `SetVoiceSelfState` | `{self_mute, self_deaf, camera_on, screen_share_on, screen_share_kind, screen_share_audio}` → `{participant}`. **The whole state**: a field left out is read as off. Deafening always mutes too. Mute and deafen are only icons and are always accepted; **the camera and a share are decisions and can be refused** (`missing_permission`, `camera_limit_reached`, `screen_share_limit_reached`), and a refused one leaves a mute in the same request standing. A malformed share (`invalid_payload`) is refused whole. |
 | `MuteVoiceMember` | `{user_id, muted}` → `{user_id, muted, changed}`. Mute or unmute for everyone; needs server-wide `mute_members`. |
 
 The signalling relay at `/api/channels/voice/signal/{path}` (see above) is not part of this service and
 not a Raindrop-session route.
 
 `VoiceParticipant` is `{channel_id, user_id, self_mute, self_deaf, server_mute, suppressed, connected,
-joined_at, camera_on, camera_suppressed}`: the whole state, merged by clients on
+joined_at, camera_on, camera_suppressed, screen_share_on, screen_share_kind, screen_share_audio,
+screen_share_suppressed}`: the whole state, merged by clients on
 `(channel_id, user_id)`. `url` is absent in this version (everything goes through the relay). It is in
 the contract so a transport can point clients at a media server with its own TLS later.
 
@@ -265,9 +321,11 @@ Error codes on top of the channel ones:
 | `voice_unavailable` | 503 | No media server is configured (`voice.provider` is null) |
 | `channel_full` | 409 | The call already holds `maximumParticipants` other members |
 | `camera_limit_reached` | 409 | The call already has `maximumCameraPublishers` other cameras on |
+| `screen_share_limit_reached` | 409 | The call already has `maximumScreenShares` other shares running |
+| `invalid_payload` | 400 | A share with no kind, or a screen share asking for sound |
 | `not_in_voice` | 409 | `state` from a session that is not in a call |
 | `member_not_found` | 404 | `mute` for somebody who is not an active member |
-| `missing_permission` | 403 | No `connect`, no `video` (turning a camera on), no `mute_members`, or muting an administrator without being one |
+| `missing_permission` | 403 | No `connect`, no `video` (turning a camera on), no `screen_share` (starting a share), asking for a window's sound while unable to speak, no `mute_members`, or muting an administrator without being one |
 | `wrong_channel_type` | 400 | Joining a text channel |
 
 Events: `voice.state` (a `VoiceParticipant`) and `voice.left` (`{channelId, userId, reason}`), sent to
@@ -283,6 +341,7 @@ as `left`. See [Events](events.md).
   "provider": null,              // "livekit" to switch voice on
   "maximumParticipants": 25,
   "maximumCameraPublishers": 6,  // cameras on at once in one call; 0 switches camera video off
+  "maximumScreenShares": 2,      // shares at once in one call; 0 switches screen sharing off
   "startupCheck": "warn",        // off | warn | require — how hard to look for LiveKit at startup
   "livekit": {
     "apiUrl": "http://localhost:7880",

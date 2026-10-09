@@ -76,7 +76,15 @@ public enum Permission : long
     /// can be heard without being seen: without it the media server refuses to accept their camera,
     /// the same way it refuses a microphone without <see cref="Speak"/>.
     /// </summary>
-    Video = 1L << 12
+    Video = 1L << 12,
+
+    /// <summary>
+    /// Share a screen or a window in a voice channel's call. Separate from <see cref="Video"/>
+    /// because it is a different thing to allow: an owner can let members be seen without letting
+    /// them put a film or somebody else's document in front of the whole call. A window's sound
+    /// comes with it only while they may also speak.
+    /// </summary>
+    ScreenShare = 1L << 13
 }
 
 /// <summary>
@@ -99,6 +107,7 @@ public static class PermissionNames
     public const string MuteMembers = "mute_members";
     public const string AttachFiles = "attach_files";
     public const string Video = "video";
+    public const string ScreenShare = "screen_share";
 
     /// <summary>
     /// Every permission this server knows, in the order a permission editor lists them: what an
@@ -113,6 +122,7 @@ public static class PermissionNames
         (Permission.Connect, Connect, "Join voice channels and hear the people in them."),
         (Permission.Speak, Speak, "Talk in voice channels."),
         (Permission.Video, Video, "Turn their camera on in voice channels."),
+        (Permission.ScreenShare, ScreenShare, "Share their screen or a window in voice channels."),
         (Permission.CreateChannels, CreateChannels, "Create new channels on this server."),
         (Permission.RenameChannels, RenameChannels, "Rename existing channels."),
         (Permission.DeleteChannels, DeleteChannels, "Delete channels, and everything inside them."),

@@ -44,8 +44,8 @@ public sealed class LiveKitRoomClient : IDisposable
     /// </summary>
     /// <remarks>
     /// The sources are read back, not just <c>can_publish</c>, because the reconciler compares what
-    /// LiveKit allows a participant against what Raindrop's record says it should — and the camera
-    /// is the half of that which <c>can_publish</c> alone cannot express.
+    /// LiveKit allows a participant against what Raindrop's record says it should — and once a token
+    /// can name more than the microphone, <c>can_publish</c> alone cannot say which.
     /// </remarks>
     public async Task<IReadOnlyList<LiveKitParticipant>> ListParticipantsAsync(string room, CancellationToken cancellationToken)
     {
@@ -57,9 +57,29 @@ public sealed class LiveKitRoomClient : IDisposable
             .Select(participant => new LiveKitParticipant(
                 participant.Identity,
                 participant.State.ToString().ToUpperInvariant(),
-                participant.Permission?.CanPublish ?? false,
-                participant.Permission?.CanPublishSources.Contains(TrackSource.Camera) ?? false))
+                GrantOf(participant.Permission)))
             .ToList();
+    }
+
+    /// <summary>
+    /// What a LiveKit permission actually lets its holder send. An <b>empty</b> source list with
+    /// <c>can_publish</c> means every source — Raindrop never sends one, but a permission is read
+    /// back here as LiveKit holds it, not as Raindrop meant it.
+    /// </summary>
+    internal static VoicePublishGrant GrantOf(ParticipantPermission? permission)
+    {
+        if (permission is null || !permission.CanPublish)
+            return VoicePublishGrant.None;
+
+        var sources = permission.CanPublishSources;
+        if (sources.Count == 0)
+            return new VoicePublishGrant(true, true, true, true);
+
+        return new VoicePublishGrant(
+            sources.Contains(TrackSource.Microphone),
+            sources.Contains(TrackSource.Camera),
+            sources.Contains(TrackSource.ScreenShare),
+            sources.Contains(TrackSource.ScreenShareAudio));
     }
 
     /// <summary>
@@ -70,8 +90,7 @@ public sealed class LiveKitRoomClient : IDisposable
     public Task UpdatePermissionAsync(
         string room,
         string identity,
-        bool canSpeak,
-        bool canPublishCamera,
+        VoicePublishGrant grant,
         CancellationToken cancellationToken) =>
         CallAsync("UpdateParticipant", room, new UpdateParticipantRequest
         {
@@ -80,13 +99,13 @@ public sealed class LiveKitRoomClient : IDisposable
             Permission = new ParticipantPermission
             {
                 CanSubscribe = true,
-                CanPublish = canSpeak || canPublishCamera,
+                CanPublish = grant.Any,
                 CanPublishData = false,
                 // Built by the same never-empty rule as the join token's, since LiveKit reads an
                 // empty list here as "every source" too.
                 CanPublishSources =
                 {
-                    LiveKitJwt.PublishableSources(canSpeak, canPublishCamera).Select(SourceOf)
+                    LiveKitJwt.PublishableSources(grant).Select(SourceOf)
                 },
                 CanUpdateMetadata = false
             }
@@ -94,8 +113,10 @@ public sealed class LiveKitRoomClient : IDisposable
 
     private static TrackSource SourceOf(string name) => name switch
     {
-        "camera" => TrackSource.Camera,
-        "microphone" => TrackSource.Microphone,
+        LiveKitJwt.CameraSource => TrackSource.Camera,
+        LiveKitJwt.MicrophoneSource => TrackSource.Microphone,
+        LiveKitJwt.ScreenShareSource => TrackSource.ScreenShare,
+        LiveKitJwt.ScreenShareAudioSource => TrackSource.ScreenShareAudio,
         _ => TrackSource.Unknown
     };
 
@@ -297,12 +318,11 @@ public sealed class LiveKitRoomClient : IDisposable
 
 /// <param name="Identity">Their identity in the room — a Raindrop member's UUID, for anybody Raindrop admitted.</param>
 /// <param name="State"><c>JOINING</c>, <c>JOINED</c>, <c>ACTIVE</c> or <c>DISCONNECTED</c>.</param>
-/// <param name="CanPublish">Whether LiveKit currently accepts their microphone.</param>
+/// <param name="Publish">Which of their sources LiveKit currently accepts.</param>
 public sealed record LiveKitParticipant(
     string Identity,
     string State,
-    bool CanPublish,
-    bool CanPublishCamera);
+    VoicePublishGrant Publish);
 
 /// <summary>What asking LiveKit whether it is there came back with.</summary>
 public enum LiveKitReachability

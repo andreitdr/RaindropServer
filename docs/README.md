@@ -39,7 +39,7 @@ same formats is [E2EE](e2ee.md).
 | [Channels](channels.md) | Channel types, `IChannelModule`, names, permissions, Channel API |
 | [Messages](messages.md) | Text messages, history paging, deletion/tombstones, Message API |
 | [Attachments](attachments.md) | End-to-end encrypted files in messages: streamed, resumable uploads, what the owner's size and type rules are enforced on, storage, cleanup, previews, Attachment API |
-| [Voice](voice.md) | Voice channels: group calls on a LiveKit sidecar, mute/deafen, mute for everyone, the signalling relay, Voice API |
+| [Voice](voice.md) | Voice channels: group calls on a LiveKit sidecar, mute/deafen, mute for everyone, camera video, screen sharing, the signalling relay, Voice API |
 | [Events (push)](events.md) | The bidirectional `EventService.Connect` stream, heartbeats, every event, how a stream ends, and the publisher/transport/handler seams plugins build on |
 | [Database modules](database-modules.md) | `IDatabaseDriver`, the relational store family, schema, adding a driver |
 | [Configuration](configuration.md) | `raindrop.json`, environment variables, the owner console |
@@ -71,7 +71,7 @@ same formats is [E2EE](e2ee.md).
   A server advertises `e2ee.devices.v1`, `e2ee.delivery.v1` and `e2ee.voice.v1` so a client can tell
   what it supports.
 - **What's not implemented yet:** message editing, reactions, threads, read state, direct messages,
-  invites/bans, screen sharing in voice channels, per-channel permission overrides, schema
+  invites/bans, per-channel permission overrides, schema
   migrations, and event replay/resume (a reconnecting client re-reads instead). The full list, with
   the seams each one would go through, is in [Roadmap](roadmap.md).
 

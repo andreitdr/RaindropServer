@@ -59,6 +59,28 @@ public interface IVoiceStateStore
         Func<VoiceParticipantRecord, bool>? predicate,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Starts, changes or stops a member's screen share in whichever call they are in, as long as
+    /// <paramref name="predicate"/> (if given) still holds for their record. Refuses, changing
+    /// nothing, when starting one and <paramref name="shareCapacity"/> other members in that call are
+    /// already sharing, when they may not share at all, or when they ask for sound while they may not
+    /// speak.
+    /// </summary>
+    /// <remarks>
+    /// The caller has already checked that <paramref name="kind"/> and <paramref name="audio"/> make
+    /// sense together; this decides only what needs the whole call counted, for the same reason as
+    /// <see cref="SetCameraAsync"/>. A member already sharing who changes what is shared — sound
+    /// switched off after it could not be captured, say — is not counted against the cap again.
+    /// </remarks>
+    ValueTask<VoiceScreenShareOutcome> SetScreenShareAsync(
+        Guid userId,
+        bool on,
+        string? kind,
+        bool audio,
+        int shareCapacity,
+        Func<VoiceParticipantRecord, bool>? predicate,
+        CancellationToken cancellationToken);
+
     /// <summary>The call a member is in, or null when they are in none.</summary>
     ValueTask<VoiceParticipantRecord?> FindAsync(Guid userId, CancellationToken cancellationToken);
 
@@ -103,6 +125,27 @@ public sealed record VoiceParticipantRecord
     /// </summary>
     public bool CameraSuppressed { get; init; }
 
+    /// <summary>They are sharing a screen or a window, and were allowed to.</summary>
+    public bool ScreenShareOn { get; init; }
+
+    /// <summary>
+    /// What they are sharing, a <see cref="ScreenShareKinds"/> value — null while
+    /// <see cref="ScreenShareOn"/> is false.
+    /// </summary>
+    public string? ScreenShareKind { get; init; }
+
+    /// <summary>
+    /// They asked to send the shared window's own sound too. Only ever true for a window, and cleared
+    /// whenever they stop being able to speak, so the record never claims sound nobody can hear.
+    /// </summary>
+    public bool ScreenShareAudio { get; init; }
+
+    /// <summary>
+    /// They may not share: they lack the <c>screen_share</c> permission, or this server carries no
+    /// screen sharing. The counterpart of <see cref="CameraSuppressed"/>.
+    /// </summary>
+    public bool ScreenShareSuppressed { get; init; }
+
     /// <summary>
     /// The media server has confirmed their connection. False from the moment they are admitted until
     /// the reconciler sees them in the call; a record that stays unconfirmed is dropped.
@@ -126,6 +169,24 @@ public sealed record VoiceParticipantRecord
     /// may use their camera but has it off cannot send one.
     /// </summary>
     public bool CanPublishCamera => CameraOn && !CameraSuppressed;
+
+    /// <summary>
+    /// Whether the media server should accept their screen share's picture. Follows the share being
+    /// on, like the camera.
+    /// </summary>
+    public bool CanPublishScreen => ScreenShareOn && !ScreenShareSuppressed;
+
+    /// <summary>
+    /// Whether the media server should accept their shared window's sound. Never for a whole screen —
+    /// the host's sound is not sent — and only while they may speak: a member muted for everyone
+    /// sends no sound into the call, whatever its source. Their own mute does not stop it, since it
+    /// is a separate track from their microphone and that is the point of it being one.
+    /// </summary>
+    public bool CanPublishScreenAudio =>
+        CanPublishScreen && ScreenShareAudio && ScreenShareKind == ScreenShareKinds.Window && CanSpeak;
+
+    /// <summary>Everything the media server should accept from them, as one grant.</summary>
+    public VoicePublishGrant Publish => new(CanSpeak, CanPublishCamera, CanPublishScreen, CanPublishScreenAudio);
 }
 
 /// <summary>What <see cref="IVoiceStateStore.JoinAsync"/> decided.</summary>
@@ -154,4 +215,28 @@ public readonly record struct VoiceJoinOutcome(
 public readonly record struct VoiceCameraOutcome(
     bool Full,
     bool NotAllowed,
+    VoiceParticipantRecord? Participant);
+
+/// <summary>What <see cref="IVoiceStateStore.SetScreenShareAsync"/> decided.</summary>
+/// <param name="Full">
+/// Every sharing place in the call was taken; nothing changed. Never set when stopping, or when they
+/// were already sharing.
+/// </param>
+/// <param name="NotAllowed">
+/// They may not share here (<see cref="VoiceParticipantRecord.ScreenShareSuppressed"/>); nothing
+/// changed.
+/// </param>
+/// <param name="Muted">
+/// They asked for a window's sound while they may not speak — muted for everyone, or lacking
+/// <c>speak</c>; nothing changed. Decided here rather than by the caller so a mute for everyone that
+/// lands at the same moment cannot be overtaken by it.
+/// </param>
+/// <param name="Participant">
+/// Their record now — unchanged when it already said what was asked for — or null when they were in
+/// no call, or the predicate did not hold.
+/// </param>
+public readonly record struct VoiceScreenShareOutcome(
+    bool Full,
+    bool NotAllowed,
+    bool Muted,
     VoiceParticipantRecord? Participant);

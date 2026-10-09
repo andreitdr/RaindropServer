@@ -482,28 +482,27 @@ public sealed class FakeVoiceTransport : IVoiceTransport
     public List<VoiceGrant> Grants { get; } = [];
 
     /// <summary>Every mid-call permission change pushed, in order.</summary>
-    public List<(Guid Channel, Guid User, bool CanSpeak, bool CanPublishCamera)> Pushed { get; } = [];
+    public List<(Guid Channel, Guid User, VoicePublishGrant Grant)> Pushed { get; } = [];
 
     public Task<VoiceConnection> CreateConnectionAsync(VoiceGrant grant, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
             Grants.Add(grant);
-            _participants[(grant.ChannelId, grant.UserId)] =
-                new TransportParticipant(grant.UserId, grant.CanSpeak, grant.CanPublishCamera);
+            _participants[(grant.ChannelId, grant.UserId)] = new TransportParticipant(grant.UserId, grant.Publish);
         }
 
         return Task.FromResult(new VoiceConnection(Name, null, "/api/channels/voice/signal", "token", DateTime.UtcNow.AddMinutes(2)));
     }
 
     public Task SetPublishAsync(
-        Guid channelId, Guid userId, bool canSpeak, bool canPublishCamera, CancellationToken cancellationToken)
+        Guid channelId, Guid userId, VoicePublishGrant grant, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            Pushed.Add((channelId, userId, canSpeak, canPublishCamera));
+            Pushed.Add((channelId, userId, grant));
             if (_participants.ContainsKey((channelId, userId)))
-                _participants[(channelId, userId)] = new TransportParticipant(userId, canSpeak, canPublishCamera);
+                _participants[(channelId, userId)] = new TransportParticipant(userId, grant);
         }
 
         return Task.CompletedTask;
@@ -547,14 +546,18 @@ public sealed class FakeVoiceTransport : IVoiceTransport
     }
 
     /// <summary>
-    /// Waits for the push the work queue makes after a camera or mute change. The queue is
+    /// Waits for the push the work queue makes after a camera, share or mute change. The queue is
     /// deliberately off the request path, so a test that asserts straight after the call races it.
     /// </summary>
-    public async Task<bool> WaitForPushAsync(Guid channelId, Guid userId, bool canPublishCamera)
+    public Task<bool> WaitForPushAsync(Guid channelId, Guid userId, bool canPublishCamera) =>
+        WaitForGrantAsync(channelId, userId, grant => grant.Camera == canPublishCamera);
+
+    /// <summary>Waits until what the "media server" allows a participant satisfies <paramref name="wanted"/>.</summary>
+    public async Task<bool> WaitForGrantAsync(Guid channelId, Guid userId, Func<VoicePublishGrant, bool> wanted)
     {
         for (var attempt = 0; attempt < 100; attempt++)
         {
-            if (Allows(channelId, userId)?.CanPublishCamera == canPublishCamera)
+            if (Allows(channelId, userId) is { } allowed && wanted(allowed.Publish))
                 return true;
 
             await Task.Delay(20);
@@ -622,8 +625,8 @@ public class VoiceCameraGrpcTests
         var grant = Assert.Single(transport.Grants);
 
         Assert.Equal(Guid.Parse(userId), grant.UserId);
-        Assert.True(grant.CanSpeak);
-        Assert.False(grant.CanPublishCamera);
+        Assert.True(grant.Publish.Microphone);
+        Assert.False(grant.Publish.Camera);
     }
 
     [Fact]
@@ -642,8 +645,8 @@ public class VoiceCameraGrpcTests
             "the camera grant never reached the media server");
 
         var allowed = transport.Allows(Guid.Parse(channelId), Guid.Parse(userId))!;
-        Assert.True(allowed.CanPublishCamera);
-        Assert.True(allowed.CanSpeak);
+        Assert.True(allowed.Publish.Camera);
+        Assert.True(allowed.Publish.Microphone);
     }
 
     [Fact]
@@ -782,3 +785,309 @@ public class VoiceCameraGrpcTests
         Assert.Equal("not_in_voice", ReasonOf(refused));
     }
 }
+
+/// <summary>
+/// Screen sharing in a call, over the wire: the <c>screen_share</c> permission, the cap on how many
+/// shares one call carries, the rule that a whole screen never carries sound, and the grant the media
+/// server is given — including that a window's sound follows the right to speak, not the share.
+/// </summary>
+public class VoiceScreenShareGrpcTests
+{
+    private static string ReasonOf(RpcException exception) =>
+        exception.GetRpcStatus()?.GetDetail<ErrorInfo>() is { Domain: RaindropInterceptor.ErrorDomain } info
+            ? info.Reason
+            : throw new Xunit.Sdk.XunitException($"No Raindrop ErrorInfo on {exception.Status}.");
+
+    private static Proto.SetVoiceSelfStateRequest Window(bool audio, bool selfMute = false) => new()
+    {
+        SelfMute = selfMute,
+        ScreenShareOn = true,
+        ScreenShareKind = Proto.ScreenShareKind.Window,
+        ScreenShareAudio = audio
+    };
+
+    /// <summary>A server with a voice transport, one voice channel, and the owner and Bob in the call.</summary>
+    private static async Task<Call> CallAsync(int shareCap = 2)
+    {
+        var transport = new FakeVoiceTransport();
+        var server = await GrpcServer.StartAsync(
+            voice: transport,
+            configureVoice: options => options.MaximumScreenSharesPerChannel = shareCap);
+
+        var (owner, ownerId) = await server.RegisterAsync();
+        var (bob, bobId) = await server.RegisterAsync();
+
+        var channel = await new Proto.ChannelService.ChannelServiceClient(server.Channel).CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "voice", Name = $"call-{Guid.NewGuid():N}"[..20] },
+            GrpcServer.As(owner));
+
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+        foreach (var token in new[] { owner, bob })
+            await voice.JoinVoiceAsync(
+                new Proto.JoinVoiceRequest { ChannelId = channel.Channel.ChannelId }, GrpcServer.As(token));
+
+        return new Call(server, transport, voice, Guid.Parse(channel.Channel.ChannelId),
+            owner, Guid.Parse(ownerId), bob, Guid.Parse(bobId));
+    }
+
+    private sealed record Call(
+        GrpcServer Server,
+        FakeVoiceTransport Transport,
+        Proto.VoiceService.VoiceServiceClient Voice,
+        Guid ChannelId,
+        string Owner,
+        Guid OwnerId,
+        string Bob,
+        Guid BobId) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => Server.DisposeAsync();
+
+        public async Task<Proto.VoiceParticipant> StateOf(Guid userId)
+        {
+            var status = await Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(Owner));
+            return status.Participants.Single(participant => participant.UserId == userId.ToString("D"));
+        }
+
+        /// <summary>Polls until a participant's state satisfies <paramref name="wanted"/>; re-evaluation is queued.</summary>
+        public async Task<bool> WaitForStateAsync(Guid userId, Func<Proto.VoiceParticipant, bool> wanted)
+        {
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                if (wanted(await StateOf(userId)))
+                    return true;
+
+                await Task.Delay(20);
+            }
+
+            return false;
+        }
+    }
+
+    [Fact]
+    public async Task A_call_reports_how_many_screen_shares_it_carries()
+    {
+        await using var call = await CallAsync(shareCap: 3);
+
+        var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
+
+        Assert.Equal(3, status.MaximumScreenShares);
+    }
+
+    /// <summary>Joining never starts a share, so no join token carries one.</summary>
+    [Fact]
+    public async Task Joining_grants_no_screen_share()
+    {
+        await using var call = await CallAsync();
+
+        Assert.All(call.Transport.Grants, grant =>
+        {
+            Assert.False(grant.Publish.Screen);
+            Assert.False(grant.Publish.ScreenAudio);
+        });
+    }
+
+    [Fact]
+    public async Task Sharing_a_window_with_sound_grants_both_at_the_media_server_and_tells_everybody()
+    {
+        await using var call = await CallAsync();
+
+        var shared = await call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Bob));
+
+        Assert.True(shared.Participant.ScreenShareOn);
+        Assert.Equal(Proto.ScreenShareKind.Window, shared.Participant.ScreenShareKind);
+        Assert.True(shared.Participant.ScreenShareAudio);
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Screen: true, ScreenAudio: true, Microphone: true }),
+            "the share's grant never reached the media server");
+
+        // Everybody else sees it in the roster.
+        var seen = await call.StateOf(call.BobId);
+        Assert.True(seen.ScreenShareOn);
+    }
+
+    [Fact]
+    public async Task A_whole_screen_is_granted_its_picture_and_never_sound()
+    {
+        await using var call = await CallAsync();
+
+        var shared = await call.Voice.SetVoiceSelfStateAsync(new Proto.SetVoiceSelfStateRequest
+        {
+            ScreenShareOn = true, ScreenShareKind = Proto.ScreenShareKind.Screen
+        }, GrpcServer.As(call.Bob));
+
+        Assert.Equal(Proto.ScreenShareKind.Screen, shared.Participant.ScreenShareKind);
+        Assert.False(shared.Participant.ScreenShareAudio);
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Screen: true, ScreenAudio: false }));
+    }
+
+    [Fact]
+    public async Task Asking_for_a_screens_sound_or_a_share_of_nothing_is_refused_outright()
+    {
+        await using var call = await CallAsync();
+
+        var screenSound = await Assert.ThrowsAsync<RpcException>(() => call.Voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest
+            {
+                SelfMute = true,
+                ScreenShareOn = true,
+                ScreenShareKind = Proto.ScreenShareKind.Screen,
+                ScreenShareAudio = true
+            }, GrpcServer.As(call.Bob)).ResponseAsync);
+
+        Assert.Equal("invalid_payload", ReasonOf(screenSound));
+        Assert.Equal(StatusCode.InvalidArgument, screenSound.StatusCode);
+
+        var noKind = await Assert.ThrowsAsync<RpcException>(() => call.Voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { ScreenShareOn = true }, GrpcServer.As(call.Bob)).ResponseAsync);
+
+        Assert.Equal("invalid_payload", ReasonOf(noKind));
+
+        // A malformed request is a client bug, not a decision: none of it is applied, the mute included.
+        var bob = await call.StateOf(call.BobId);
+        Assert.False(bob.ScreenShareOn);
+        Assert.False(bob.SelfMute);
+    }
+
+    /// <summary>
+    /// The request is the whole state. A mute toggle that carries the share it already has leaves the
+    /// share — and the window's sound, which is not their microphone — exactly as it was; one that
+    /// leaves the share out ends it.
+    /// </summary>
+    [Fact]
+    public async Task A_mute_that_carries_the_share_leaves_it_running_and_one_that_does_not_ends_it()
+    {
+        await using var call = await CallAsync();
+        await call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Bob));
+
+        var muted = await call.Voice.SetVoiceSelfStateAsync(Window(audio: true, selfMute: true), GrpcServer.As(call.Bob));
+
+        Assert.True(muted.Participant.SelfMute);
+        Assert.True(muted.Participant.ScreenShareOn);
+        Assert.True(muted.Participant.ScreenShareAudio);
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Screen: true, ScreenAudio: true }));
+
+        var dropped = await call.Voice.SetVoiceSelfStateAsync(
+            new Proto.SetVoiceSelfStateRequest { SelfMute = false }, GrpcServer.As(call.Bob));
+
+        Assert.False(dropped.Participant.ScreenShareOn);
+        Assert.Equal(Proto.ScreenShareKind.Unspecified, dropped.Participant.ScreenShareKind);
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Screen: false, ScreenAudio: false }));
+    }
+
+    /// <summary>
+    /// A mute for everyone silences a shared window as well as a voice, leaves the picture, and the
+    /// sound does not come back by itself when the mute is lifted.
+    /// </summary>
+    [Fact]
+    public async Task A_mute_for_everyone_takes_the_windows_sound_and_leaves_its_picture()
+    {
+        await using var call = await CallAsync();
+        await call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Bob));
+
+        await call.Voice.MuteVoiceMemberAsync(
+            new Proto.MuteVoiceMemberRequest { UserId = call.BobId.ToString("D"), Muted = true },
+            GrpcServer.As(call.Owner));
+
+        var bob = await call.StateOf(call.BobId);
+        Assert.True(bob.ServerMute);
+        Assert.True(bob.ScreenShareOn);
+        Assert.False(bob.ScreenShareAudio);
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Microphone: false, Screen: true, ScreenAudio: false }));
+
+        await call.Voice.MuteVoiceMemberAsync(
+            new Proto.MuteVoiceMemberRequest { UserId = call.BobId.ToString("D"), Muted = false },
+            GrpcServer.As(call.Owner));
+
+        Assert.False((await call.StateOf(call.BobId)).ScreenShareAudio);
+    }
+
+    [Fact]
+    public async Task Asking_for_a_windows_sound_while_muted_for_everyone_is_refused()
+    {
+        await using var call = await CallAsync();
+        await call.Voice.MuteVoiceMemberAsync(
+            new Proto.MuteVoiceMemberRequest { UserId = call.BobId.ToString("D"), Muted = true },
+            GrpcServer.As(call.Owner));
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() =>
+            call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Bob)).ResponseAsync);
+
+        Assert.Equal("missing_permission", ReasonOf(refused));
+
+        // The picture alone is fine.
+        var silent = await call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Bob));
+        Assert.True(silent.Participant.ScreenShareOn);
+    }
+
+    [Fact]
+    public async Task The_share_after_the_last_place_is_refused_as_screen_share_limit_reached()
+    {
+        await using var call = await CallAsync(shareCap: 1);
+        await call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Owner));
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() =>
+            call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Bob)).ResponseAsync);
+
+        Assert.Equal("screen_share_limit_reached", ReasonOf(refused));
+        Assert.Equal(StatusCode.FailedPrecondition, refused.StatusCode);
+
+        // The sharer changing what they carry is not a second share, even in a full call.
+        var changed = await call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Owner));
+        Assert.False(changed.Participant.ScreenShareAudio);
+
+        // And the place frees up when the first share stops.
+        await call.Voice.SetVoiceSelfStateAsync(new Proto.SetVoiceSelfStateRequest(), GrpcServer.As(call.Owner));
+        var now = await call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Bob));
+        Assert.True(now.Participant.ScreenShareOn);
+    }
+
+    [Fact]
+    public async Task A_server_that_carries_no_screen_sharing_refuses_one()
+    {
+        await using var call = await CallAsync(shareCap: 0);
+
+        var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
+        Assert.Equal(0, status.MaximumScreenShares);
+        Assert.All(status.Participants, participant => Assert.True(participant.ScreenShareSuppressed));
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() =>
+            call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Owner)).ResponseAsync);
+        Assert.Equal("missing_permission", ReasonOf(refused));
+    }
+
+    /// <summary>
+    /// Taking <c>screen_share</c> away mid-call ends a running share: the grant the media server
+    /// holds stops accepting it, and the roster stops claiming a share nobody can see. Somebody who
+    /// joins afterwards is suppressed from the start.
+    /// </summary>
+    [Fact]
+    public async Task Losing_screen_share_mid_call_ends_the_share()
+    {
+        await using var call = await CallAsync();
+        await call.Voice.SetVoiceSelfStateAsync(Window(audio: true), GrpcServer.As(call.Bob));
+
+        var roles = new Proto.RoleService.RoleServiceClient(call.Server.Channel);
+        var listed = await roles.ListRolesAsync(new Proto.ListRolesRequest(), GrpcServer.As(call.Owner));
+        var everyone = listed.Roles.Single(role => role.Kind == Proto.RoleKind.Everyone);
+
+        var kept = new Proto.PermissionSet();
+        kept.Permissions.AddRange(everyone.Permissions.Where(name => name != "screen_share"));
+        await roles.UpdateRoleAsync(
+            new Proto.UpdateRoleRequest { RoleId = everyone.RoleId, Permissions = kept }, GrpcServer.As(call.Owner));
+
+        Assert.True(await call.WaitForStateAsync(call.BobId,
+            bob => bob is { ScreenShareOn: false, ScreenShareSuppressed: true, ScreenShareAudio: false }),
+            "losing screen_share never ended the share");
+        Assert.True(await call.Transport.WaitForGrantAsync(call.ChannelId, call.BobId,
+            grant => grant is { Screen: false, ScreenAudio: false }));
+
+        var refused = await Assert.ThrowsAsync<RpcException>(() =>
+            call.Voice.SetVoiceSelfStateAsync(Window(audio: false), GrpcServer.As(call.Bob)).ResponseAsync);
+        Assert.Equal("missing_permission", ReasonOf(refused));
+    }
+}
+

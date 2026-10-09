@@ -11,7 +11,7 @@ Channels are how members talk to each other. There are two kinds, and the split 
 the code:
 
 - **Text channels** — messages in chronological order. **Implemented.**
-- **Voice channels** — a group call with camera video, later with screen sharing. **Implemented**, with the
+- **Voice channels** — a group call with camera video and screen sharing. **Implemented**, with the
   audio carried by a LiveKit sidecar; see [Voice](voice.md). On a server with no media server
   configured they can still be created, but joining one is refused with `voice_unavailable`.
 

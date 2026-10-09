@@ -402,7 +402,8 @@ public class LiveKitRoomClientTests
                         CanPublishSources =
                         {
                             Voice.LiveKit.Protocol.TrackSource.Microphone,
-                            Voice.LiveKit.Protocol.TrackSource.Camera
+                            Voice.LiveKit.Protocol.TrackSource.ScreenShare,
+                            Voice.LiveKit.Protocol.TrackSource.ScreenShareAudio
                         }
                     }
                 },
@@ -418,8 +419,10 @@ public class LiveKitRoomClientTests
 
         var participants = await client.ListParticipantsAsync("raindrop-" + Channel, default);
 
-        // The sources are read back, not discarded: the reconciler compares the camera grant too.
-        Assert.Equal([new LiveKitParticipant(Member, "ACTIVE", true, true)], participants);
+        // The sources are read back, not discarded: the reconciler compares every one of them.
+        Assert.Equal(
+            [new LiveKitParticipant(Member, "ACTIVE", new VoicePublishGrant(true, false, true, true))],
+            participants);
         Assert.Equal(["application/protobuf"], livekit.RequestTypes);
         Assert.Equal("raindrop-" + Channel,
             Voice.LiveKit.Protocol.ListParticipantsRequest.Parser.ParseFrom(livekit.Requests[0]).Room);
@@ -431,18 +434,24 @@ public class LiveKitRoomClientTests
     /// absent from this list until a member is allowed one.
     /// </summary>
     [Theory]
-    [InlineData(true, false, true, new[] { "microphone" })]
-    [InlineData(true, true, true, new[] { "microphone", "camera" })]
-    [InlineData(false, true, true, new[] { "camera" })]
-    [InlineData(false, false, false, new[] { "microphone" })]
+    [InlineData(true, false, false, false, true, new[] { "microphone" })]
+    [InlineData(true, true, false, false, true, new[] { "microphone", "camera" })]
+    [InlineData(false, true, false, false, true, new[] { "camera" })]
+    [InlineData(false, false, false, false, false, new[] { "microphone" })]
+    [InlineData(true, false, true, false, true, new[] { "microphone", "screen_share" })]
+    [InlineData(true, false, true, true, true, new[] { "microphone", "screen_share", "screen_share_audio" })]
+    [InlineData(false, false, true, false, true, new[] { "screen_share" })]
+    // A window's sound with no picture to belong to is never granted on its own.
+    [InlineData(true, false, false, true, true, new[] { "microphone" })]
     public async Task A_permission_update_names_exactly_the_sources_the_member_may_publish(
-        bool canSpeak, bool canPublishCamera, bool canPublish, string[] expected)
+        bool microphone, bool camera, bool screen, bool screenAudio, bool canPublish, string[] expected)
     {
         using var livekit = new StubLiveKit(
             HttpStatusCode.OK, new Voice.LiveKit.Protocol.ParticipantInfo().ToByteArray(), "application/protobuf");
         using var client = Client(livekit);
 
-        await client.UpdatePermissionAsync("raindrop-" + Channel, Member, canSpeak, canPublishCamera, default);
+        await client.UpdatePermissionAsync(
+            "raindrop-" + Channel, Member, new VoicePublishGrant(microphone, camera, screen, screenAudio), default);
 
         var sent = Voice.LiveKit.Protocol.UpdateParticipantRequest.Parser.ParseFrom(livekit.Requests[0]);
         Assert.Equal(canPublish, sent.Permission.CanPublish);
@@ -450,6 +459,8 @@ public class LiveKitRoomClientTests
         {
             Voice.LiveKit.Protocol.TrackSource.Microphone => "microphone",
             Voice.LiveKit.Protocol.TrackSource.Camera => "camera",
+            Voice.LiveKit.Protocol.TrackSource.ScreenShare => "screen_share",
+            Voice.LiveKit.Protocol.TrackSource.ScreenShareAudio => "screen_share_audio",
             _ => source.ToString()
         }));
 
@@ -467,11 +478,38 @@ public class LiveKitRoomClientTests
     [Fact]
     public void A_member_allowed_nothing_is_never_sent_an_empty_source_list()
     {
-        Assert.NotEmpty(LiveKitJwt.PublishableSources(canSpeak: false, canPublishCamera: false));
+        Assert.NotEmpty(LiveKitJwt.PublishableSources(VoicePublishGrant.None));
 
         foreach (var speak in new[] { true, false })
         foreach (var camera in new[] { true, false })
-            Assert.NotEmpty(LiveKitJwt.PublishableSources(speak, camera));
+        foreach (var screen in new[] { true, false })
+        foreach (var screenAudio in new[] { true, false })
+        {
+            var sources = LiveKitJwt.PublishableSources(new VoicePublishGrant(speak, camera, screen, screenAudio));
+            Assert.NotEmpty(sources);
+
+            // And the shared sound never goes out without the picture it belongs to.
+            if (sources.Contains("screen_share_audio"))
+                Assert.Contains("screen_share", sources);
+        }
+    }
+
+    /// <summary>
+    /// Reading a permission back the way LiveKit holds it: an empty source list with
+    /// <c>can_publish</c> means every source, and without <c>can_publish</c> nothing at all.
+    /// </summary>
+    [Fact]
+    public void A_permission_read_back_honours_LiveKits_empty_list_rule()
+    {
+        Assert.Equal(VoicePublishGrant.None, LiveKitRoomClient.GrantOf(null));
+        Assert.Equal(VoicePublishGrant.None, LiveKitRoomClient.GrantOf(
+            new Voice.LiveKit.Protocol.ParticipantPermission
+            {
+                CanPublish = false,
+                CanPublishSources = { Voice.LiveKit.Protocol.TrackSource.Microphone }
+            }));
+        Assert.Equal(new VoicePublishGrant(true, true, true, true), LiveKitRoomClient.GrantOf(
+            new Voice.LiveKit.Protocol.ParticipantPermission { CanPublish = true }));
     }
 
     /// <summary>The join token carries the same rule as a mid-call update, from the same helper.</summary>
@@ -482,13 +520,14 @@ public class LiveKitRoomClientTests
         var jwt = new LiveKitJwt(options);
         var member = Guid.Parse(Member);
 
-        Assert.Equal(["microphone"], Sources(canSpeak: true, canPublishCamera: false));
-        Assert.Equal(["microphone", "camera"], Sources(canSpeak: true, canPublishCamera: true));
+        Assert.Equal(["microphone"], Sources(new VoicePublishGrant(true, false, false, false)));
+        Assert.Equal(["microphone", "camera"], Sources(new VoicePublishGrant(true, true, false, false)));
+        Assert.Equal(["microphone", "screen_share", "screen_share_audio"],
+            Sources(new VoicePublishGrant(true, false, true, true)));
 
-        IEnumerable<string> Sources(bool canSpeak, bool canPublishCamera)
+        IEnumerable<string> Sources(VoicePublishGrant grant)
         {
-            var (token, _) = jwt.CreateParticipantToken(
-                new VoiceGrant(Channel, member, "alice", canSpeak, canPublishCamera));
+            var (token, _) = jwt.CreateParticipantToken(new VoiceGrant(Channel, member, "alice", grant));
 
             var payload = token.Split('.')[1];
             var json = Convert.FromBase64String(payload.PadRight((payload.Length + 3) / 4 * 4, '=')
@@ -525,7 +564,7 @@ public class LiveKitRoomClientTests
 
         await client.RemoveParticipantAsync("raindrop-" + Channel, Member, default);
         await client.UpdatePermissionAsync(
-            "raindrop-" + Channel, Member, canSpeak: true, canPublishCamera: false, default);
+            "raindrop-" + Channel, Member, new VoicePublishGrant(true, false, false, false), default);
         await client.DeleteRoomAsync("raindrop-" + Channel, default);
     }
 
@@ -811,5 +850,143 @@ public class VoiceStateStoreTests
 
         Assert.True(outcome.Full);
         Assert.Null(outcome.Participant);
+    }
+}
+
+/// <summary>
+/// The screen-share half of the voice state store: the same race as the camera's, plus the rules a
+/// share has that a camera does not — a share that is already running is not counted again when it
+/// changes what it carries, and a window's sound is refused to somebody who may not speak.
+/// </summary>
+public class VoiceScreenShareStoreTests
+{
+    private static readonly Guid Channel = Guid.Parse("d592c66e-d5fe-47df-a103-5e77e77eefa9");
+
+    private static VoiceParticipantRecord Participant(Guid userId)
+    {
+        var now = DateTime.UtcNow;
+        return new VoiceParticipantRecord
+        {
+            ChannelId = Channel,
+            UserId = userId,
+            SessionToken = userId.ToString("N"),
+            JoinedAtUtc = now,
+            LastSeenUtc = now
+        };
+    }
+
+    private static async Task<InMemoryVoiceStateStore> CallOf(params Guid[] members)
+    {
+        var store = new InMemoryVoiceStateStore();
+        foreach (var member in members)
+            await store.JoinAsync(Participant(member), capacity: 25, default);
+
+        return store;
+    }
+
+    [Fact]
+    public async Task A_window_with_sound_is_granted_its_picture_and_its_sound()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+
+        var outcome = await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, true, 2, null, default);
+
+        var record = outcome.Participant!;
+        Assert.True(record.ScreenShareOn);
+        Assert.Equal(new VoicePublishGrant(true, false, true, true), record.Publish);
+    }
+
+    /// <summary>
+    /// The grant is the last word on sound, whatever the record says: a screen never carries any, and
+    /// neither does somebody who may not speak.
+    /// </summary>
+    [Fact]
+    public void The_grant_never_carries_sound_for_a_screen_or_for_somebody_who_may_not_speak()
+    {
+        var sharing = Participant(Guid.NewGuid()) with
+        {
+            ScreenShareOn = true, ScreenShareKind = ScreenShareKinds.Window, ScreenShareAudio = true
+        };
+
+        Assert.True(sharing.CanPublishScreenAudio);
+        Assert.False((sharing with { ScreenShareKind = ScreenShareKinds.Screen }).CanPublishScreenAudio);
+        Assert.False((sharing with { ServerMute = true }).CanPublishScreenAudio);
+        Assert.False((sharing with { Suppressed = true }).CanPublishScreenAudio);
+        Assert.False((sharing with { ScreenShareSuppressed = true }).CanPublishScreen);
+
+        // Their own mute does not stop it: it is a separate track from their microphone.
+        Assert.True((sharing with { SelfMute = true, SelfDeaf = true }).CanPublishScreenAudio);
+    }
+
+    [Fact]
+    public async Task Asking_for_sound_while_muted_for_everyone_is_refused_and_changes_nothing()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+        await store.UpdateAsync(alice, record => record with { ServerMute = true }, null, default);
+
+        var outcome = await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, true, 2, null, default);
+
+        Assert.True(outcome.Muted);
+        Assert.Null(outcome.Participant);
+        Assert.False((await store.FindAsync(alice, default))!.ScreenShareOn);
+
+        // Without sound, the same share is fine.
+        var silent = await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, false, 2, null, default);
+        Assert.True(silent.Participant!.ScreenShareOn);
+    }
+
+    [Fact]
+    public async Task Stopping_clears_what_was_shared_and_is_never_refused()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+        await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, true, 2, null, default);
+        await store.UpdateAsync(alice, record => record with { ScreenShareSuppressed = true }, null, default);
+
+        var outcome = await store.SetScreenShareAsync(alice, false, null, false, 0, null, default);
+
+        var record = outcome.Participant!;
+        Assert.False(outcome.NotAllowed);
+        Assert.False(record.ScreenShareOn);
+        Assert.Null(record.ScreenShareKind);
+        Assert.False(record.ScreenShareAudio);
+    }
+
+    /// <summary>
+    /// A running share that changes what it carries — sound switched off because it could not be
+    /// captured — holds the place it already has, even in a call that is otherwise full.
+    /// </summary>
+    [Fact]
+    public async Task A_running_share_can_change_what_it_carries_in_a_full_call()
+    {
+        var alice = Guid.NewGuid();
+        var store = await CallOf(alice);
+        await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, true, 1, null, default);
+
+        var changed = await store.SetScreenShareAsync(alice, true, ScreenShareKinds.Window, false, 1, null, default);
+
+        Assert.False(changed.Full);
+        Assert.False(changed.Participant!.ScreenShareAudio);
+        Assert.True(changed.Participant.ScreenShareOn);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Only_as_many_shares_as_the_cap_allows_can_win_a_race(int cap)
+    {
+        var members = Enumerable.Range(0, 10).Select(_ => Guid.NewGuid()).ToArray();
+        var store = await CallOf(members);
+
+        var outcomes = await Task.WhenAll(members.Select(member => Task.Run(() =>
+            store.SetScreenShareAsync(member, true, ScreenShareKinds.Screen, false, cap, null, default).AsTask())));
+
+        Assert.Equal(cap, outcomes.Count(outcome => outcome.Participant?.ScreenShareOn == true));
+        Assert.Equal(members.Length - cap, outcomes.Count(outcome => outcome.Full));
+
+        var records = await store.ListAsync(Channel, default);
+        Assert.Equal(cap, records.Count(record => record.ScreenShareOn));
     }
 }

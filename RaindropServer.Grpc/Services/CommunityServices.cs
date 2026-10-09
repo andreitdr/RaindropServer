@@ -281,6 +281,7 @@ public sealed class VoiceGrpcService : Proto.VoiceService.VoiceServiceBase
             Transport = status.Transport,
             MaximumParticipants = status.MaximumParticipants,
             MaximumCameraPublishers = status.MaximumCameraPublishers,
+            MaximumScreenShares = status.MaximumScreenShares,
             Participants = { status.Participants.Select(participant => participant.ToProto()) }
         };
     }
@@ -322,7 +323,13 @@ public sealed class VoiceGrpcService : Proto.VoiceService.VoiceServiceBase
         new()
         {
             Participant = (await _voice.UpdateSelfStateAsync(context.Session(),
-                new VoiceSelfStateRequest(request.SelfMute, request.SelfDeaf, request.CameraOn),
+                new VoiceSelfStateRequest(
+                    request.SelfMute,
+                    request.SelfDeaf,
+                    request.CameraOn,
+                    request.ScreenShareOn,
+                    ScreenShareKind(request.ScreenShareKind),
+                    request.ScreenShareAudio),
                 context.CancellationToken)).ToProto()
         };
 

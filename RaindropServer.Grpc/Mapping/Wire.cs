@@ -1,6 +1,7 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using RaindropServer.Attachments;
+using RaindropServer.Channels.Voice;
 using RaindropServer.Members;
 using RaindropServer.Roles;
 using RaindropServer.Users;
@@ -100,6 +101,25 @@ internal static class Wire
         Proto.AttachmentKind.Unspecified or Proto.AttachmentKind.File => AttachmentNames.FileKind,
         Proto.AttachmentKind.Thumbnail => AttachmentNames.ThumbnailKind,
         _ => throw ApiException.BadRequest("invalid_attachment", $"Unknown attachment kind {(int)kind}.")
+    };
+
+    public static Proto.ScreenShareKind ScreenShareKind(string? kind) => kind switch
+    {
+        ScreenShareKinds.Screen => Proto.ScreenShareKind.Screen,
+        ScreenShareKinds.Window => Proto.ScreenShareKind.Window,
+        _ => Proto.ScreenShareKind.Unspecified
+    };
+
+    /// <summary>
+    /// Null for unspecified, which the voice service refuses while a share is on and ignores while it
+    /// is off; a value this build does not know is refused here.
+    /// </summary>
+    public static string? ScreenShareKind(Proto.ScreenShareKind kind) => kind switch
+    {
+        Proto.ScreenShareKind.Unspecified => null,
+        Proto.ScreenShareKind.Screen => ScreenShareKinds.Screen,
+        Proto.ScreenShareKind.Window => ScreenShareKinds.Window,
+        _ => throw ApiException.BadRequest("invalid_payload", $"Unknown screen share kind {(int)kind}.")
     };
 
     public static Proto.UploadState UploadState(string state) => state switch

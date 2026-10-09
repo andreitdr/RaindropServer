@@ -7,7 +7,8 @@ namespace RaindropServer.Channels.Voice;
 /// Re-checks everybody in a call whenever something that decides what they may do changes: a role
 /// edited or deleted, a role given or taken away, a member leaving the server. Somebody who can no
 /// longer see the channel or connect is removed from the call; somebody who gained or lost
-/// <c>speak</c> has their microphone let through or stopped.
+/// <c>speak</c> has their microphone let through or stopped, and somebody who lost <c>video</c> or
+/// <c>screen_share</c> has their camera or share ended.
 /// </summary>
 /// <remarks>
 /// A single re-check of every participant rather than a precise one: working out whom a role change

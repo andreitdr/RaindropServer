@@ -4,8 +4,8 @@ namespace RaindropServer.Channels.Voice;
 
 /// <summary>
 /// Whatever actually carries the media of a voice call. Raindrop decides who may join, speak, show
-/// their camera and moderate; the transport only moves media, and is told the outcome of those
-/// decisions.
+/// their camera, share their screen and moderate; the transport only moves media, and is told the
+/// outcome of those decisions.
 /// </summary>
 /// <remarks>
 /// The seam a media server plugs in behind. The built-in implementation drives a LiveKit sidecar
@@ -39,17 +39,19 @@ public interface IVoiceTransport
 
     /// <summary>
     /// Changes what a participant who is already connected may send, without disconnecting them —
-    /// how a server mute, a lost permission, or turning a camera on and off takes effect mid-call.
+    /// how a server mute, a lost permission, a camera turned on and off, or a screen share started
+    /// and stopped takes effect mid-call.
     /// </summary>
     /// <remarks>
-    /// One call rather than one per source, because a transport that replaces a participant's whole
-    /// permission set (LiveKit does) would have two calls racing to describe the same participant.
+    /// One call carrying the whole grant rather than one per source, because a transport that
+    /// replaces a participant's whole permission set (LiveKit does) would have several calls racing
+    /// to describe the same participant. A transport withdraws any track whose source the new grant
+    /// no longer allows.
     /// </remarks>
     Task SetPublishAsync(
         Guid channelId,
         Guid userId,
-        bool canSpeak,
-        bool canPublishCamera,
+        VoicePublishGrant grant,
         CancellationToken cancellationToken);
 
     /// <summary>Removes one participant from a call. Succeeds quietly when they are not in it.</summary>
@@ -87,18 +89,36 @@ public interface IVoiceSignalRelay
 /// Their username at the time of joining. Clients should not rely on it staying current — a member
 /// can be renamed mid-call — and resolve names from the UUID instead.
 /// </param>
-/// <param name="CanSpeak">Whether the transport should accept their microphone.</param>
-/// <param name="CanPublishCamera">
-/// Whether the transport should accept their camera. False at join whatever their permissions say:
-/// the camera is granted only once a member says their camera is on, which is also where the
-/// server's cap on simultaneous cameras is applied.
+/// <param name="Publish">
+/// What the transport should accept from them. At join this is the microphone at most, whatever their
+/// permissions say: the camera and a screen share are granted only once a member says they have
+/// started one, which is also where the server's caps on simultaneous cameras and shares apply.
 /// </param>
 public sealed record VoiceGrant(
     Guid ChannelId,
     Guid UserId,
     string DisplayName,
-    bool CanSpeak,
-    bool CanPublishCamera);
+    VoicePublishGrant Publish);
+
+/// <summary>
+/// Which of a participant's media sources the transport should accept. Each is decided by Raindrop;
+/// the transport only enforces the answer.
+/// </summary>
+/// <param name="Microphone">Their voice.</param>
+/// <param name="Camera">Their camera.</param>
+/// <param name="Screen">The picture of the screen or window they are sharing.</param>
+/// <param name="ScreenAudio">
+/// The shared window's own sound. Only ever with <paramref name="Screen"/>, and never for a whole
+/// screen.
+/// </param>
+public readonly record struct VoicePublishGrant(bool Microphone, bool Camera, bool Screen, bool ScreenAudio)
+{
+    /// <summary>Nothing at all: a participant who may only listen.</summary>
+    public static VoicePublishGrant None => default;
+
+    /// <summary>Whether any source is allowed.</summary>
+    public bool Any => Microphone || Camera || Screen || ScreenAudio;
+}
 
 /// <summary>What a client needs to connect its media to the call.</summary>
 /// <param name="Transport">The transport's <see cref="IVoiceTransport.Name"/>.</param>
@@ -116,9 +136,8 @@ public sealed record TransportCall(Guid ChannelId, IReadOnlyList<TransportPartic
 
 /// <summary>One connected participant as the media server sees them.</summary>
 /// <param name="UserId">Their identity in the call.</param>
-/// <param name="CanSpeak">Whether the media server currently accepts their microphone.</param>
-/// <param name="CanPublishCamera">Whether the media server currently accepts their camera.</param>
-public sealed record TransportParticipant(Guid UserId, bool CanSpeak, bool CanPublishCamera);
+/// <param name="Publish">What the media server currently accepts from them.</param>
+public sealed record TransportParticipant(Guid UserId, VoicePublishGrant Publish);
 
 /// <summary>The media server could not be reached, or refused a request it should have accepted.</summary>
 public sealed class VoiceTransportException : Exception

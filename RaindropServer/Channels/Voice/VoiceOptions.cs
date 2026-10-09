@@ -49,6 +49,18 @@ public sealed class VoiceOptions
     public int MaximumCameraPublishersPerChannel { get; set; } = 6;
 
     /// <summary>
+    /// How many members of one call may share their screen at once. A share is sent at up to 1080p,
+    /// and costs several cameras' worth of bandwidth for everybody who watches it, so this is smaller
+    /// still than <see cref="MaximumCameraPublishersPerChannel"/>.
+    /// </summary>
+    /// <remarks>
+    /// 0 switches screen sharing off on this server: nobody is granted a share, and
+    /// <c>voice.screen.v1</c> is not advertised, so clients show no share button. Enforced at the
+    /// media server the same way as the camera cap.
+    /// </remarks>
+    public int MaximumScreenSharesPerChannel { get; set; } = 2;
+
+    /// <summary>
     /// How long a member may hold a place in a call after joining before the media server has seen
     /// them connect. A client that got its token and then crashed, or could not reach the media server
     /// at all, is dropped once this passes rather than showing as present forever.
@@ -102,6 +114,18 @@ public sealed class VoiceOptions
                 $"is {MaximumCameraPublishersPerChannel}. Every camera is sent to everybody else in the call, so " +
                 $"that many cameras is up to {MaximumCameraPublishersPerChannel * (MaximumParticipantsPerChannel - 1)} " +
                 "video streams out of the media server at once — far more than the audio costs.");
+
+        report.Range("maximumScreenShares", MaximumScreenSharesPerChannel, 0, 10, "share(s)");
+
+        if (MaximumScreenSharesPerChannel > MaximumParticipantsPerChannel)
+            report.Warn("maximumScreenShares",
+                $"is {MaximumScreenSharesPerChannel}, more than the {MaximumParticipantsPerChannel} members a " +
+                "call holds, so it can never be reached.");
+
+        if (MaximumScreenSharesPerChannel > 3)
+            report.Warn("maximumScreenShares",
+                $"is {MaximumScreenSharesPerChannel}. Each share is about 3 Mbit/s from its sharer and up to " +
+                "2.5 Mbit/s to every member watching it, so that many at once can outweigh the rest of the call.");
 
         report.Range("joinGrace", JoinGrace, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(10));
         report.Range("reconcileInterval", ReconcileInterval, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));

@@ -40,7 +40,7 @@
   // defaultMemberPermissions the first time the server runs; after that it is
   // edited through the API, and changing this setting leaves it alone.
   "roles": {
-    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak", "video" ],
+    "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak", "video", "screen_share" ],
     "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
   },
@@ -89,6 +89,10 @@
     // smaller than maximumParticipants. 0 switches camera video off: clients then see no camera
     // button at all, because the server stops advertising voice.video.v1.
     "maximumCameraPublishers": 6,
+    // How many members of one call may share a screen or a window at once. A share is sent at up to
+    // 1080p, about 3 Mbit/s up from its sharer and up to 2.5 Mbit/s to each member who watches it.
+    // 0 switches screen sharing off: clients see no share button (voice.screen.v1 is not advertised).
+    "maximumScreenShares": 2,
     // How hard the server looks for the media server before it starts listening: "off" not at all,
     // "warn" to report an unreachable one and start anyway, "require" to refuse to start without it.
     // A media server that answers and refuses these credentials stops the server whichever this is.

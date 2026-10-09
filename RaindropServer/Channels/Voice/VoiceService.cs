@@ -5,12 +5,13 @@ using RaindropServer.Users;
 namespace RaindropServer.Channels.Voice;
 
 /// <summary>
-/// Every rule about voice calls: who may join, speak and moderate, who is in which call, and keeping
-/// the media server in step with those decisions. Endpoints stay thin and the transport stays dumb —
-/// the same division <see cref="Text.TextChannelService"/> follows.
+/// Every rule about voice calls: who may join, speak, show their camera, share their screen and
+/// moderate, who is in which call, and keeping the media server in step with those decisions.
+/// Endpoints stay thin and the transport stays dumb — the same division
+/// <see cref="Text.TextChannelService"/> follows.
 /// </summary>
 /// <remarks>
-/// Raindrop is the authority and the media server only carries audio. Two things keep them
+/// Raindrop is the authority and the media server only carries media. Two things keep them
 /// consistent:
 /// <list type="bullet">
 /// <item>
@@ -108,7 +109,8 @@ public sealed class VoiceService
             visible,
             // 0 when there is no media server at all, so a client reads "no camera here" from one
             // number rather than having to combine it with `available`.
-            _transport.IsAvailable ? _options.MaximumCameraPublishersPerChannel : 0);
+            _transport.IsAvailable ? _options.MaximumCameraPublishersPerChannel : 0,
+            _transport.IsAvailable ? _options.MaximumScreenSharesPerChannel : 0);
     }
 
     // ── Joining and leaving ──────────────────────────────────────────────────
@@ -144,6 +146,10 @@ public sealed class VoiceService
             CameraOn = false,
             CameraSuppressed = !access.Permissions.Allows(Permission.Video)
                                || _options.MaximumCameraPublishersPerChannel == 0,
+            // Nor a screen share, for the same reason.
+            ScreenShareOn = false,
+            ScreenShareSuppressed = !access.Permissions.Allows(Permission.ScreenShare)
+                                    || _options.MaximumScreenSharesPerChannel == 0,
             Connected = false,
             JoinedAtUtc = now,
             LastSeenUtc = now
@@ -151,8 +157,7 @@ public sealed class VoiceService
 
         // Minted before admitting, so a transport that refuses leaves nothing behind to clean up.
         var connection = await _transport.CreateConnectionAsync(
-            new VoiceGrant(
-                record.ChannelId, record.UserId, session.Username, record.CanSpeak, record.CanPublishCamera),
+            new VoiceGrant(record.ChannelId, record.UserId, session.Username, record.Publish),
             cancellationToken);
 
         var outcome = await _state.JoinAsync(record, _options.MaximumParticipantsPerChannel, cancellationToken);
@@ -204,20 +209,37 @@ public sealed class VoiceService
     }
 
     /// <summary>
-    /// Mutes or deafens the caller in the call they are in, and turns their camera on or off.
-    /// Deafening always mutes too.
+    /// Mutes or deafens the caller in the call they are in, turns their camera on or off, and starts,
+    /// changes or stops their screen share. Deafening always mutes too.
     /// </summary>
     /// <remarks>
     /// Mute and deafen are only what everybody's icons show, so they are always accepted. The camera
-    /// is not: turning it on is what adds the camera to this member's publishing grant, so it is
-    /// refused without <see cref="Permission.Video"/> and when every camera place in the call is
-    /// taken. The two are applied separately, and a refused camera leaves a mute or deafen in the
-    /// same request standing — a member who asked for both should not be left unmuted because the
-    /// call was full of cameras.
+    /// and the screen share are not: starting either is what adds it to this member's publishing
+    /// grant, so the camera is refused without <see cref="Permission.Video"/>, a share without
+    /// <see cref="Permission.ScreenShare"/>, and each when every place in the call is taken. They are
+    /// applied separately, and a refused camera or share leaves a mute or deafen in the same request
+    /// standing — a member who asked for both should not be left unmuted because the call was full.
+    /// <para>
+    /// The request is the whole state, so a share that is already running arrives again with every
+    /// mute; it is only touched when something about it differs.
+    /// </para>
     /// </remarks>
     public async Task<VoiceParticipant> UpdateSelfStateAsync(
         UserSession session, VoiceSelfStateRequest request, CancellationToken cancellationToken)
     {
+        // A malformed share is refused before anything in the request is applied: it is a client
+        // bug, not a decision, and half-applying a broken request helps nobody.
+        var shareKind = request.ScreenShareOn ? request.ScreenShareKind : null;
+        var shareAudio = request.ScreenShareOn && request.ScreenShareAudio;
+
+        if (request.ScreenShareOn && shareKind is not (ScreenShareKinds.Screen or ScreenShareKinds.Window))
+            throw ApiException.BadRequest("invalid_payload",
+                "A screen share has to say whether it shows a screen or a window.");
+
+        if (shareAudio && shareKind != ScreenShareKinds.Window)
+            throw ApiException.BadRequest("invalid_payload",
+                "Only a window's own sound can be shared; a whole screen is shared without sound.");
+
         var updated = await _state.UpdateAsync(session.UserId,
             record => record with { SelfMute = request.SelfMute || request.SelfDeaf, SelfDeaf = request.SelfDeaf },
             record => record.SessionToken == session.Token,
@@ -266,6 +288,52 @@ public sealed class VoiceService
             }
         }
 
+        if (request.ScreenShareOn != updated.ScreenShareOn ||
+            (request.ScreenShareOn && (shareKind != updated.ScreenShareKind || shareAudio != updated.ScreenShareAudio)))
+        {
+            var share = await _state.SetScreenShareAsync(
+                session.UserId,
+                request.ScreenShareOn,
+                shareKind,
+                shareAudio,
+                _options.MaximumScreenSharesPerChannel,
+                record => record.SessionToken == session.Token,
+                cancellationToken);
+
+            if (share.NotAllowed)
+            {
+                await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
+                throw ApiException.Forbidden("missing_permission",
+                    _options.MaximumScreenSharesPerChannel == 0
+                        ? "This server does not carry screen sharing in calls."
+                        : "You do not have permission to share your screen in voice channels.");
+            }
+
+            if (share.Muted)
+            {
+                await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
+                throw ApiException.Forbidden("missing_permission",
+                    "You cannot share a window's sound while you are not allowed to speak in this call. " +
+                    "Share it without sound instead.");
+            }
+
+            if (share.Full)
+            {
+                await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
+                throw ApiException.Conflict("screen_share_limit_reached",
+                    $"At most {_options.MaximumScreenSharesPerChannel} members of a call can share their screen " +
+                    "at once. Wait for somebody to stop.");
+            }
+
+            if (share.Participant is { } withShare)
+            {
+                updated = withShare;
+                // Queued like the camera's: the client waits for the media server's grant to arrive,
+                // not for this method.
+                EnqueuePublishSync(updated.UserId);
+            }
+        }
+
         await VoiceEvents.PublishStateAsync(_events, _permissions, channel, updated);
 
         return VoiceEvents.ToContract(updated);
@@ -310,7 +378,15 @@ public sealed class VoiceService
             : await _mutes.RemoveAsync(target.UserId, cancellationToken);
 
         var updated = await _state.UpdateAsync(target.UserId,
-            record => record with { ServerMute = request.Muted },
+            // A mute for everyone takes a shared window's sound with it, and it stays off once the
+            // mute is lifted: the media server withdraws that track, and only the sharer can start it
+            // again. Cleared rather than left to the grant, so the roster never shows sound nobody
+            // can hear.
+            record => record with
+            {
+                ServerMute = request.Muted,
+                ScreenShareAudio = record.ScreenShareAudio && !request.Muted
+            },
             record => record.ServerMute != request.Muted,
             cancellationToken);
 
@@ -366,19 +442,31 @@ public sealed class VoiceService
             var suppressed = !permissions.Allows(Permission.Speak);
             var cameraSuppressed = !permissions.Allows(Permission.Video)
                                    || _options.MaximumCameraPublishersPerChannel == 0;
+            var screenShareSuppressed = !permissions.Allows(Permission.ScreenShare)
+                                        || _options.MaximumScreenSharesPerChannel == 0;
 
-            if (suppressed == record.Suppressed && cameraSuppressed == record.CameraSuppressed)
+            if (suppressed == record.Suppressed && cameraSuppressed == record.CameraSuppressed &&
+                screenShareSuppressed == record.ScreenShareSuppressed)
                 continue;
 
             var updated = await _state.UpdateAsync(record.UserId,
                 // Losing the camera permission mid-call turns the camera off as well as forbidding
                 // it, so the grant that goes to the media server stops accepting one and the record
-                // does not claim a camera nobody can see.
-                current => current with
+                // does not claim a camera nobody can see. The same goes for a screen share, and for
+                // a shared window's sound once they may no longer speak.
+                current =>
                 {
-                    Suppressed = suppressed,
-                    CameraSuppressed = cameraSuppressed,
-                    CameraOn = current.CameraOn && !cameraSuppressed
+                    var sharing = current.ScreenShareOn && !screenShareSuppressed;
+                    return current with
+                    {
+                        Suppressed = suppressed,
+                        CameraSuppressed = cameraSuppressed,
+                        CameraOn = current.CameraOn && !cameraSuppressed,
+                        ScreenShareSuppressed = screenShareSuppressed,
+                        ScreenShareOn = sharing,
+                        ScreenShareKind = sharing ? current.ScreenShareKind : null,
+                        ScreenShareAudio = sharing && current.ScreenShareAudio && !suppressed
+                    };
                 },
                 current => current.SessionToken == record.SessionToken,
                 cancellationToken);
@@ -445,7 +533,7 @@ public sealed class VoiceService
             if (updated is null)
                 continue;
 
-            if (seen.CanSpeak != updated.CanSpeak || seen.CanPublishCamera != updated.CanPublishCamera)
+            if (seen.Publish != updated.Publish)
                 await SyncPublishAsync(updated, cancellationToken);
 
             if (!record.Connected)
@@ -540,8 +628,8 @@ public sealed class VoiceService
         });
 
     /// <summary>
-    /// Pushes whatever a member's record now says they may send — microphone and camera — to the
-    /// media server.
+    /// Pushes whatever a member's record now says they may send — microphone, camera, screen and the
+    /// shared window's sound — to the media server.
     /// </summary>
     private void EnqueuePublishSync(Guid userId) =>
         _work.Enqueue(async cancellationToken =>
@@ -552,8 +640,7 @@ public sealed class VoiceService
 
     private Task SyncPublishAsync(VoiceParticipantRecord record, CancellationToken cancellationToken) =>
         TryTransportAsync(
-            ct => _transport.SetPublishAsync(
-                record.ChannelId, record.UserId, record.CanSpeak, record.CanPublishCamera, ct),
+            ct => _transport.SetPublishAsync(record.ChannelId, record.UserId, record.Publish, ct),
             cancellationToken);
 
     /// <summary>

@@ -18,13 +18,14 @@ useful end to end:
 | API | Every client call over gRPC (`raindrop.v1`, defined in RaindropProto): interceptor-resolved sessions, error statuses with `ErrorInfo` reasons, streamed uploads and downloads | [gRPC services](grpc-services.md) |
 | Accounts | Registration, login, logout, sessions, username/password changes, username availability, user lookup, leaving and rejoining, PBKDF2 hashing, retention cleanup of left accounts | [Users](users.md) |
 | Roster | Members with presence (online while an event stream is open, offline a minute after its heartbeats stop), presence broadcast | [Members](members.md) |
-| Roles | Role CRUD, assignment, the 13-permission catalogue, built-in `everyone`/`owner`, permission rollouts, the in-memory permission cache | [Roles & permissions](roles-and-permissions.md) |
+| Roles | Role CRUD, assignment, the 14-permission catalogue, built-in `everyone`/`owner`, permission rollouts, the in-memory permission cache | [Roles & permissions](roles-and-permissions.md) |
 | Channels | Text and voice channels, create/rename/delete, `IChannelModule` dispatch, name policy | [Channels](channels.md) |
 | Messages | Send, history paging by cursor, deletion with tombstones, moderator deletion, archived copies | [Messages](messages.md) |
 | Encrypted messages | `SendEncryptedMessage` for MLS ciphertext, plus the report path that proves a reported message's text with the author's attestation | [Messages](messages.md#reporting-an-encrypted-message) |
 | Attachments | Streamed, resumable uploads and downloads, owner-set size/type rules, local-folder storage, orphan cleanup, encrypted thumbnails, cancel | [Attachments](attachments.md) |
 | Voice | Group calls on a LiveKit sidecar, join/leave, mute/deafen, server-wide mute for everyone, the signalling relay, permission watching, startup/shutdown reconciliation, SFrame-encrypted media (`e2ee.voice.v1`) | [Voice](voice.md) |
 | Camera video | The `video` permission, camera self-state, a per-call cap on simultaneous cameras enforced at the media server, and the publishing grant that follows it (`voice.video.v1`) | [Voice](voice.md#camera-video) |
+| Screen sharing | The `screen_share` permission, screen/window share self-state, a window's own sound that follows the right to speak, a per-call cap on simultaneous shares, and the grant that follows it (`voice.screen.v1`) | [Voice](voice.md#screen-sharing) |
 | E2EE, identity | Identity keys, device certificates, device registration/listing/revocation, identity reset, session binding, sealed key backup, the device-link relay (`e2ee.devices.v1`) | [E2EE](e2ee.md) |
 | E2EE, delivery | The MLS delivery service: groups, one-commit-per-epoch, group info, key packages, Welcomes, roster, sync (`e2ee.delivery.v1`) | [E2EE](e2ee.md#the-delivery-service) |
 | Push | The bidirectional `EventService.Connect` stream with every event a member may see, heartbeats, resubscribe, plugin events, publisher/transport/handler seams | [Events](events.md) |
@@ -54,10 +55,6 @@ each channel's MLS group through this delivery service. See
 - **Avatars and profiles.** A member is a username and a GUID.
 
 ### Voice
-- **Screen sharing.** Camera video shipped; the LiveKit token's `canPublishSources` now names
-  `microphone` and `camera`, and widening it again to `screen_share` is the change. The per-call cap
-  and the grant-follows-self-state handshake are already in place to copy.
-  [Voice](voice.md#camera-video)
 - **Voice transports other than LiveKit.** `IVoiceTransport` is the seam, and LiveKit is the only
   implementation; without one registered, voice channels report themselves unavailable.
 
