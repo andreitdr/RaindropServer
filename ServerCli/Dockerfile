@@ -45,6 +45,12 @@ ENV SERVERCLI_HAS_PROBE=1 \
     RAINDROP_TLS_IDENTITY_KEY_PATH=/app/data/server-identity.key \
     RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \
     RAINDROP_ATTACHMENTS_PATH=/app/data/attachments
+# Created here, owned by the app user, so a named or anonymous volume (which copies the image's
+# ownership) is writable by the non-root server. A bind mount still needs the right owner on the host,
+# which deploy.sh fixes.
+USER root
+RUN mkdir -p /app/data && chown "$APP_UID:$APP_UID" /app/data
+USER $APP_UID
 VOLUME /app/data
 EXPOSE 5001
 
