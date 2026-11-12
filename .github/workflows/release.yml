@@ -15,6 +15,7 @@ jobs:
   ci:
     name: Build and test
     uses: ./.github/workflows/ci.yml
+    secrets: inherit # ci.yml needs PROTO_REPO_TOKEN; a called workflow gets no secrets unless passed
 
   package:
     name: Package (${{ matrix.name }})
