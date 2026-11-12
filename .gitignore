@@ -18,3 +18,5 @@ server-identity.key
 /data/
 .env
 *.DS_Store
+# Rider / ReSharper per-user settings
+*.DotSettings.user
