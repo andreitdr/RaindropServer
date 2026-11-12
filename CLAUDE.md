@@ -551,6 +551,10 @@ names exactly the granted sources, `UpdateParticipant` when that changes mid-cal
   revoke a removed participant's token; tokens therefore live 2 minutes (LiveKit refreshes them for
   connected clients). At startup it deletes leftover rooms (every session died with the old process);
   on shutdown it ends every call.
+  **A client that crashes leaves in seconds**: `LiveKitSignalRelay` reports every signalling connection
+  opening and closing to `IVoiceSignalMonitor` (`VoiceService`), and a member whose last connection
+  stays closed for `VoiceOptions.SignalLossGrace` (5 s) is dropped, but only the join whose connection
+  closed. A resuming client reconnects within that time.
 - **The signalling relay** — the one route that is not gRPC. Clients connect LiveKit's SDK to
   `/api/channels/voice/signal` on the server they already pin (mapped by `VoiceSignalRoutes` when a
   transport registers an `IVoiceSignalRelay`), and `LiveKitSignalRelay` forwards only `rtc` and

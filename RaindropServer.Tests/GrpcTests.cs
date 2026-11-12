@@ -1091,3 +1091,112 @@ public class VoiceScreenShareGrpcTests
     }
 }
 
+
+/// <summary>
+/// A client that crashes cannot leave, but its signalling socket closes with it, and the relay tells the
+/// voice service. These drive <see cref="IVoiceSignalMonitor"/> directly, the way the relay does.
+/// </summary>
+public class VoiceSignalLossGrpcTests
+{
+    private static readonly TimeSpan Grace = TimeSpan.FromMilliseconds(200);
+
+    private static async Task<(GrpcServer Server, Guid Channel, string Token, Guid UserId)> InCallAsync()
+    {
+        var server = await GrpcServer.StartAsync(
+            voice: new FakeVoiceTransport(),
+            configureVoice: options => options.SignalLossGrace = Grace);
+
+        var (token, userId) = await server.RegisterAsync();
+        var channel = await new Proto.ChannelService.ChannelServiceClient(server.Channel).CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "voice", Name = $"call-{Guid.NewGuid():N}"[..20] },
+            GrpcServer.As(token));
+
+        await JoinAsync(server, channel.Channel.ChannelId, token);
+        return (server, Guid.Parse(channel.Channel.ChannelId), token, Guid.Parse(userId));
+    }
+
+    private static Task JoinAsync(GrpcServer server, string channelId, string token) =>
+        new Proto.VoiceService.VoiceServiceClient(server.Channel).JoinVoiceAsync(
+            new Proto.JoinVoiceRequest { ChannelId = channelId }, GrpcServer.As(token)).ResponseAsync;
+
+    private static ValueTask<VoiceParticipantRecord?> RecordOf(GrpcServer server, Guid userId) =>
+        server.Services.GetRequiredService<IVoiceStateStore>().FindAsync(userId, default);
+
+    /// <summary>Waits until the member is out of every call, or fails after a few graces.</summary>
+    private static async Task AssertRemovedAsync(GrpcServer server, Guid userId)
+    {
+        var deadline = DateTime.UtcNow + Grace * 15;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await RecordOf(server, userId) is null)
+                return;
+            await Task.Delay(25);
+        }
+
+        Assert.Fail("The member was still in the call long after their signalling connection closed.");
+    }
+
+    [Fact]
+    public async Task A_member_whose_connection_closes_for_good_leaves_the_call()
+    {
+        var (server, channel, _, userId) = await InCallAsync();
+        await using var _server = server;
+        var monitor = server.Services.GetRequiredService<IVoiceSignalMonitor>();
+
+        monitor.SignalOpened(channel, userId);
+        monitor.SignalClosed(channel, userId);
+
+        await AssertRemovedAsync(server, userId);
+    }
+
+    /// <summary>A network blip: LiveKit's SDK opens a new connection before the grace runs out.</summary>
+    [Fact]
+    public async Task A_member_who_reconnects_within_the_grace_stays()
+    {
+        var (server, channel, _, userId) = await InCallAsync();
+        await using var _server = server;
+        var monitor = server.Services.GetRequiredService<IVoiceSignalMonitor>();
+
+        monitor.SignalOpened(channel, userId);
+        monitor.SignalClosed(channel, userId);
+        monitor.SignalOpened(channel, userId);
+
+        await Task.Delay(Grace * 5);
+        Assert.NotNull(await RecordOf(server, userId));
+    }
+
+    /// <summary>
+    /// The app restarted after a crash and joined again — possibly on the same session token — before
+    /// the old connection's grace ran out. The new join is not the one whose connection closed.
+    /// </summary>
+    [Fact]
+    public async Task A_new_join_survives_the_old_connection_closing()
+    {
+        var (server, channel, token, userId) = await InCallAsync();
+        await using var _server = server;
+        var monitor = server.Services.GetRequiredService<IVoiceSignalMonitor>();
+
+        monitor.SignalOpened(channel, userId);
+        monitor.SignalClosed(channel, userId);
+
+        // Give the closed connection's check time to note the old join before it is replaced.
+        await Task.Delay(Grace / 4);
+        await new Proto.VoiceService.VoiceServiceClient(server.Channel).LeaveVoiceAsync(
+            new Proto.LeaveVoiceRequest { ChannelId = channel.ToString("D") }, GrpcServer.As(token));
+        await JoinAsync(server, channel.ToString("D"), token);
+
+        await Task.Delay(Grace * 5);
+        Assert.NotNull(await RecordOf(server, userId));
+    }
+
+    /// <summary>A transport that never reports connections leaves the reconciler to decide, as before.</summary>
+    [Fact]
+    public async Task Nothing_happens_without_a_closed_connection()
+    {
+        var (server, _, _, userId) = await InCallAsync();
+        await using var _server = server;
+
+        await Task.Delay(Grace * 5);
+        Assert.NotNull(await RecordOf(server, userId));
+    }
+}

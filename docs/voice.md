@@ -220,6 +220,20 @@ LiveKit does not trust without extra setup. Instead:
   Both mean the state asked for has arrived, so both are treated as done rather than reported. A call
   that names no room, such as listing the rooms, is not: nothing answering there means LiveKit itself
   is in trouble, and a reconciler told "no rooms" would tear down every live call.
+- **A dead client leaves in seconds.** A crashed or killed client cannot call `LeaveVoice`, but the
+  OS closes its sockets, and the signalling relay sees its LiveKit connection end. The relay reports
+  every connection opening and closing to `IVoiceSignalMonitor` (implemented by `VoiceService`). When a
+  member's last signalling connection in a call has stayed closed for `SignalLossGrace` (5 s), they
+  are dropped (`disconnected`): `voice.left` goes to everybody and LiveKit is told to remove them.
+  - **A network blip is not a crash.** LiveKit's SDK opens a new signalling connection within a second
+    or two when it resumes, which cancels the removal.
+  - **Only the join whose connection closed is removed.** An app relaunched after a crash can come
+    back on the same session token, so the join time (`JoinedAtUtc`) is what distinguishes the old
+    join from a new one.
+  - **A clean leave is unaffected.** `LeaveVoice` has already removed the member, so the check finds
+    nothing.
+  - **The reconciler is still the fallback.** If a transport has no relay, or the relay misses a
+    connection, the `JoinGrace` sweep above still drops the member.
 - **Role changes** (`role.updated`, `role.deleted`, `member.roles`, `member.left`) queue a re-check of
   every participant (`VoicePermissionWatcher`), coalesced so a burst of changes costs one pass.
 - **Session changes** (logout, password change, leaving) queue a re-check of that member
@@ -241,6 +255,9 @@ pins>/api/channels/voice/signal`. LiveKit's SDK then opens `…/rtc` and, after 
 - **An enforcement point.** A connection is forwarded only for a token Raindrop signed (or LiveKit
   refreshed), naming a member Raindrop has admitted to *that* room on a session that is still active.
   Anything else gets `401` with a plain-text reason, which LiveKit's client shows.
+- **A liveness signal.** Because every signalling connection passes through it, the relay is what
+  notices a client disappear. It tells `IVoiceSignalMonitor` when each connection opens and closes;
+  see "A dead client leaves in seconds" above.
 - **The one route that is not gRPC.** It carries LiveKit's own protocol (a WebSocket with LiveKit's
   protobuf inside), which its client SDK speaks and Raindrop forwards unread. `VoiceSignalRoutes` maps
   `/api/channels/voice/signal/{**path}` only when a transport registers an `IVoiceSignalRelay`, and
@@ -508,6 +525,7 @@ front of each attempt.
 |---|---|---|
 | `IVoiceTransport` | `UnavailableVoiceTransport`, or `LiveKitVoiceTransport` via `AddRaindropLiveKit` | `TryAddSingleton`; register yours **before** `AddRaindropServer` |
 | `IVoiceSignalRelay` | `LiveKitSignalRelay` | `TryAddEnumerable`; optional, only for transports whose clients connect through Raindrop |
+| `IVoiceSignalMonitor` | `VoiceService` | `TryAddSingleton`; a relay reports signalling connections opening and closing to it, which is how a crashed client leaves within `SignalLossGrace` |
 | `IVoiceStateStore` | `InMemoryVoiceStateStore` | `TryAddSingleton` |
 | `IVoiceMuteStore` | `RelationalVoiceMuteStore`, from the database driver | `IDatabaseDriver.CreateVoiceMuteStore` |
 | `IVoiceJoinPolicy` | none | `TryAddEnumerable`; each one can refuse a join by throwing an `ApiException` |
