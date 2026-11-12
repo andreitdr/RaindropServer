@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using RaindropServer.Events;
 using RaindropServer.Roles;
 using RaindropServer.Users;
@@ -24,11 +25,16 @@ namespace RaindropServer.Channels.Voice;
 /// but Raindrop did not admit is removed. The second matters because a self-hosted media server does
 /// not revoke a credential when its holder is removed — only its short lifetime and this sweep do.
 /// </item>
+/// <item>
+/// As an <see cref="IVoiceSignalMonitor"/>, it hears when a member's signalling connection closes, and
+/// drops a member whose connection stays closed for <see cref="VoiceOptions.SignalLossGrace"/> — so a
+/// client that crashed leaves in seconds rather than when the reconciler gives up on it.
+/// </item>
 /// </list>
 /// Work that touches the media server outside a request goes through <see cref="VoiceWorkQueue"/>,
 /// so a slow or absent media server never holds up a request.
 /// </remarks>
-public sealed class VoiceService
+public sealed class VoiceService : IVoiceSignalMonitor
 {
     private readonly ChannelService _channels;
     private readonly IChannelStore _channelStore;
@@ -43,6 +49,9 @@ public sealed class VoiceService
     private readonly VoiceOptions _options;
     private readonly IReadOnlyList<IVoiceJoinPolicy> _policies;
     private readonly TimeProvider _time;
+
+    /// <summary>How many signalling connections each member has open in each call, by the relay's count.</summary>
+    private readonly ConcurrentDictionary<(Guid ChannelId, Guid UserId), int> _signals = new();
 
     public VoiceService(
         ChannelService channels,
@@ -584,6 +593,66 @@ public sealed class VoiceService
         var calls = await _transport.ListCallsAsync(cancellationToken);
         await Task.WhenAll(calls.Select(call =>
             TryTransportAsync(ct => _transport.CloseCallAsync(call.ChannelId, ct), cancellationToken)));
+    }
+
+    // ── Signalling connections ───────────────────────────────────────────────
+
+    /// <inheritdoc />
+    public void SignalOpened(Guid channelId, Guid userId) =>
+        _signals.AddOrUpdate((channelId, userId), 1, (_, open) => open + 1);
+
+    /// <inheritdoc />
+    public void SignalClosed(Guid channelId, Guid userId)
+    {
+        var key = (channelId, userId);
+        var open = _signals.AddOrUpdate(key, 0, (_, count) => Math.Max(0, count - 1));
+        if (open > 0)
+            return;
+
+        // Only removes the entry if nothing reopened it in between.
+        _signals.TryRemove(new KeyValuePair<(Guid, Guid), int>(key, 0));
+        _ = ConfirmSignalLostAsync(channelId, userId);
+    }
+
+    private bool IsSignalOpen(Guid channelId, Guid userId) =>
+        _signals.TryGetValue((channelId, userId), out var open) && open > 0;
+
+    /// <summary>
+    /// Waits out <see cref="VoiceOptions.SignalLossGrace"/>, and then takes the member out of the call if
+    /// no new connection arrived — and only out of the very join whose connection closed. Rejoining
+    /// after a crash can bring the same session token back, so the join time is what tells the old
+    /// join from the new one. A member who left properly is already gone, and this finds nothing.
+    /// </summary>
+    private async Task ConfirmSignalLostAsync(Guid channelId, Guid userId)
+    {
+        try
+        {
+            var record = await _state.FindAsync(userId, CancellationToken.None);
+            if (record is null || record.ChannelId != channelId)
+                return;
+
+            await Task.Delay(_options.SignalLossGrace, _time);
+
+            _work.Enqueue(async cancellationToken =>
+            {
+                if (IsSignalOpen(channelId, userId))
+                    return;
+
+                var removed = await _state.LeaveAsync(userId,
+                    current => current.ChannelId == record.ChannelId
+                        && current.SessionToken == record.SessionToken
+                        && current.JoinedAtUtc == record.JoinedAtUtc,
+                    cancellationToken);
+
+                if (removed is not null)
+                    await AnnounceRemovedAsync(removed, VoiceLeaveReasons.Disconnected, cancellationToken);
+            });
+        }
+        catch (Exception ex)
+        {
+            // Nothing waits on this; the reconciler still catches whoever it misses.
+            Console.Error.WriteLine($"[raindrop] voice: could not check a closed signalling connection: {ex.Message}");
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

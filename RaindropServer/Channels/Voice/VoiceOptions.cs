@@ -68,6 +68,14 @@ public sealed class VoiceOptions
     public TimeSpan JoinGrace { get; set; } = TimeSpan.FromSeconds(20);
 
     /// <summary>
+    /// How long a member's media signalling connection may stay closed before they are taken out of
+    /// the call — see <see cref="IVoiceSignalMonitor"/>. A client that crashed or was killed leaves
+    /// this long after its sockets die. Long enough for a client recovering from a network blip to
+    /// open a new connection, which cancels the removal.
+    /// </summary>
+    public TimeSpan SignalLossGrace { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// How often Raindrop's record of every call is compared with the media server's — how quickly a
     /// client that vanished without leaving drops out, and how quickly anybody the media server has
     /// but Raindrop did not admit is removed.
@@ -129,6 +137,12 @@ public sealed class VoiceOptions
 
         report.Range("joinGrace", JoinGrace, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(10));
         report.Range("reconcileInterval", ReconcileInterval, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));
+        report.Range("signalLossGrace", SignalLossGrace, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(2));
+
+        if (SignalLossGrace < TimeSpan.FromSeconds(2))
+            report.Warn("signalLossGrace",
+                $"is {SignalLossGrace.TotalSeconds:0.##}s. A client resuming after a short network drop needs a " +
+                "moment to open a new connection, and would be dropped from its call first.");
 
         if (JoinGrace < TimeSpan.FromSeconds(5))
             report.Warn("joinGrace",

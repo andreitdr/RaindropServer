@@ -295,6 +295,8 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IVoiceStateStore, InMemoryVoiceStateStore>();
         services.TryAddSingleton<VoiceWorkQueue>();
         services.TryAddSingleton<VoiceService>();
+        // The relay reports signalling connections here, so a crashed client leaves within seconds.
+        services.TryAddSingleton<IVoiceSignalMonitor>(provider => provider.GetRequiredService<VoiceService>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IChannelModule, VoiceChannelModule>());
 
         // The transport's signalling relay, when it has one, is served on the same port as everything else.

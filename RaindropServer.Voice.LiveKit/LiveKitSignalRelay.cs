@@ -32,6 +32,7 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
     private readonly LiveKitJwt _jwt;
     private readonly IVoiceStateStore _state;
     private readonly ISessionStore _sessions;
+    private readonly IVoiceSignalMonitor? _monitor;
     private readonly CancellationToken _stopping;
     private readonly HttpClient _http;
 
@@ -40,12 +41,14 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         LiveKitJwt jwt,
         IVoiceStateStore state,
         ISessionStore sessions,
-        IHostApplicationLifetime? lifetime = null)
+        IHostApplicationLifetime? lifetime = null,
+        IVoiceSignalMonitor? monitor = null)
     {
         _options = options;
         _jwt = jwt;
         _state = state;
         _sessions = sessions;
+        _monitor = monitor;
         _stopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
         _http = new HttpClient { BaseAddress = options.ApiBase, Timeout = options.RequestTimeout };
     }
@@ -62,7 +65,7 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
 
         var (token, fromHeader) = TokenOf(context.Request);
 
-        if (!await IsAdmittedAsync(token, cancellationToken))
+        if (await AdmittedAsync(token, cancellationToken) is not { } admitted)
         {
             await WriteTextAsync(context, StatusCodes.Status401Unauthorized,
                 "This server has not admitted you to that call. Join it again.", cancellationToken);
@@ -72,7 +75,7 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         var target = path + context.Request.QueryString;
 
         if (context.WebSockets.IsWebSocketRequest)
-            await RelayWebSocketAsync(context, target, fromHeader ? token : null, cancellationToken);
+            await RelayWebSocketAsync(context, target, fromHeader ? token : null, admitted, cancellationToken);
         else
             await RelayHttpAsync(context, target, fromHeader ? token : null, cancellationToken);
     }
@@ -94,22 +97,26 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         return (request.Query["access_token"].ToString(), false);
     }
 
-    private async Task<bool> IsAdmittedAsync(string? token, CancellationToken cancellationToken)
+    /// <summary>The call and member a token is for, when Raindrop has admitted that member to it; else null.</summary>
+    private async Task<(Guid ChannelId, Guid UserId)?> AdmittedAsync(string? token, CancellationToken cancellationToken)
     {
         if (_jwt.TryValidateParticipantToken(token) is not { } claims)
-            return false;
+            return null;
 
         if (!Guid.TryParse(claims.Identity, out var userId) || _jwt.ChannelFor(claims.Room) is not { } channelId)
-            return false;
+            return null;
 
         var record = await _state.FindAsync(userId, cancellationToken);
-        return record is not null && record.ChannelId == channelId && _sessions.IsActive(record.SessionToken);
+        return record is not null && record.ChannelId == channelId && _sessions.IsActive(record.SessionToken)
+            ? (channelId, userId)
+            : null;
     }
 
     // ── Forwarding ───────────────────────────────────────────────────────────
 
     private async Task RelayWebSocketAsync(
-        HttpContext context, string target, string? bearer, CancellationToken cancellationToken)
+        HttpContext context, string target, string? bearer, (Guid ChannelId, Guid UserId) member,
+        CancellationToken cancellationToken)
     {
         using var upstream = new ClientWebSocket();
         upstream.Options.CollectHttpResponseDetails = true;
@@ -134,15 +141,25 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         using var downstream = await context.WebSockets.AcceptWebSocketAsync();
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopping);
 
-        var toLiveKit = PumpAsync(downstream, upstream, session.Token);
-        var toClient = PumpAsync(upstream, downstream, session.Token);
+        // However this ends — a clean leave, a network drop, or the client's process dying and the OS
+        // closing its socket — the voice service hears of it, and drops a member who does not come
+        // back within its grace period.
+        _monitor?.SignalOpened(member.ChannelId, member.UserId);
+        try
+        {
+            var toLiveKit = PumpAsync(downstream, upstream, session.Token);
+            var toClient = PumpAsync(upstream, downstream, session.Token);
 
-        await Task.WhenAny(toLiveKit, toClient);
-        await session.CancelAsync();
-        await Task.WhenAll(toLiveKit, toClient);
-
-        Abandon(downstream);
-        Abandon(upstream);
+            await Task.WhenAny(toLiveKit, toClient);
+            await session.CancelAsync();
+            await Task.WhenAll(toLiveKit, toClient);
+        }
+        finally
+        {
+            Abandon(downstream);
+            Abandon(upstream);
+            _monitor?.SignalClosed(member.ChannelId, member.UserId);
+        }
     }
 
     /// <summary>
