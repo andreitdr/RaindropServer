@@ -438,13 +438,18 @@ public class GrpcTests
         {
             Header = new Proto.UploadHeader { AttachmentId = created.Status.AttachmentId }
         });
-        await upload.RequestStream.WriteAsync(new Proto.UploadRequest
+        // The server refuses the frame and ends the call at once, so the refusal can surface from the
+        // write itself (when the call is already over by the time the client sends) as well as from the
+        // response. Which one wins is a race; either is the server doing its job.
+        var refused = await Refused(async () =>
         {
-            Data = ByteString.CopyFrom(new byte[AttachmentGrpcService.FrameBytes + 1])
+            await upload.RequestStream.WriteAsync(new Proto.UploadRequest
+            {
+                Data = ByteString.CopyFrom(new byte[AttachmentGrpcService.FrameBytes + 1])
+            });
+            await upload.RequestStream.CompleteAsync();
+            await upload;
         });
-        await upload.RequestStream.CompleteAsync();
-
-        var refused = await Refused(async () => await upload);
         Assert.Equal(StatusCode.ResourceExhausted, refused.StatusCode);
         Assert.Equal("chunk_too_large", ReasonOf(refused));
     }
