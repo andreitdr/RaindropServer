@@ -89,10 +89,20 @@
     // smaller than maximumParticipants. 0 switches camera video off: clients then see no camera
     // button at all, because the server stops advertising voice.video.v1.
     "maximumCameraPublishers": 6,
-    // How many members of one call may share a screen or a window at once. A share is sent at up to
-    // 1080p, about 3 Mbit/s up from its sharer and up to 2.5 Mbit/s to each member who watches it.
+    // How many members of one call may share a screen or a window at once. What one costs depends on
+    // the two settings below: at the most they allow, up to about 9 Mbit/s up from its sharer and up
+    // to 6 Mbit/s to each member who watches it — and far less while the screen is not changing.
     // 0 switches screen sharing off: clients see no share button (voice.screen.v1 is not advertised).
     "maximumScreenShares": 2,
+    // The best a shared screen may be sent at. A sharer picks their own maximum up to this (or
+    // leaves it automatic, which aims for 1080p at 30 frames a second), and each watcher is sent a
+    // smaller version when their own connection cannot carry the full one. Height is 480, 720 or
+    // 1080; frame rate is 15, 24, 30 or 60. Lowering either is how to spend less bandwidth on shares:
+    // 720 at 30, for instance, is at most 2 Mbit/s to each watcher.
+    // Raindrop clients hold themselves to these. The server cannot check: a call's media is
+    // end-to-end encrypted and never passes through it.
+    "maximumScreenShareHeight": 1080,
+    "maximumScreenShareFrameRate": 60,
     // How hard the server looks for the media server before it starts listening: "off" not at all,
     // "warn" to report an unreachable one and start anyway, "require" to refuse to start without it.
     // A media server that answers and refuses these credentials stops the server whichever this is.

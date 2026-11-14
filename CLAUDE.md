@@ -766,7 +766,10 @@ see `docs/local-development-and-docker.md#wiping-the-database-on-every-start`.
 The `voice` section is `provider` (`livekit`, or null for no voice — the default), `maximumParticipants`,
 `maximumCameraPublishers` (how many cameras one call carries at once; 0 switches camera video off and
 withdraws `voice.video.v1`), `maximumScreenShares` (how many shares one call carries at once, 2 by
-default; 0 switches screen sharing off and withdraws `voice.screen.v1`),
+default; 0 switches screen sharing off and withdraws `voice.screen.v1`), `maximumScreenShareHeight`
+(480/720/1080) and `maximumScreenShareFrameRate` (15/24/30/60) — the best a share may be sent at,
+advertised in `GetVoiceStatus` and **honoured by clients rather than enforced**, since the server never
+sees a call's encrypted media; any other value is a startup error,
 `startupCheck` (`off`/`warn`/`require`) and `livekit` (`apiUrl`, a private address clients never reach;
 `apiKey`; `apiSecret`; `allowWeakSecret`). `livekit` with a missing key or secret is a startup error.
 

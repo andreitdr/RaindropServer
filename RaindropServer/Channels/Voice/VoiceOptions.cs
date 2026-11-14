@@ -61,6 +61,55 @@ public sealed class VoiceOptions
     public int MaximumScreenSharesPerChannel { get; set; } = 2;
 
     /// <summary>
+    /// The most lines a shared screen may be sent at: 480, 720 or 1080. A sharer picks their own
+    /// maximum up to this, and a client fits the picture inside the box it names.
+    /// </summary>
+    /// <remarks>
+    /// <b>Honoured by clients, not enforced here.</b> A call's media is end-to-end encrypted and goes
+    /// through the media server, never through Raindrop, so there is no frame for this server to
+    /// measure and nothing it could refuse. It is advertised in the voice status and a Raindrop client
+    /// holds its share to it — the same kind of promise the 1080p ceiling always was. What it buys an
+    /// owner is bandwidth on the media server: see <see cref="ScreenShareBitrate"/>.
+    /// </remarks>
+    public int MaximumScreenShareHeight { get; set; } = 1080;
+
+    /// <summary>
+    /// The most frames a second a shared screen may be sent at: 15, 24, 30 or 60. Honoured by clients,
+    /// like <see cref="MaximumScreenShareHeight"/>.
+    /// </summary>
+    public int MaximumScreenShareFrameRate { get; set; } = 60;
+
+    /// <summary>The heights a share's ceiling can be, smallest first.</summary>
+    public static readonly IReadOnlyList<int> ScreenShareHeights = [480, 720, 1080];
+
+    /// <summary>The frame rates a share's ceiling can be, slowest first.</summary>
+    public static readonly IReadOnlyList<int> ScreenShareFrameRates = [15, 24, 30, 60];
+
+    /// <summary>
+    /// The most one share's largest version costs at a given ceiling, in kilobits a second — what a
+    /// client caps its encoder at, kept here so the warnings an owner reads are the client's own
+    /// numbers. A watcher receives at most this; the sharer sends this plus about half as much again
+    /// for the smaller versions sent alongside it for watchers on slower connections.
+    /// </summary>
+    public static int ScreenShareBitrate(int height, int frameRate)
+    {
+        int[] row = height switch
+        {
+            <= 480 => [500, 700, 800, 1200],
+            <= 720 => [1200, 1600, 2000, 3000],
+            _ => [2500, 3200, 4000, 6000]
+        };
+
+        return frameRate switch
+        {
+            <= 15 => row[0],
+            <= 24 => row[1],
+            <= 30 => row[2],
+            _ => row[3]
+        };
+    }
+
+    /// <summary>
     /// How long a member may hold a place in a call after joining before the media server has seen
     /// them connect. A client that got its token and then crashed, or could not reach the media server
     /// at all, is dropped once this passes rather than showing as present forever.
@@ -130,10 +179,30 @@ public sealed class VoiceOptions
                 $"is {MaximumScreenSharesPerChannel}, more than the {MaximumParticipantsPerChannel} members a " +
                 "call holds, so it can never be reached.");
 
-        if (MaximumScreenSharesPerChannel > 3)
+        // A closed set rather than a range: a client sends a share in a ladder of fixed sizes and
+        // rates, and a ceiling between two of them would be one no client can aim at.
+        var heightKnown = ScreenShareHeights.Contains(MaximumScreenShareHeight);
+        if (!heightKnown)
+            report.Error("maximumScreenShareHeight",
+                $"is {MaximumScreenShareHeight}, which is not a size a share can be capped at.",
+                $"Use one of {string.Join(", ", ScreenShareHeights)}.");
+
+        var rateKnown = ScreenShareFrameRates.Contains(MaximumScreenShareFrameRate);
+        if (!rateKnown)
+            report.Error("maximumScreenShareFrameRate",
+                $"is {MaximumScreenShareFrameRate}, which is not a frame rate a share can be capped at.",
+                $"Use one of {string.Join(", ", ScreenShareFrameRates)}.");
+
+        if (MaximumScreenSharesPerChannel > 3 && heightKnown && rateKnown)
+        {
+            var megabits = ScreenShareBitrate(MaximumScreenShareHeight, MaximumScreenShareFrameRate) / 1000.0;
             report.Warn("maximumScreenShares",
-                $"is {MaximumScreenSharesPerChannel}. Each share is about 3 Mbit/s from its sharer and up to " +
-                "2.5 Mbit/s to every member watching it, so that many at once can outweigh the rest of the call.");
+                $"is {MaximumScreenSharesPerChannel}. At the {MaximumScreenShareHeight}p, " +
+                $"{MaximumScreenShareFrameRate} frames a second this server allows, each share is up to about " +
+                $"{megabits * 1.5:0.#} Mbit/s from its sharer and up to {megabits:0.#} Mbit/s to every member " +
+                "watching it, so that many at once can outweigh the rest of the call.",
+                "Allow fewer shares at once, or lower maximumScreenShareHeight or maximumScreenShareFrameRate.");
+        }
 
         report.Range("joinGrace", JoinGrace, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(10));
         report.Range("reconcileInterval", ReconcileInterval, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5));

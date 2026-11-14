@@ -135,13 +135,24 @@ public record VoiceMuteResponse(Guid UserId, bool Muted, bool Changed);
 /// How many members of one call may share their screen at once; 0 when this server carries no screen
 /// sharing, which is also when it does not advertise <c>voice.screen.v1</c>.
 /// </param>
+/// <param name="MaximumScreenShareHeight">
+/// The most lines a shared screen may be sent at here (480, 720 or 1080); 0 when this server carries no
+/// screen sharing. Clients hold their own share to it: see
+/// <see cref="VoiceOptions.MaximumScreenShareHeight"/> for why that is a promise and not a check.
+/// </param>
+/// <param name="MaximumScreenShareFrameRate">
+/// The most frames a second a shared screen may be sent at here (15, 24, 30 or 60); 0 when this server
+/// carries no screen sharing.
+/// </param>
 public record VoiceStatusResponse(
     bool Available,
     string Transport,
     int MaximumParticipants,
     IReadOnlyList<VoiceParticipant> Participants,
     int MaximumCameraPublishers = 0,
-    int MaximumScreenShares = 0);
+    int MaximumScreenShares = 0,
+    int MaximumScreenShareHeight = 0,
+    int MaximumScreenShareFrameRate = 0);
 
 /// <summary>
 /// What a screen share shows. A closed set — there is nothing else a share can be — carried as an
