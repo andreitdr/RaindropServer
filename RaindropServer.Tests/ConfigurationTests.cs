@@ -160,6 +160,20 @@ public class ServerConfigTests : IDisposable
     }
 
     [Fact]
+    public void The_best_a_share_may_be_sent_at_is_read_from_the_file_and_reaches_the_voice_rules()
+    {
+        var (config, report) = Read(
+            """{ "voice": { "maximumScreenShareHeight": 720, "maximumScreenShareFrameRate": 30 } }""");
+
+        var options = new VoiceOptions();
+        config.ApplyTo(options);
+
+        Assert.DoesNotContain(report.Problems, problem => problem.Setting.StartsWith("voice.maximumScreen"));
+        Assert.Equal(720, options.MaximumScreenShareHeight);
+        Assert.Equal(30, options.MaximumScreenShareFrameRate);
+    }
+
+    [Fact]
     public void A_misspelled_screen_share_cap_is_pointed_at_the_real_one()
     {
         var (_, report) = Read("""{ "voice": { "maximumScreenShare": 1 } }""");
@@ -399,6 +413,66 @@ public class ComponentOptionsTests
         Assert.False(report.HasErrors);
         Assert.Contains(report.Problems, problem => problem.Setting == "maximumScreenShares");
     }
+
+    /// <summary>
+    /// A closed set, not a range: a client sends a share in fixed sizes, and a ceiling between two
+    /// of them is one nothing can aim at.
+    /// </summary>
+    [Theory]
+    [InlineData(480, false)]
+    [InlineData(720, false)]
+    [InlineData(1080, false)]
+    [InlineData(0, true)]
+    [InlineData(900, true)]
+    [InlineData(2160, true)]
+    public void A_share_is_only_capped_at_a_size_a_client_can_aim_for(int height, bool error) =>
+        Assert.Equal(error,
+            Check(new VoiceOptions { MaximumScreenShareHeight = height }.Validate).HasErrors);
+
+    [Theory]
+    [InlineData(15, false)]
+    [InlineData(24, false)]
+    [InlineData(30, false)]
+    [InlineData(60, false)]
+    [InlineData(0, true)]
+    [InlineData(25, true)]
+    [InlineData(120, true)]
+    public void A_share_is_only_capped_at_a_frame_rate_a_client_can_aim_for(int frameRate, bool error) =>
+        Assert.Equal(error,
+            Check(new VoiceOptions { MaximumScreenShareFrameRate = frameRate }.Validate).HasErrors);
+
+    [Fact]
+    public void A_refused_share_ceiling_names_the_ones_that_are_taken()
+    {
+        var report = Check(new VoiceOptions { MaximumScreenShareHeight = 900 }.Validate);
+
+        var problem = Assert.Single(report.Problems, problem => problem.Setting == "maximumScreenShareHeight");
+        Assert.Contains("480, 720, 1080", problem.Remedy);
+    }
+
+    /// <summary>The warning quotes the cost at the ceiling the owner actually set, not at the most there is.</summary>
+    [Fact]
+    public void Many_shares_at_once_are_costed_at_the_ceiling_this_server_allows()
+    {
+        var report = Check(new VoiceOptions
+        {
+            MaximumScreenSharesPerChannel = 5,
+            MaximumScreenShareHeight = 720,
+            MaximumScreenShareFrameRate = 30
+        }.Validate);
+
+        var problem = Assert.Single(report.Problems, problem => problem.Setting == "maximumScreenShares");
+        Assert.Contains("720p", problem.Message);
+        Assert.Contains("2 Mbit/s to every member", problem.Message);
+    }
+
+    [Theory]
+    [InlineData(480, 15, 500)]
+    [InlineData(720, 30, 2000)]
+    [InlineData(1080, 30, 4000)]
+    [InlineData(1080, 60, 6000)]
+    public void A_share_costs_what_a_client_caps_its_largest_version_at(int height, int frameRate, int kilobits) =>
+        Assert.Equal(kilobits, VoiceOptions.ScreenShareBitrate(height, frameRate));
 
     [Fact]
     public void The_default_screen_share_cap_says_nothing()

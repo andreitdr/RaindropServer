@@ -282,6 +282,8 @@ public sealed class VoiceGrpcService : Proto.VoiceService.VoiceServiceBase
             MaximumParticipants = status.MaximumParticipants,
             MaximumCameraPublishers = status.MaximumCameraPublishers,
             MaximumScreenShares = status.MaximumScreenShares,
+            MaximumScreenShareHeight = status.MaximumScreenShareHeight,
+            MaximumScreenShareFrameRate = status.MaximumScreenShareFrameRate,
             Participants = { status.Participants.Select(participant => participant.ToProto()) }
         };
     }

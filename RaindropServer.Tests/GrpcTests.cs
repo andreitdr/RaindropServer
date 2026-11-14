@@ -812,12 +812,16 @@ public class VoiceScreenShareGrpcTests
     };
 
     /// <summary>A server with a voice transport, one voice channel, and the owner and Bob in the call.</summary>
-    private static async Task<Call> CallAsync(int shareCap = 2)
+    private static async Task<Call> CallAsync(int shareCap = 2, Action<VoiceOptions>? configure = null)
     {
         var transport = new FakeVoiceTransport();
         var server = await GrpcServer.StartAsync(
             voice: transport,
-            configureVoice: options => options.MaximumScreenSharesPerChannel = shareCap);
+            configureVoice: options =>
+            {
+                options.MaximumScreenSharesPerChannel = shareCap;
+                configure?.Invoke(options);
+            });
 
         var (owner, ownerId) = await server.RegisterAsync();
         var (bob, bobId) = await server.RegisterAsync();
@@ -876,6 +880,45 @@ public class VoiceScreenShareGrpcTests
         var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
 
         Assert.Equal(3, status.MaximumScreenShares);
+    }
+
+    /// <summary>Unset, a share may be as good as a share can be: nothing is quietly held back.</summary>
+    [Fact]
+    public async Task A_call_reports_the_best_a_share_may_be_sent_at()
+    {
+        await using var call = await CallAsync();
+
+        var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
+
+        Assert.Equal(1080, status.MaximumScreenShareHeight);
+        Assert.Equal(60, status.MaximumScreenShareFrameRate);
+    }
+
+    [Fact]
+    public async Task A_call_reports_the_ceiling_its_owner_put_on_shares()
+    {
+        await using var call = await CallAsync(configure: options =>
+        {
+            options.MaximumScreenShareHeight = 720;
+            options.MaximumScreenShareFrameRate = 30;
+        });
+
+        var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
+
+        Assert.Equal(720, status.MaximumScreenShareHeight);
+        Assert.Equal(30, status.MaximumScreenShareFrameRate);
+    }
+
+    /// <summary>A ceiling on something that cannot be done is not a ceiling: both read as zero, like the cap.</summary>
+    [Fact]
+    public async Task A_server_with_screen_sharing_off_states_no_ceiling_for_it()
+    {
+        await using var call = await CallAsync(shareCap: 0);
+
+        var status = await call.Voice.GetVoiceStatusAsync(new Proto.GetVoiceStatusRequest(), GrpcServer.As(call.Owner));
+
+        Assert.Equal(0, status.MaximumScreenShareHeight);
+        Assert.Equal(0, status.MaximumScreenShareFrameRate);
     }
 
     /// <summary>Joining never starts a share, so no join token carries one.</summary>

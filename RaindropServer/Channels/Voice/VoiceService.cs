@@ -111,6 +111,8 @@ public sealed class VoiceService : IVoiceSignalMonitor
                 visible.AddRange(call.Select(VoiceEvents.ToContract));
         }
 
+        var sharing = _transport.IsAvailable && _options.MaximumScreenSharesPerChannel > 0;
+
         return new VoiceStatusResponse(
             _transport.IsAvailable,
             _transport.Name,
@@ -119,7 +121,11 @@ public sealed class VoiceService : IVoiceSignalMonitor
             // 0 when there is no media server at all, so a client reads "no camera here" from one
             // number rather than having to combine it with `available`.
             _transport.IsAvailable ? _options.MaximumCameraPublishersPerChannel : 0,
-            _transport.IsAvailable ? _options.MaximumScreenSharesPerChannel : 0);
+            _transport.IsAvailable ? _options.MaximumScreenSharesPerChannel : 0,
+            // The ceiling on a share's quality, only where a share is possible at all. It is the
+            // client that holds a share to it; see VoiceOptions.MaximumScreenShareHeight.
+            sharing ? _options.MaximumScreenShareHeight : 0,
+            sharing ? _options.MaximumScreenShareFrameRate : 0);
     }
 
     // ── Joining and leaving ──────────────────────────────────────────────────

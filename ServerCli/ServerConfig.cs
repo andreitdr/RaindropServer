@@ -389,6 +389,8 @@ public sealed record ServerConfig
         options.MaximumParticipantsPerChannel = Voice.MaximumParticipants;
         options.MaximumCameraPublishersPerChannel = Voice.MaximumCameraPublishers;
         options.MaximumScreenSharesPerChannel = Voice.MaximumScreenShares;
+        options.MaximumScreenShareHeight = Voice.MaximumScreenShareHeight;
+        options.MaximumScreenShareFrameRate = Voice.MaximumScreenShareFrameRate;
         options.StartupCheck = VoiceStartupCheck;
     }
 
@@ -956,6 +958,14 @@ public sealed record RoleConfig(
 /// How many members of one call may share a screen or a window at once. 0 switches screen sharing off
 /// on this server entirely.
 /// </param>
+/// <param name="MaximumScreenShareHeight">
+/// The most lines a shared screen may be sent at: 480, 720 or 1080. Clients hold their own share to it;
+/// the server cannot see a call's media to check.
+/// </param>
+/// <param name="MaximumScreenShareFrameRate">
+/// The most frames a second a shared screen may be sent at: 15, 24, 30 or 60. Held to by clients, like
+/// the height.
+/// </param>
 /// <param name="StartupCheck">
 /// How hard the server looks for the media server before it starts listening: <c>off</c> not at all,
 /// <c>warn</c> to report an unreachable one and start anyway, <c>require</c> to refuse to start
@@ -967,6 +977,8 @@ public sealed record VoiceConfig(
     int MaximumParticipants = 25,
     int MaximumCameraPublishers = 6,
     int MaximumScreenShares = 2,
+    int MaximumScreenShareHeight = 1080,
+    int MaximumScreenShareFrameRate = 60,
     string StartupCheck = "warn",
     // Named here as the file names it: the property is LiveKit, and a server owner told their typo
     // was in 'voice.liveKit' would go looking for a setting that does not appear anywhere.

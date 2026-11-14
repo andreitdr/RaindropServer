@@ -49,6 +49,8 @@ is how the Docker container is configured without editing the file.
     "maximumParticipants": 25,
     "maximumCameraPublishers": 6,
     "maximumScreenShares": 2,
+    "maximumScreenShareHeight": 1080,
+    "maximumScreenShareFrameRate": 60,
     "startupCheck": "warn",
     "livekit": {
       "apiUrl": "http://localhost:7880",
@@ -158,10 +160,19 @@ See [Voice](voice.md) for the model these configure.
   not advertised, so clients show no camera button. A value above `maximumParticipants` is reported as
   unreachable, and one above 12 is reported with the number of video streams it implies.
 - `maximumScreenShares` — how many members of one call may share a screen or a window at once
-  (`screen_share_limit_reached` beyond it), 0–10, 2 by default. A share is sent at up to 1080p, about
-  3 Mbit/s from its sharer and up to 2.5 Mbit/s to each member who watches it. **0 switches screen
-  sharing off** — nobody is granted a share and `voice.screen.v1` is not advertised. A value above
-  `maximumParticipants` is reported as unreachable, and one above 3 with what it costs.
+  (`screen_share_limit_reached` beyond it), 0–10, 2 by default. **0 switches screen sharing off** —
+  nobody is granted a share and `voice.screen.v1` is not advertised. A value above
+  `maximumParticipants` is reported as unreachable, and one above 3 with what it costs at the ceiling
+  the next two settings allow.
+- `maximumScreenShareHeight` and `maximumScreenShareFrameRate` — the best a shared screen may be sent
+  at: 480, 720 or 1080 lines (1080 by default), at 15, 24, 30 or 60 frames a second (60 by default).
+  Any other value is a startup error naming the ones that are taken. A sharer picks their own maximum
+  up to this, or leaves it automatic (1080p at 30); each watcher is sent a smaller version when their
+  own connection cannot carry the full one. Lowering either is how to spend less of the media server's
+  bandwidth on shares: at the defaults a share is up to 6 Mbit/s to each watcher, at 720 and 30 it is
+  up to 2. **Clients hold themselves to these; the server cannot check**, because a call's media is
+  end-to-end encrypted and never passes through it. See
+  [Voice](voice.md#how-good-a-share-may-be) for the full table.
 - `startupCheck` — how hard the server looks for the media server before it starts listening: `off`
   not at all, `warn` (the default) to report an unreachable one and start anyway, `require` to refuse
   to start without it. A media server that answers and *refuses* these credentials stops the server

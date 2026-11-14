@@ -179,13 +179,44 @@ a running share that changes what it carries (sound switched off because it coul
 keeps the place it has and is never told the call is full. A share with no kind, or a screen with
 sound, is `invalid_payload`, and none of that request is applied.
 
-**The cap** (`voice.maximumScreenShares`, 2 by default) is per call. A share is sent at up to 1080p —
-about 3 Mbit/s up from its sharer, and up to 2.5 Mbit/s to each member *watching* it (clients only
-receive a share once their user chooses to watch it). Zero switches screen sharing off, and the
-capability with it. Losing `screen_share` mid-call ends a running share (`ReevaluateAsync`).
+**The cap** (`voice.maximumScreenShares`, 2 by default) is per call. Zero switches screen sharing
+off, and the capability with it. Losing `screen_share` mid-call ends a running share
+(`ReevaluateAsync`). What one share costs depends on how good it may be, which is the next thing.
 
-The 1080p ceiling, choosing what to share, and which platforms can capture a window's sound are all
-the client's: see `RaindropClient/docs/voice.md#screen-sharing`.
+### How good a share may be
+
+`voice.maximumScreenShareHeight` (480, 720 or 1080; 1080 by default) and
+`voice.maximumScreenShareFrameRate` (15, 24, 30 or 60; 60 by default) are the best a shared screen may
+be sent at on this server. Closed sets rather than ranges: a client sends a share in fixed sizes and
+rates, and a ceiling between two of them is one nothing can aim at, so anything else is a startup
+error naming the values that are taken. A sharer picks their own maximum up to this ceiling, or leaves
+it automatic, which aims for 1080p at 30.
+
+**The ceiling is honoured by clients, not enforced here**, and that is a limit of the design rather
+than something left undone. A call's media is end-to-end encrypted and travels through the media
+server, never through Raindrop; there is no frame for this server to measure and nothing it could
+refuse. So the ceiling is *advertised* — `GetVoiceStatus.maximum_screen_share_height` and
+`.maximum_screen_share_frame_rate`, both 0 when this server carries no screen sharing — and a Raindrop
+client holds its own share to it, greying out what it rules out. It is the same kind of promise the
+1080p box has always been. What it buys an owner is bandwidth on the media server.
+
+**What a share costs** at each ceiling, as the most its largest version may spend
+(`VoiceOptions.ScreenShareBitrate`, kept equal to the client's `shareTopBitrate`), in kbit/s:
+
+| | 15 | 24 | 30 | 60 |
+|---|---|---|---|---|
+| 480p | 500 | 700 | 800 | 1200 |
+| 720p | 1200 | 1600 | 2000 | 3000 |
+| 1080p | 2500 | 3200 | 4000 | 6000 |
+
+A watcher receives at most that (clients only receive a share once their user chooses to watch it,
+and a watcher on a slower connection is sent one of two smaller versions the sharer also sends). The
+sharer sends that plus about half as much again for those smaller versions. These are ceilings: a
+screen that is not changing costs a small fraction of them. The startup warning for more than three
+shares at once quotes the figure for the ceiling this server actually allows.
+
+Choosing what to share, how a share is sized and sent, the versions it is sent in, and which platforms
+can capture a window's sound are all the client's: see `RaindropClient/docs/voice.md#screen-sharing`.
 
 ## Keeping Raindrop and LiveKit in step
 
@@ -316,7 +347,7 @@ All authenticated. `raindrop.v1.VoiceService`:
 
 | RPC | Purpose |
 |---|---|
-| `GetVoiceStatus` | → `{available, transport, maximum_participants, maximum_camera_publishers, maximum_screen_shares, participants}`: whether voice works here, how many cameras and shares a call carries, and everybody in every call the caller can see |
+| `GetVoiceStatus` | → `{available, transport, maximum_participants, maximum_camera_publishers, maximum_screen_shares, maximum_screen_share_height, maximum_screen_share_frame_rate, participants}`: whether voice works here, how many cameras and shares a call carries, the best a share may be sent at (clients hold themselves to it), and everybody in every call the caller can see |
 | `JoinVoice` | `{channel_id, self_mute, self_deaf}` → `{channel_id, transport, url?, path?, token, expires_at, you, participants}`. Needs `connect`. Joining another call leaves the first; joining the same call from another device takes it over. |
 | `LeaveVoice` | `{channel_id}` → `{left}`. Idempotent, and only the session that joined can leave, so a late leave from one device cannot end another device's call. |
 | `SetVoiceSelfState` | `{self_mute, self_deaf, camera_on, screen_share_on, screen_share_kind, screen_share_audio}` → `{participant}`. **The whole state**: a field left out is read as off. Deafening always mutes too. Mute and deafen are only icons and are always accepted; **the camera and a share are decisions and can be refused** (`missing_permission`, `camera_limit_reached`, `screen_share_limit_reached`), and a refused one leaves a mute in the same request standing. A malformed share (`invalid_payload`) is refused whole. |
@@ -359,6 +390,8 @@ as `left`. See [Events](events.md).
   "maximumParticipants": 25,
   "maximumCameraPublishers": 6,  // cameras on at once in one call; 0 switches camera video off
   "maximumScreenShares": 2,      // shares at once in one call; 0 switches screen sharing off
+  "maximumScreenShareHeight": 1080,    // 480 | 720 | 1080 — the best a share may be sent at
+  "maximumScreenShareFrameRate": 60,   // 15 | 24 | 30 | 60
   "startupCheck": "warn",        // off | warn | require — how hard to look for LiveKit at startup
   "livekit": {
     "apiUrl": "http://localhost:7880",
