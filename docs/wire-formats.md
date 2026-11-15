@@ -29,7 +29,7 @@ Three things outside the client protocol are not protobuf. Each is fixed by a fo
 
 | What | Encoding | Why |
 |---|---|---|
-| Voice signalling relay (`/api/channels/voice/signal`) | LiveKit's WebSocket protocol, protobuf inside | LiveKit's client SDK speaks it; Raindrop forwards it unread |
+| Voice signalling relay (`/api/channels/voice/signal`) | LiveKit's WebSocket protocol, protobuf inside | LiveKit's client SDK speaks it; Raindrop forwards it, pointing loopback ICE candidates at the address the client used ([Voice](voice.md#finding-livekits-address)) |
 | Twirp **errors** from the LiveKit sidecar | JSON `{"code","msg"}` | the Twirp spec writes errors as JSON whatever the request was; requests and answers are binary protobuf |
 | LiveKit access tokens | JWT (base64url JSON) | that is what a JWT is |
 

@@ -111,8 +111,10 @@ services:
     # LiveKit's --dev credentials, so there is no insecure default to forget to change.
     #
     # --node-ip is the address LiveKit tells clients to send audio to. Docker cannot work it out from
-    # inside the container, so set LIVEKIT_NODE_IP in .env: 127.0.0.1 when every client runs on this
-    # machine, this machine's LAN address when phones or other computers join.
+    # inside the container, and it does not need to: left at 127.0.0.1 ("on the same host as
+    # Raindrop"), Raindrop's signalling relay points each client at the address that client reached
+    # Raindrop by, so phones and other computers connect with nothing set. LIVEKIT_NODE_IP in .env
+    # overrides it only for a LiveKit reached at some other address (a separate media host).
     # Pinned: RaindropServer.Voice.LiveKit/Protos holds the RoomService messages of the protocol this
     # release is built against. Move both together.
     image: livekit/livekit-server:v1.13.7

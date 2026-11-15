@@ -9,7 +9,8 @@ rtc:
   # range of 10,000 UDP ports.
   tcp_port: 7881
   udp_port: 7882
-  # The advertised address comes from --node-ip; do not ask a STUN server for it.
+  # The advertised address comes from --node-ip; do not ask a STUN server for it. At the default,
+  # 127.0.0.1, Raindrop's relay points each client at the address it reached Raindrop by.
   use_external_ip: false
 
 # Only Raindrop connects to the API, and it only ever joins rooms it names itself.

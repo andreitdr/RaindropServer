@@ -12,13 +12,15 @@
   </ItemGroup>
 
   <!-- No LiveKit SDK: the access tokens are plain HS256 JWTs, and the room API is Twirp in its binary
-       protobuf form, over the handful of RoomService messages vendored in Protos/. -->
+       protobuf form, over the handful of RoomService messages vendored in Protos/, beside the three
+       signalling messages that carry ICE candidates, which the relay rewrites. -->
   <ItemGroup>
     <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Protobuf Include="Protos\livekit_room_service.proto" GrpcServices="None" Access="Internal" />
+    <Protobuf Include="Protos\livekit_rtc.proto" GrpcServices="None" Access="Internal" />
   </ItemGroup>
 
   <ItemGroup>

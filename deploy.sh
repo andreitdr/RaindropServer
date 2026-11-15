@@ -487,7 +487,7 @@ if [ "$(state env)" = present ]; then
 else
     printf '  %-10s missing: one will be created with generated passwords (mode 600, on the server only)\n' ".env"
     if [ "$NODE_IP" = "127.0.0.1" ]; then
-        warn "$HOST_ADDR is not an IPv4 address, so LIVEKIT_NODE_IP will be 127.0.0.1: voice would only work on the server itself. Edit it in the server's .env afterwards."
+        printf '  %-10s LiveKit will advertise 127.0.0.1; Raindrop points clients at the address they connect by\n' ""
     else
         printf '  %-10s LiveKit will advertise %s for audio\n' "" "$NODE_IP"
     fi

@@ -95,8 +95,9 @@ With no `.env` in the deploy directory, the first deploy creates one, and the pl
 confirm. It holds generated passwords (read from `/dev/urandom`, so no `openssl` is needed on the server,
 and none is printed),
 `RAINDROP_DEV_WIPE_DATABASE=false`, `LIVEKIT_NODE_IP` set to `--host` when that is an IPv4 address (the
-address LiveKit tells clients to send audio to — anything else, including a name, gets `127.0.0.1` and a
-warning, and voice then only works on the server itself), and Postgres bound to `127.0.0.1` rather than
+address LiveKit tells clients to send audio to — anything else, including a name, gets `127.0.0.1`, which
+works just as well: the signalling relay points each client at the address it reached the server by; see
+[Voice](voice.md#finding-livekits-address)), and Postgres bound to `127.0.0.1` rather than
 published to the network, since only the server container talks to it. Back `.env` up with `data/`:
 `data/postgres` is initialised with that password.
 

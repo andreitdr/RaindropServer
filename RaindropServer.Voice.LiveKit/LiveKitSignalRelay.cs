@@ -1,4 +1,7 @@
+using System.Buffers;
+using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
@@ -19,6 +22,12 @@ namespace RaindropServer.Voice.LiveKit;
 /// this way, whatever LiveKit itself would allow.
 /// <para>
 /// Only LiveKit's signalling paths are forwarded — never its room API.
+/// </para>
+/// <para>
+/// What LiveKit sends the client is forwarded as it came, except for one thing: ICE candidates on a
+/// loopback address are pointed at the address the client reached Raindrop by
+/// (<see cref="LiveKitCandidateRewriter"/>), so a LiveKit container on the same host needs no address
+/// configured for phones and other computers to reach it.
 /// </para>
 /// </remarks>
 public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
@@ -138,6 +147,8 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
             return;
         }
 
+        var reachedAt = await ReachedAtAsync(context, cancellationToken);
+
         using var downstream = await context.WebSockets.AcceptWebSocketAsync();
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopping);
 
@@ -148,7 +159,9 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         try
         {
             var toLiveKit = PumpAsync(downstream, upstream, session.Token);
-            var toClient = PumpAsync(upstream, downstream, session.Token);
+            var toClient = reachedAt is null
+                ? PumpAsync(upstream, downstream, session.Token)
+                : PumpRewritingAsync(upstream, downstream, reachedAt, session.Token);
 
             await Task.WhenAny(toLiveKit, toClient);
             await session.CancelAsync();
@@ -197,6 +210,109 @@ public sealed class LiveKitSignalRelay : IVoiceSignalRelay, IDisposable
         {
             // One side dropped or the relay is shutting down; the caller tears both down.
         }
+    }
+
+    /// <summary>
+    /// Like <see cref="PumpAsync"/>, but each whole binary message is passed through
+    /// <see cref="LiveKitCandidateRewriter"/> before it is sent on. A message larger than
+    /// <see cref="MaximumRewrittenMessageBytes"/> carries no SDP worth rewriting, and is streamed on as
+    /// it arrives rather than held.
+    /// </summary>
+    private static async Task PumpRewritingAsync(
+        WebSocket source, WebSocket destination, IPAddress reachedAt, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[16 * 1024];
+        var message = new ArrayBufferWriter<byte>();
+        var streaming = false;
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var result = await source.ReceiveAsync(buffer, cancellationToken);
+
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    var status = source.CloseStatus is null or WebSocketCloseStatus.Empty
+                        ? WebSocketCloseStatus.NormalClosure
+                        : source.CloseStatus.Value;
+
+                    if (destination.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                        await destination.CloseOutputAsync(status, source.CloseStatusDescription, cancellationToken);
+
+                    return;
+                }
+
+                var chunk = buffer.AsMemory(0, result.Count);
+
+                if (streaming || result.MessageType != WebSocketMessageType.Binary)
+                {
+                    await destination.SendAsync(chunk, result.MessageType, result.EndOfMessage, cancellationToken);
+                    streaming = !result.EndOfMessage;
+                    continue;
+                }
+
+                message.Write(chunk.Span);
+
+                if (!result.EndOfMessage)
+                {
+                    if (message.WrittenCount <= MaximumRewrittenMessageBytes)
+                        continue;
+
+                    // Too large to be a description: send what is held and stream the rest.
+                    await destination.SendAsync(message.WrittenMemory, WebSocketMessageType.Binary, false,
+                        cancellationToken);
+                    message.Clear();
+                    streaming = true;
+                    continue;
+                }
+
+                var outgoing = LiveKitCandidateRewriter.Rewrite(message.WrittenSpan, reachedAt) is { } rewritten
+                    ? rewritten
+                    : message.WrittenMemory;
+
+                await destination.SendAsync(outgoing, WebSocketMessageType.Binary, true, cancellationToken);
+                message.Clear();
+            }
+        }
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
+        {
+            // One side dropped or the relay is shutting down; the caller tears both down.
+        }
+    }
+
+    /// <summary>The largest signalling message held whole to be rewritten. An SDP is a few kilobytes.</summary>
+    private const int MaximumRewrittenMessageBytes = 1024 * 1024;
+
+    /// <summary>
+    /// The address this client reached Raindrop by, from the host it asked for: an address as it is, a
+    /// name resolved here. Null when that is loopback itself (nothing to rewrite: the client is on this
+    /// machine) or cannot be worked out, in which case LiveKit's candidates are forwarded untouched.
+    /// </summary>
+    private static async Task<IPAddress?> ReachedAtAsync(HttpContext context, CancellationToken cancellationToken)
+    {
+        var host = context.Request.Host.Host.Trim('[', ']');
+        if (host.Length == 0)
+            return null;
+
+        if (!IPAddress.TryParse(host, out var address))
+        {
+            try
+            {
+                var addresses = await Dns.GetHostAddressesAsync(host, cancellationToken);
+                address = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                          ?? addresses.FirstOrDefault();
+            }
+            catch (SocketException)
+            {
+                return null;
+            }
+        }
+
+        if (address is null || IPAddress.IsLoopback(address))
+            return null;
+
+        return address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
     }
 
     private static void Abandon(WebSocket socket)

@@ -211,7 +211,9 @@ Protobuf only — see [`docs/wire-formats.md`](docs/wire-formats.md) and Raindro
 text), times are `Timestamp`, crypto blobs are `bytes`, open sets (permissions, channel types, leave
 reasons, capabilities) stay strings and closed ones (presence, user state, role kind, attachment kind,
 upload state) are enums with an `UNSPECIFIED` zero. The only non-protobuf bytes the server handles are
-LiveKit's: its signalling (relayed unread), Twirp's JSON error bodies, and its JWTs.
+LiveKit's: its signalling (relayed as it came, except that loopback ICE candidates are pointed at the
+address the client reached Raindrop by — `LiveKitCandidateRewriter`), Twirp's JSON error bodies, and its
+JWTs.
 
 ### Transport security
 
@@ -572,7 +574,10 @@ names exactly the granted sources, `UpdateParticipant` when that changes mid-cal
   transport registers an `IVoiceSignalRelay`), and `LiveKitSignalRelay` forwards only `rtc` and
   `rtc/validate` — one certificate, LiveKit's HTTP port stays private, and the relay refuses a token
   whose member Raindrop has not admitted to that room. Only LiveKit's media ports (UDP 7882, TCP 7881)
-  face the internet.
+  face the internet. It reads one kind of message on the way to the client: ICE candidates LiveKit
+  advertised on loopback (its default `--node-ip`) are pointed at the address the client reached
+  Raindrop by (`LiveKitCandidateRewriter`, over `Protos/livekit_rtc.proto`), so a co-located LiveKit
+  needs no address configured. Every other message is forwarded byte for byte.
 - **The room API is binary Twirp.** `LiveKitRoomClient` posts `application/protobuf` with the RoomService
   messages vendored in `RaindropServer.Voice.LiveKit/Protos/` (copied from `livekit/protocol` at the
   commit the pinned `livekit/livekit-server` image uses — move the two together); only Twirp's error
@@ -843,8 +848,9 @@ refuses `--dev` credentials; the image is pinned to the release whose RoomServic
 `RaindropServer.Voice.LiveKit/Protos/` holds). `docker compose up -d livekit`, then run with
 `RAINDROP_VOICE_PROVIDER=livekit` and the *same* pair as `RAINDROP_LIVEKIT_API_KEY` /
 `RAINDROP_LIVEKIT_API_SECRET` — LiveKit rejects everything signed with any other secret;
-`LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for audio (127.0.0.1 for clients on
-this machine, the LAN address otherwise).
+`LIVEKIT_NODE_IP` in `.env` is the address LiveKit advertises for audio. Leave it at 127.0.0.1: the
+relay rewrites loopback ICE candidates to the address each client reached Raindrop by, so phones and
+other computers need nothing set; only a LiveKit on another address needs it.
 
 ```bash
 cp .env.example .env   # then set real passwords

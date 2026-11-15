@@ -494,7 +494,7 @@ Put the generated value in `.env`, and give Raindrop the *same* pair:
 ```dotenv
 LIVEKIT_API_KEY=raindrop
 LIVEKIT_API_SECRET=<the generated secret>
-LIVEKIT_NODE_IP=127.0.0.1       # this machine's LAN address when other devices join calls
+LIVEKIT_NODE_IP=127.0.0.1       # leave it: Raindrop points each client at the address it used
 ```
 
 ```bash
@@ -519,13 +519,33 @@ refuses unless you also set `allowWeakSecret`.
 For a real server:
 
 - Give LiveKit its own key and secret — one per deployment, never shared or reused — set
-  `rtc.use_external_ip: true` or `--node-ip`, and keep port 7880 private.
+  keep port 7880 private. Run it on the same host as Raindrop and leave `--node-ip` at `127.0.0.1`
+  (see [Finding LiveKit's address](#finding-livekits-address)); set it, or `rtc.use_external_ip: true`,
+  only for a LiveKit on a host of its own.
 - Open **UDP 7882** (media) and **TCP 7881** (fallback) to the internet.
 
 Raindrop and LiveKit are already packaged together for Docker: `docker-compose.yml` runs a
 `livekit` service from [`livekit.yaml`](../livekit.yaml) and the `server` service depends on it, and
 [`deploy.sh`](deployment.md) carries both to a host. See
 [Local development & Docker](local-development-and-docker.md#livekit-for-voice-channels).
+
+### Finding LiveKit's address
+
+LiveKit runs in a container and cannot see the address its host is reached by, so it advertises its
+`--node-ip`, `127.0.0.1` by default. Nobody has to correct that. `LiveKitSignalRelay` already carries
+every signalling message, and it knows the address each client reached Raindrop by (the host the client
+asked for: an address as it is, a name resolved on the server). On the way to the client,
+`LiveKitCandidateRewriter` replaces every **loopback** ICE candidate — in the SFU's `offer` and `answer`
+SDPs and in each `trickle` — with that address. A loopback node IP says "on the same host as Raindrop",
+and LiveKit's media ports are published on that host, so a client that reached Raindrop can reach them
+there too.
+
+- A client on the server's own machine (`localhost`) is left alone: loopback is right for it.
+- A candidate on any other address was configured on purpose (`--node-ip` set to a public address, or
+  a LiveKit on its own host), and is forwarded untouched, as is every message carrying no candidate.
+- Only those three messages are parsed, from a trimmed copy of `livekit_rtc.proto`
+  (`RaindropServer.Voice.LiveKit/Protos/`); the fields it leaves out are kept as unknown fields and
+  written back as they came. A message too large to be an SDP (over 1 MiB) is streamed on unread.
 
 ### When a participant joins and is removed without a connection
 
@@ -543,7 +563,10 @@ connect:
   build means the app is missing `com.apple.security.network.server` — see the client's
   [Voice doc](../../RaindropClient/docs/voice.md#platform-setup).
 - **`[local]` candidates naming an address the client cannot reach** — `127.0.0.1` when the client
-  is on another machine, or a container address. That is `--node-ip` / `LIVEKIT_NODE_IP`, above.
+  is on another machine, or a container address. With `--node-ip` at `127.0.0.1` the relay rewrites
+  loopback to the address the client used (see [Finding LiveKit's address](#finding-livekits-address)),
+  so a `127.0.0.1` here means the client reached Raindrop by `localhost` from somewhere else, or by a
+  name that resolves to loopback on the server; any other unreachable address is `LIVEKIT_NODE_IP`.
 
 The two shapes of session are worth telling apart, because they have different causes. One that ends
 in ~100 ms with `reason: SIGNAL_SOURCE_CLOSE` is the client tearing its own socket down, normally to

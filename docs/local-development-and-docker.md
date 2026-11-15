@@ -199,9 +199,11 @@ LIVEKIT_KEYS="raindrop: <the same secret>" livekit-server --bind 0.0.0.0 --node-
 `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET=true` alongside `devkey` / `secret` — an escape hatch for a
 throwaway local server, never for one anybody else connects to.
 
-`LIVEKIT_NODE_IP` in `.env` is the address LiveKit tells clients to send audio to — Docker cannot work
-it out from inside the container. `127.0.0.1` is right when every client runs on this machine; use this
-machine's LAN address when a phone or another computer joins. Port 7880 (the API and signalling) is
+`LIVEKIT_NODE_IP` in `.env` is the address LiveKit tells clients to send audio to. Docker cannot work
+it out from inside the container, and nothing has to: leave it at `127.0.0.1`, and Raindrop's
+signalling relay points each client's ICE candidates at the address that client reached Raindrop by — a
+phone that connected to `192.168.1.20` is told to send its audio to `192.168.1.20`. Set it only when
+LiveKit runs somewhere clients reach at a different address from Raindrop's. Port 7880 (the API and signalling) is
 published on loopback only: clients reach it through Raindrop's relay, never directly. 7881/TCP and
 7882/UDP carry the media and are what clients connect to.
 
