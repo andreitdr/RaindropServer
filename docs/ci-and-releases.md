@@ -14,6 +14,12 @@ Runs on every push to `main`, and is also called as the first stage of `release.
 | `build` | `ubuntu-latest` | `dotnet restore` then `dotnet build RaindropServer.sln -c Release` on .NET 10 |
 | `test` | `ubuntu-latest`, after `build` | `dotnet test -c Release`, uploading `test-results/results.trx` as an artifact (even on failure) |
 
+**Warnings are errors.** [`Directory.Build.props`](../Directory.Build.props) sets
+`TreatWarningsAsErrors` for every project in the solution, so any compiler, nullable, analyser or
+NuGet-audit warning (a package with a known vulnerability) fails `build` — and the `package` job's
+`dotnet publish` on every OS. Because `release.yml` needs both, **no release is published while any
+platform has a compilation error or a warning.** Fix the warning; do not suppress it.
+
 The tests are the ones in [`RaindropServer.Tests`](../RaindropServer.Tests) — see
 [Local development & Docker](local-development-and-docker.md) for what they cover and how to
 run them locally. They need no database server: the suite uses SQLite.
@@ -23,7 +29,7 @@ run them locally. They need no database server: the suite uses SQLite.
 Triggered by a pushed version tag matching `v[0-9]+.[0-9]+.[0-9]+`.
 
 1. **`ci`** — reruns `ci.yml` against the tagged commit, so nothing is published that did not build
-   and pass its tests.
+   without a warning and pass its tests.
 2. **`package`** — a matrix of `ubuntu-latest` (`linux-x64`), `macos-latest` (`osx-arm64`) and
    `windows-latest` (`win-x64`). Each publishes `ServerCli` **self-contained** (`--self-contained
    true`, `-p:Version=<tag without v>`), so a host needs no .NET installed, deletes the development
@@ -46,7 +52,7 @@ tagging) or taken from `--notes-dir DIR/<Repo>.md`. Tagging by hand
 - No deployment. `release.yml` publishes artefacts; [`deploy.sh`](deployment.md) is run by hand.
 - No Docker image is pushed to a registry. The [image](local-development-and-docker.md#building-the-docker-image)
   is built on the target host during a deploy.
-- No linting or analysers beyond what `dotnet build` reports as warnings.
+- No linting or analysers beyond what `dotnet build` reports as warnings (which fail the build).
 - No PR trigger: the workflow is `push` to `main` only.
 
 ## Related

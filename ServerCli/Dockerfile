@@ -11,7 +11,9 @@ ARG BUILD_CONFIGURATION=Release
 WORKDIR /src/RaindropServer
 COPY --from=raindrop_proto raindrop /src/RaindropProto/raindrop
 # Every referenced project's file has to be here for the restore to resolve, and copying only the
-# project files keeps this layer cached until a dependency actually changes.
+# project files keeps this layer cached until a dependency actually changes. Directory.Build.props
+# comes first so the restore already treats warnings (a vulnerable package) as errors.
+COPY ["Directory.Build.props", "./"]
 COPY ["ServerCli/ServerCli.csproj", "ServerCli/"]
 COPY ["RaindropServer/RaindropServer.csproj", "RaindropServer/"]
 COPY ["RaindropServer.Grpc/RaindropServer.Grpc.csproj", "RaindropServer.Grpc/"]

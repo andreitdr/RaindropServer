@@ -122,6 +122,18 @@ inside the container — that the server's identity key did not change. `--dry-r
 deploying an older ref is the rollback. State (`data/`, `.env`) lives outside the build context on the
 server and is never touched.
 
+## Warnings are errors; no release with either
+
+**A release cannot be published while any platform has a compilation error, and every warning is an
+error.** `Directory.Build.props` sets `TreatWarningsAsErrors` (and `MSBuildTreatWarningsAsErrors`) for
+every project, so a compiler, nullable, analyser or NuGet-audit warning (a dependency with a known
+vulnerability) fails `dotnet build` locally, in `ci.yml`, and in each OS's `dotnet publish` in
+`release.yml` (Linux, macOS, Windows) — and nothing is published unless all of those succeed. When you
+see a warning, fix it in the same change; never add `NoWarn`, `#pragma warning disable` or
+`TreatWarningsAsErrors=false` to get a build through. A vulnerable transitive package is fixed by
+referencing a patched version directly. A new project inherits the props file automatically; keep it
+that way. See [`docs/ci-and-releases.md`](docs/ci-and-releases.md).
+
 ## Architecture
 
 A solution of eight projects targeting `net10.0` (the eighth, `RaindropServer.Tests`, is the xUnit

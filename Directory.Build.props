@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    Applies to every project in the solution.
+
+    Warnings are errors. A release cannot be published while any platform fails to compile, and a
+    warning counts as a failure: compiler warnings, nullable warnings, analyser warnings and NuGet
+    audit warnings (a dependency with a known vulnerability) all stop `dotnet build`, so they stop
+    ci.yml and every OS's `dotnet publish` in release.yml. Fix the cause; do not add NoWarn to get a
+    build through.
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <MSBuildTreatWarningsAsErrors>true</MSBuildTreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

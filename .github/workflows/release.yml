@@ -12,6 +12,8 @@ permissions:
   contents: read
 
 jobs:
+  # Every platform must compile with no error and no warning (warnings are errors), and the tests
+  # must pass, or nothing below runs and no release is published.
   ci:
     name: Build and test
     uses: ./.github/workflows/ci.yml
@@ -85,11 +87,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
         # The release notes are the changelog release.sh wrote into the annotated tag (its message minus
         # the subject line). A lightweight tag pushed by hand has none, so GitHub generates notes instead.
-            --verify-tag \
+        run: |
           ref="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
           if [ "$(jq -r .object.type <<< "$ref")" = tag ]; then
             gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<< "$ref")" --jq .message | tail -n +3 > notes.md
@@ -99,5 +99,7 @@ jobs:
           else
             notes=(--generate-notes)
           fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
             --title "$GITHUB_REF_NAME" \
             "${notes[@]}"
