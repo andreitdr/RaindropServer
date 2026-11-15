@@ -542,3 +542,77 @@ public class DeviceAuthTests
         throttle.Check("10.0.0.1");
     }
 }
+
+/// <summary>The vault and authenticator stores, on every database the suite is pointed at.</summary>
+public class AccountSecurityStoreTests
+{
+    private static string Lookup() => Guid.NewGuid().ToString("N");
+
+    [Theory]
+    [MemberData(nameof(TestDatabases.Providers), MemberType = typeof(TestDatabases))]
+    public async Task A_vault_is_replaced_in_place_and_its_lookup_id_belongs_to_one_user(string provider)
+    {
+        var (driver, options) = await TestDatabases.OpenAsync(provider);
+        var vaults = driver.CreateIdentityVaultStore(options);
+        var (alice, bob) = (Guid.NewGuid(), Guid.NewGuid());
+        var lookup = Lookup();
+
+        Assert.True(await vaults.PutAsync(new IdentityVaultRecord(alice, lookup, [1], [2], DateTime.UtcNow), default));
+        Assert.True(await vaults.PutAsync(new IdentityVaultRecord(alice, lookup, [1], [3, 3], DateTime.UtcNow), default));
+        Assert.Equal([3, 3], (await vaults.FindAsync(alice, default))!.Vault);
+        Assert.Equal(alice, (await vaults.FindByLookupAsync(lookup, default))!.UserId);
+
+        // Somebody else cannot take the lookup id, by insert or by update.
+        Assert.False(await vaults.PutAsync(new IdentityVaultRecord(bob, lookup, [9], [9], DateTime.UtcNow), default));
+        var bobs = Lookup();
+        Assert.True(await vaults.PutAsync(new IdentityVaultRecord(bob, bobs, [9], [9], DateTime.UtcNow), default));
+        Assert.False(await vaults.PutAsync(new IdentityVaultRecord(bob, lookup, [9], [9], DateTime.UtcNow), default));
+        Assert.Equal(bobs, (await vaults.FindAsync(bob, default))!.LookupId);
+
+        // Racing first writes for one user leave one row, not an error.
+        var carol = Guid.NewGuid();
+        var carols = Lookup();
+        var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Task.Run(() =>
+            vaults.PutAsync(new IdentityVaultRecord(carol, carols, [(byte)i], [(byte)i], DateTime.UtcNow), default))));
+        Assert.All(results, Assert.True);
+        Assert.NotNull(await vaults.FindAsync(carol, default));
+
+        await vaults.DeleteAsync(alice, default);
+        Assert.Null(await vaults.FindByLookupAsync(lookup, default));
+    }
+
+    [Theory]
+    [MemberData(nameof(TestDatabases.Providers), MemberType = typeof(TestDatabases))]
+    public async Task An_authenticator_step_and_a_backup_code_are_each_spent_exactly_once(string provider)
+    {
+        var (driver, options) = await TestDatabases.OpenAsync(provider);
+        var authenticators = driver.CreateAuthenticatorStore(options);
+        var user = Guid.NewGuid();
+        string[] codes = ["AAAA", "BBBB", "CCCC"];
+
+        await authenticators.PutAsync(new AuthenticatorRecord(user, [1, 2, 3], codes, 100, DateTime.UtcNow), default);
+        var stored = (await authenticators.FindAsync(user, default))!;
+        Assert.Equal([1, 2, 3], stored.Secret);
+        Assert.Equal(codes, stored.BackupCodeHashes);
+        Assert.Equal(100, stored.LastUsedStep);
+
+        // Sixteen requests present the same code at once: one is let through.
+        var steps = await Task.WhenAll(Enumerable.Range(0, 16)
+            .Select(_ => Task.Run(() => authenticators.TryAdvanceStepAsync(user, 101, default))));
+        Assert.Equal(1, steps.Count(accepted => accepted));
+        Assert.False(await authenticators.TryAdvanceStepAsync(user, 100, default));
+
+        // And the same backup code.
+        string[] remaining = ["AAAA", "CCCC"];
+        var spent = await Task.WhenAll(Enumerable.Range(0, 16)
+            .Select(_ => Task.Run(() => authenticators.TryReplaceBackupCodesAsync(user, codes, remaining, default))));
+        Assert.Equal(1, spent.Count(accepted => accepted));
+        Assert.Equal(remaining, (await authenticators.FindAsync(user, default))!.BackupCodeHashes);
+
+        // Replacing the authenticator starts over.
+        await authenticators.PutAsync(new AuthenticatorRecord(user, [7], [], 5, DateTime.UtcNow), default);
+        Assert.Empty((await authenticators.FindAsync(user, default))!.BackupCodeHashes);
+        await authenticators.DeleteAsync(user, default);
+        Assert.Null(await authenticators.FindAsync(user, default));
+    }
+}
