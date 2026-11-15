@@ -29,12 +29,17 @@ Triggered by a pushed version tag matching `v[0-9]+.[0-9]+.[0-9]+`.
    true`, `-p:Version=<tag without v>`), so a host needs no .NET installed, deletes the development
    `raindrop.db` that publishing leaves behind, and packs the folder — `.tar.gz` on Linux and macOS
    (tar keeps the executable bit), `.zip` on Windows.
-3. **`release`** — downloads every package and runs `gh release create <tag> dist/* --verify-tag
-   --generate-notes`. GitHub adds the source archives itself.
+3. **`release`** — reads the changelog from the annotated tag (its message minus the subject line,
+   written there by `release.sh`) and runs `gh release create <tag> dist/* --verify-tag
+   --notes-file notes.md`, so the changelog becomes the release notes. A lightweight tag pushed by
+   hand carries none, and the release falls back to `--generate-notes`. GitHub adds the source archives itself.
 
 Each project is tagged in its own repository, and the workflow comments point at a `release.sh` in
-the folder that holds all three checkouts. That script is not part of this repository — tagging by
-hand (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers the same workflow.
+the folder that holds all three checkouts. That script is not part of this repository. Every release
+it makes carries a changelog: drafted from the commit subjects since the previous tag (editable before
+tagging) or taken from `--notes-dir DIR/<Repo>.md`. Tagging by hand
+(`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers the same workflow; use an annotated tag
+(`git tag -a vX.Y.Z --cleanup=verbatim -F notes`) to keep the changelog.
 
 ## What CI does not do
 

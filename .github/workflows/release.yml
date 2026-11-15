@@ -87,6 +87,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
+        # The release notes are the changelog release.sh wrote into the annotated tag (its message minus
+        # the subject line). A lightweight tag pushed by hand has none, so GitHub generates notes instead.
             --verify-tag \
+          ref="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
+          if [ "$(jq -r .object.type <<< "$ref")" = tag ]; then
+            gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<< "$ref")" --jq .message | tail -n +3 > notes.md
+          fi
+          if [ -f notes.md ] && grep -q '[^[:space:]]' notes.md; then
+            notes=(--notes-file notes.md)
+          else
+            notes=(--generate-notes)
+          fi
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            "${notes[@]}"
