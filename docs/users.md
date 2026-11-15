@@ -42,6 +42,44 @@ The state machine to keep straight is [`UserStatus`](../RaindropServer/Users/Use
   again from scratch later. The same goes for the copies of their *deleted* messages in the
   [archive](messages.md#the-deleted-message-archive): erasing an account does not erase them.
 
+## Signing in with a device key
+
+`E2ee/DeviceAuthService`, served as `UserService.BeginAuth` and `CompleteAuth` (both anonymous). **This is
+how the client signs in. The password calls still exist beside it but the app no longer calls them;
+removing them is still to do.**
+An account belongs to whoever holds a device key that the account's identity key has certified.
+
+1. `BeginAuth(user_id)` returns a 32-byte nonce, good once, for `E2eeOptions.ChallengeLifetime`. The answer
+   is the same whether or not the UUID has an account. At most 20,000 challenges are outstanding at once
+   (`auth_busy` beyond that, after lapsed ones are dropped).
+2. The device signs `"raindrop/auth/v1\n" ‖ u16 length of this server's identity key ‖ that key ‖ nonce`
+   with its device key (`DeviceAuthService.SignedBytes`, mirroring `Session::sign_auth_challenge` in the
+   Rust core). The server's own key is in there so a challenge relayed between servers is useless.
+3. `CompleteAuth` uses the challenge up, verifies the signature, and then:
+
+| The device is… | Needs | What happens |
+|---|---|---|
+| Registered and active | signature | Signs in |
+| New to an active account | signature + certificate | The certificate must be signed by the account's identity key (`identity_mismatch` otherwise); the device is registered, then signs in |
+| The first for a UUID with no account (or an erased one) | signature + certificate + username | The account is created with **no password**, the certificate establishes its identity key |
+| Anything on an account that left with data preserved | as above | The account is restored |
+
+The session is **bound to the device from the start** (`UserService.OpenDeviceSessionAsync`), so there is
+no separate `BindSession` step. Other sessions of the account are left alone.
+
+Refusals that would say whether a UUID or device exists are all `invalid_credentials`: an unknown device
+with no certificate, a certificate about another user or device, a bad signature, a revoked device
+presenting only its signature, and an account that has a password but has never had a device — letting a
+certificate establish *that* account's identity would hand it to whoever asked first. A server with no
+identity key answers `auth_unavailable`.
+
+A device new to an account that has an authenticator must also send `authenticator_code`
+(`authenticator_required`, `invalid_authenticator_code`, `authenticator_locked`), and both calls are
+rate-limited per address — see [E2EE](e2ee.md#identity-vault-authenticator-and-pairing).
+
+Not built yet: removing the password calls. `LeaveServer` and `ResetIdentity` already accept a
+device-bound session in place of a password for an account that has none. See the [roadmap](roadmap.md).
+
 ## Password hashing
 
 PBKDF2-HMAC-SHA256, 210,000 iterations, per-password salt

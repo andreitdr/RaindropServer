@@ -189,6 +189,31 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_identity_vaults (
+            user_id     varchar(36) NOT NULL PRIMARY KEY,
+            lookup_id   varchar(64) NOT NULL,
+            sealed_root bytea       NOT NULL,
+            vault       bytea       NOT NULL,
+            updated_at  timestamptz NOT NULL
+        )
+        """,
+
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_raindrop_identity_vaults_lookup
+            ON raindrop_identity_vaults (lookup_id)
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_authenticators (
+            user_id      varchar(36) NOT NULL PRIMARY KEY,
+            secret       bytea       NOT NULL,
+            backup_codes text        NOT NULL,
+            last_step    bigint      NOT NULL,
+            created_at   timestamptz NOT NULL
+        )
+        """,
+
         // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
         """
         CREATE TABLE IF NOT EXISTS raindrop_mls_groups (

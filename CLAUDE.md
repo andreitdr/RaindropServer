@@ -169,8 +169,8 @@ contract records are not protobuf types and must stay that way.
 
 - **Authentication**: `RaindropInterceptor` resolves `authorization: Bearer <token>` metadata through
   `ISessionStore.TryValidate` before any handler runs (`missing_token`, `invalid_session`) — for every
-  call shape, streams included. A method marked `[AllowAnonymous]` skips it; six do (`GetServerInfo`
-  and the five sign-in calls). Handlers read the caller with `context.Session()`.
+  call shape, streams included. A method marked `[AllowAnonymous]` skips it; eleven do (`GetServerInfo`,
+  the five password sign-in calls, `BeginAuth`/`CompleteAuth`, and `GetSealedRoot`/`StartPairing`/`TakePairingApproval`). Handlers read the caller with `context.Session()`.
 - **Errors**: services and the library throw `ApiException` (`ApiException.Conflict("username_taken",
   …)`). Its `ApiErrorKind` picks the gRPC status (BadRequest→INVALID_ARGUMENT, Unauthorized→
   UNAUTHENTICATED, Forbidden→PERMISSION_DENIED, NotFound→NOT_FOUND, Conflict→FAILED_PRECONDITION,
@@ -661,7 +661,8 @@ it a unique `Name`. The tables are `raindrop_users`, `raindrop_channels`, `raind
 `raindrop_roles`, `raindrop_member_roles`, `raindrop_deleted_messages` (the owner-only archive of deleted
 message text), `raindrop_permission_rollouts` (which one-time permission grants this database has had),
 `raindrop_voice_mutes` (members muted for everyone), and for end-to-end encryption
-`raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, and the delivery service's
+`raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, `raindrop_identity_vaults`,
+`raindrop_authenticators`, and the delivery service's
 `raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`,
 `raindrop_encrypted_messages` and `raindrop_message_reports`, and `raindrop_attachments` (records of
 encrypted files; the bytes live in `IAttachmentStorage`) — everything after the first five added as new

@@ -42,7 +42,8 @@ public sealed class GrpcServer : IAsyncDisposable
     public static async Task<GrpcServer> StartAsync(
         Action<EventOptions>? events = null,
         IVoiceTransport? voice = null,
-        Action<VoiceOptions>? configureVoice = null)
+        Action<VoiceOptions>? configureVoice = null,
+        ServerIdentity? identity = null)
     {
         var folder = Path.Combine(Path.GetTempPath(), $"raindrop-grpc-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
@@ -53,6 +54,10 @@ public sealed class GrpcServer : IAsyncDisposable
         // claimed the seam — the same ordering AddRaindropLiveKit relies on.
         if (voice is not null)
             services.AddSingleton(voice);
+
+        // Likewise: the library only fills in its placeholder identity when the host gave none.
+        if (identity is not null)
+            services.AddSingleton(identity);
 
         services.AddRaindropServer(
             configureVoice: configureVoice,
@@ -149,6 +154,93 @@ public class GrpcTests
         var me = await users.GetMeAsync(new Proto.GetMeRequest(), GrpcServer.As(token));
         Assert.Equal(userId, me.User.UserId);
         Assert.Equal(Proto.UserState.Active, me.User.State);
+    }
+
+    [Fact]
+    public async Task A_device_signs_in_without_a_password_and_its_session_is_bound()
+    {
+        byte[] serverKey = [0x04, .. Enumerable.Repeat((byte)7, 64)];
+        await using var server = await GrpcServer.StartAsync(
+            identity: new ServerIdentity(ServerIdentity.CurrentProtocolVersion, null, serverKey));
+        var users = new Proto.UserService.UserServiceClient(server.Channel);
+        var phone = new TestIdentity().NewDevice();
+        var userId = phone.Owner.UserId.ToString("D");
+
+        // Both calls are anonymous: there is no session yet to send.
+        var challenge = await users.BeginAuthAsync(new Proto.BeginAuthRequest { UserId = userId });
+        var nonce = challenge.Nonce.ToByteArray();
+        var request = new Proto.CompleteAuthRequest
+        {
+            UserId = userId,
+            DeviceId = phone.DeviceId.ToString("D"),
+            Nonce = challenge.Nonce,
+            Signature = ByteString.CopyFrom(phone.SignChallenge(serverKey, nonce)),
+            Certificate = ByteString.CopyFrom(phone.Certificate),
+            Username = "alice"
+        };
+        var session = (await users.CompleteAuthAsync(request)).Session;
+
+        var me = await users.GetMeAsync(new Proto.GetMeRequest(), GrpcServer.As(session.Token));
+        Assert.Equal("alice", me.User.Username);
+
+        // Bound from the start: a call that needs a device-bound session goes through at once.
+        var devices = new Proto.DeviceService.DeviceServiceClient(server.Channel);
+        await devices.PutKeyBackupAsync(
+            new Proto.PutKeyBackupRequest { Blob = ByteString.CopyFromUtf8("sealed") }, GrpcServer.As(session.Token));
+
+        var replayed = await Refused(async () => await users.CompleteAuthAsync(request));
+        Assert.Equal(StatusCode.Unauthenticated, replayed.StatusCode);
+        Assert.Equal("invalid_challenge", ReasonOf(replayed));
+    }
+
+    [Fact]
+    public async Task Recovery_and_pairing_start_without_a_session_and_are_rate_limited()
+    {
+        await using var server = await GrpcServer.StartAsync();
+        var devices = new Proto.DeviceService.DeviceServiceClient(server.Channel);
+
+        var missing = await Refused(async () => await devices.GetSealedRootAsync(
+            new Proto.GetSealedRootRequest { LookupId = "0123456789abcdef0123456789abcdef" }));
+        Assert.Equal(StatusCode.NotFound, missing.StatusCode);
+        Assert.Equal("vault_not_found", ReasonOf(missing));
+
+        var started = await devices.StartPairingAsync(new Proto.StartPairingRequest { Offer = ByteString.CopyFromUtf8("offer") });
+        var waiting = await devices.TakePairingApprovalAsync(
+            new Proto.TakePairingApprovalRequest { PairingId = started.PairingId, TakeToken = started.TakeToken });
+        Assert.False(waiting.HasApproval);
+
+        // The other half of a pairing is a member's: it needs a session.
+        var anonymous = await Refused(async () => await devices.GetPairingOfferAsync(
+            new Proto.GetPairingOfferRequest { PairingId = started.PairingId }));
+        Assert.Equal("missing_token", ReasonOf(anonymous));
+
+        // Sixty a minute from one address; two are spent above.
+        RpcException? limited = null;
+        for (var call = 0; call < 60 && limited is null; call++)
+        {
+            try
+            {
+                await devices.StartPairingAsync(new Proto.StartPairingRequest { Offer = ByteString.CopyFromUtf8("offer") });
+            }
+            catch (RpcException exception)
+            {
+                limited = exception;
+            }
+        }
+
+        Assert.Equal(StatusCode.ResourceExhausted, limited!.StatusCode);
+        Assert.Equal("rate_limited", ReasonOf(limited));
+    }
+
+    [Fact]
+    public async Task A_server_without_an_identity_key_refuses_device_sign_in()
+    {
+        await using var server = await GrpcServer.StartAsync();
+        var refused = await Refused(async () => await new Proto.UserService.UserServiceClient(server.Channel)
+            .BeginAuthAsync(new Proto.BeginAuthRequest { UserId = Guid.NewGuid().ToString("D") }));
+
+        Assert.Equal(StatusCode.Unavailable, refused.StatusCode);
+        Assert.Equal("auth_unavailable", ReasonOf(refused));
     }
 
     // ── How a refusal arrives ────────────────────────────────────────────────
@@ -1182,6 +1274,44 @@ public class VoiceSignalLossGrpcTests
         }
 
         Assert.Fail("The member was still in the call long after their signalling connection closed.");
+    }
+
+    /// <summary>
+    /// The same person on a second device: joining the call they are already in moves it there. There
+    /// is one of them in the call throughout, the device they left can no longer end it, and the one
+    /// they moved to can.
+    /// </summary>
+    [Fact]
+    public async Task Joining_from_a_second_device_moves_the_call_to_it()
+    {
+        var (server, channel, phone, userId) = await InCallAsync();
+        await using var _server = server;
+        var voice = new Proto.VoiceService.VoiceServiceClient(server.Channel);
+        var channelId = channel.ToString("D");
+
+        var laptop = (await new Proto.UserService.UserServiceClient(server.Channel).LoginAsync(
+            new Proto.LoginRequest { UserId = userId.ToString("D"), Password = "correct horse battery" })).Session.Token;
+        var joined = await voice.JoinVoiceAsync(new Proto.JoinVoiceRequest { ChannelId = channelId }, GrpcServer.As(laptop));
+
+        Assert.Single(joined.Participants, participant => participant.UserId == userId.ToString("D"));
+        Assert.Equal(laptop, (await RecordOf(server, userId))!.SessionToken);
+
+        // The phone's leave arrives late, as it does when its app notices it was replaced.
+        var late = await voice.LeaveVoiceAsync(new Proto.LeaveVoiceRequest { ChannelId = channelId }, GrpcServer.As(phone));
+        Assert.False(late.Left);
+        Assert.NotNull(await RecordOf(server, userId));
+
+        // Nor does the phone's connection closing take the laptop out of the call.
+        var monitor = server.Services.GetRequiredService<IVoiceSignalMonitor>();
+        monitor.SignalOpened(channel, userId);
+        monitor.SignalOpened(channel, userId);
+        monitor.SignalClosed(channel, userId);
+        await Task.Delay(Grace * 3);
+        Assert.NotNull(await RecordOf(server, userId));
+
+        var left = await voice.LeaveVoiceAsync(new Proto.LeaveVoiceRequest { ChannelId = channelId }, GrpcServer.As(laptop));
+        Assert.True(left.Left);
+        Assert.Null(await RecordOf(server, userId));
     }
 
     [Fact]

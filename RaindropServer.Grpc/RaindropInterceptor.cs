@@ -150,4 +150,11 @@ public sealed class RaindropInterceptor : Interceptor
 public static class ServerCallContextExtensions
 {
     public static UserSession Session(this ServerCallContext context) => RaindropInterceptor.SessionOf(context);
+
+    /// <summary>
+    /// Who is calling, for limiting calls that carry no session: the remote address. Everybody behind
+    /// one address shares a limit, which is the price of there being nothing else to tell them apart by.
+    /// </summary>
+    public static string Caller(this ServerCallContext context) =>
+        context.GetHttpContext().Connection.RemoteIpAddress?.ToString() ?? "local";
 }

@@ -88,20 +88,31 @@ public sealed class DeviceService
         UserSession session, RegisterDeviceRequest request, CancellationToken cancellationToken)
     {
         await RequireActiveAsync(session, cancellationToken);
+        return ToSummary(await RegisterCertificateAsync(session.UserId, request.Certificate, cancellationToken));
+    }
 
-        var certificate = DeviceCertificate.Parse(request.Certificate);
-        if (certificate.UserId != session.UserId)
+    /// <summary>
+    /// The rule behind <see cref="RegisterDeviceAsync"/>, for a caller that has already established
+    /// who <paramref name="userId"/> is — a session, or <see cref="DeviceAuthService"/> signing a
+    /// device in. The certificate must be about that user and signed by their identity key; when they
+    /// have none yet this device establishes it.
+    /// </summary>
+    public async Task<DeviceRecord> RegisterCertificateAsync(
+        Guid userId, byte[]? certificateBytes, CancellationToken cancellationToken)
+    {
+        var certificate = DeviceCertificate.Parse(certificateBytes);
+        if (certificate.UserId != userId)
             throw ApiException.Forbidden("certificate_mismatch", "That certificate is for a different user.");
         if (!certificate.IsSignatureValid())
             throw ApiException.BadRequest("invalid_certificate", "The certificate's signature does not verify.");
 
         var now = UtcNow;
-        var identity = await _devices.FindIdentityAsync(session.UserId, cancellationToken);
+        var identity = await _devices.FindIdentityAsync(userId, cancellationToken);
         if (identity is null)
         {
             await _devices.TryCreateIdentityAsync(
-                new UserIdentityRecord(session.UserId, certificate.UserIdentityKey, now), cancellationToken);
-            identity = await _devices.FindIdentityAsync(session.UserId, cancellationToken);
+                new UserIdentityRecord(userId, certificate.UserIdentityKey, now), cancellationToken);
+            identity = await _devices.FindIdentityAsync(userId, cancellationToken);
         }
 
         if (identity is null || !CryptographicOperations.FixedTimeEquals(identity.IdentityKey, certificate.UserIdentityKey))
@@ -109,21 +120,21 @@ public sealed class DeviceService
                 "That certificate was signed by a different identity key than this account's. Link this device " +
                 "from one you already have, restore your key backup, or reset your identity.");
 
-        if (await _devices.FindDeviceAsync(session.UserId, certificate.DeviceId, cancellationToken) is { } existing)
+        if (await _devices.FindDeviceAsync(userId, certificate.DeviceId, cancellationToken) is { } existing)
         {
-            if (existing.IsActive && existing.Certificate.AsSpan().SequenceEqual(request.Certificate))
-                return ToSummary(existing);
+            if (existing.IsActive && existing.Certificate.AsSpan().SequenceEqual(certificateBytes))
+                return existing;
 
             throw ApiException.Conflict("device_exists", "This account already has a device with that id.");
         }
 
-        var active = await _devices.ListDevicesAsync([session.UserId], includeRevoked: false, cancellationToken);
+        var active = await _devices.ListDevicesAsync([userId], includeRevoked: false, cancellationToken);
         if (active.Count >= _options.MaximumDevicesPerUser)
             throw ApiException.Conflict("too_many_devices",
                 $"An account may have at most {_options.MaximumDevicesPerUser} devices. Revoke one first.");
 
         var device = new DeviceRecord(
-            session.UserId, certificate.DeviceId, certificate.DeviceSignatureKey, request.Certificate, now, null);
+            userId, certificate.DeviceId, certificate.DeviceSignatureKey, certificateBytes!, now, null);
 
         if (!await _devices.AddDeviceAsync(device, cancellationToken))
             throw ApiException.Conflict("device_exists", "This account already has a device with that id.");
@@ -132,7 +143,7 @@ public sealed class DeviceService
         await _events.PublishAsync(E2eeEventTypes.DeviceAdded,
             new DeviceEvent(device.UserId, device.DeviceId, device.Certificate));
 
-        return ToSummary(device);
+        return device;
     }
 
     /// <summary>The identity keys and active devices of the given users: what a client needs to check them.</summary>
@@ -192,7 +203,13 @@ public sealed class DeviceService
         UserSession session, ResetIdentityRequest request, CancellationToken cancellationToken)
     {
         var user = await RequireActiveAsync(session, cancellationToken);
-        if (user.PasswordHash is null || !_hasher.Verify(request.Password ?? string.Empty, user.PasswordHash))
+        // An account made by a device has no password: a session bound to one of its devices is the
+        // proof instead. (Its identity is derived from the owner's root, so the device that registers
+        // next re-establishes the same key — a reset there clears devices rather than changing who the
+        // account is.)
+        if (user.PasswordHash is null)
+            RequireBound(session);
+        else if (!_hasher.Verify(request.Password ?? string.Empty, user.PasswordHash))
             throw ApiException.Unauthorized("invalid_credentials", "The password is incorrect.");
 
         await EraseAsync(session.UserId, cancellationToken);

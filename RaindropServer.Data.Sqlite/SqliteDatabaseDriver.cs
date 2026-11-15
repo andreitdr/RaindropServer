@@ -188,6 +188,33 @@ public sealed class SqliteDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        // A person's sealed root and vault, and their authenticator. Opaque to the server but for
+        // the authenticator secret, which it has to hold to check a code.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_identity_vaults (
+            user_id     TEXT NOT NULL PRIMARY KEY,
+            lookup_id   TEXT NOT NULL,
+            sealed_root BLOB NOT NULL,
+            vault       BLOB NOT NULL,
+            updated_at  TEXT NOT NULL
+        )
+        """,
+
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_raindrop_identity_vaults_lookup
+            ON raindrop_identity_vaults (lookup_id)
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_authenticators (
+            user_id      TEXT    NOT NULL PRIMARY KEY,
+            secret       BLOB    NOT NULL,
+            backup_codes TEXT    NOT NULL,
+            last_step    INTEGER NOT NULL,
+            created_at   TEXT    NOT NULL
+        )
+        """,
+
         // The MLS delivery service: groups (one per channel), their commit logs, devices' key
         // packages and pending Welcomes. Every message is opaque; the server cannot read any of it.
         // The commit log's key (channel_id, epoch) is what refuses a second commit for an epoch.

@@ -67,6 +67,14 @@ public interface IDatabaseDriver
     IKeyBackupStore CreateKeyBackupStore(DatabaseOptions options) =>
         throw new NotSupportedException($"The '{Name}' database driver does not support key backups.");
 
+    /// <summary>Creates the persistence for identity vaults. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IIdentityVaultStore CreateIdentityVaultStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support identity vaults.");
+
+    /// <summary>Creates the persistence for authenticators. Same default as <see cref="CreateDeviceStore"/>.</summary>
+    IAuthenticatorStore CreateAuthenticatorStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support authenticators.");
+
     /// <summary>
     /// Creates the MLS delivery service's persistence for groups and their commit logs. Same default
     /// as <see cref="CreateDeviceStore"/>.

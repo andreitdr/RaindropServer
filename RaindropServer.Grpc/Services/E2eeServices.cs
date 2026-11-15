@@ -1,6 +1,8 @@
 using Grpc.Core;
+using Microsoft.AspNetCore.Authorization;
 using RaindropServer.E2ee;
 using RaindropServer.Grpc.Mapping;
+using RaindropServer.Security;
 using static RaindropServer.Grpc.Mapping.Wire;
 using Proto = RaindropServer.Grpc.Protocol;
 
@@ -13,8 +15,114 @@ namespace RaindropServer.Grpc.Services;
 public sealed class DeviceGrpcService : Proto.DeviceService.DeviceServiceBase
 {
     private readonly DeviceService _devices;
+    private readonly AccountSecurityService _security;
+    private readonly RequestThrottle _throttle;
 
-    public DeviceGrpcService(DeviceService devices) => _devices = devices;
+    public DeviceGrpcService(DeviceService devices, AccountSecurityService security, RequestThrottle throttle)
+    {
+        _devices = devices;
+        _security = security;
+        _throttle = throttle;
+    }
+
+    // ── Identity vault, authenticator and pairing: every rule is AccountSecurityService's ──
+
+    public override async Task<Proto.PutIdentityVaultResponse> PutIdentityVault(
+        Proto.PutIdentityVaultRequest request, ServerCallContext context) =>
+        new()
+        {
+            UpdatedAt = Time(await _security.PutVaultAsync(context.Session(),
+                new PutIdentityVaultRequest(request.LookupId, request.SealedRoot.ToByteArray(), request.Vault.ToByteArray()),
+                context.CancellationToken))
+        };
+
+    public override async Task<Proto.GetIdentityVaultResponse> GetIdentityVault(
+        Proto.GetIdentityVaultRequest request, ServerCallContext context)
+    {
+        var vault = await _security.GetVaultAsync(context.Session(), context.CancellationToken);
+
+        var response = new Proto.GetIdentityVaultResponse();
+        if (vault.LookupId is { } lookupId)
+            response.LookupId = lookupId;
+        if (vault.SealedRoot is { } sealedRoot)
+            response.SealedRoot = Bytes(sealedRoot);
+        if (vault.Vault is { } blob)
+            response.Vault = Bytes(blob);
+        if (vault.UpdatedAtUtc is { } updated)
+            response.UpdatedAt = Time(updated);
+        return response;
+    }
+
+    [AllowAnonymous]
+    public override async Task<Proto.GetSealedRootResponse> GetSealedRoot(
+        Proto.GetSealedRootRequest request, ServerCallContext context)
+    {
+        _throttle.Check(context.Caller());
+        return new Proto.GetSealedRootResponse
+        {
+            SealedRoot = Bytes(await _security.GetSealedRootAsync(request.LookupId, context.CancellationToken))
+        };
+    }
+
+    public override async Task<Proto.EnrollAuthenticatorResponse> EnrollAuthenticator(
+        Proto.EnrollAuthenticatorRequest request, ServerCallContext context) =>
+        new()
+        {
+            Message = (await _security.EnrollAuthenticatorAsync(context.Session(),
+                new EnrollAuthenticatorRequest(request.Secret.ToByteArray(), request.Code, request.BackupCodes.ToList()),
+                context.CancellationToken)).Message
+        };
+
+    public override async Task<Proto.DisableAuthenticatorResponse> DisableAuthenticator(
+        Proto.DisableAuthenticatorRequest request, ServerCallContext context) =>
+        new() { Message = (await _security.DisableAuthenticatorAsync(context.Session(), context.CancellationToken)).Message };
+
+    public override async Task<Proto.GetAuthenticatorStatusResponse> GetAuthenticatorStatus(
+        Proto.GetAuthenticatorStatusRequest request, ServerCallContext context)
+    {
+        var status = await _security.GetAuthenticatorStatusAsync(context.Session(), context.CancellationToken);
+        return new Proto.GetAuthenticatorStatusResponse { Enabled = status.Enabled, BackupCodesLeft = status.BackupCodesLeft };
+    }
+
+    [AllowAnonymous]
+    public override Task<Proto.StartPairingResponse> StartPairing(Proto.StartPairingRequest request, ServerCallContext context)
+    {
+        _throttle.Check(context.Caller());
+        var started = _security.StartPairing(request.Offer.ToByteArray());
+        return Task.FromResult(new Proto.StartPairingResponse
+        {
+            PairingId = started.PairingId,
+            TakeToken = started.TakeToken,
+            ExpiresAt = Time(started.ExpiresAtUtc)
+        });
+    }
+
+    public override async Task<Proto.GetPairingOfferResponse> GetPairingOffer(
+        Proto.GetPairingOfferRequest request, ServerCallContext context) =>
+        new()
+        {
+            Offer = Bytes(await _security.GetPairingOfferAsync(context.Session(), request.PairingId, context.CancellationToken))
+        };
+
+    public override async Task<Proto.ApprovePairingResponse> ApprovePairing(
+        Proto.ApprovePairingRequest request, ServerCallContext context) =>
+        new()
+        {
+            Message = (await _security.ApprovePairingAsync(context.Session(), request.PairingId,
+                request.Approval.ToByteArray(), context.CancellationToken)).Message
+        };
+
+    [AllowAnonymous]
+    public override Task<Proto.TakePairingApprovalResponse> TakePairingApproval(
+        Proto.TakePairingApprovalRequest request, ServerCallContext context)
+    {
+        // Polled while the person walks to their other device, so it is not counted against the
+        // limit: the take token is 256 random bits, and a wrong one learns nothing.
+        var response = new Proto.TakePairingApprovalResponse();
+        if (_security.TakePairingApproval(request.PairingId, request.TakeToken) is { } approval)
+            response.Approval = Bytes(approval);
+        return Task.FromResult(response);
+    }
 
     public override async Task<Proto.RegisterDeviceResponse> RegisterDevice(
         Proto.RegisterDeviceRequest request, ServerCallContext context) =>

@@ -95,6 +95,60 @@ Argon2id passphrase. It needs a bound session. `GetKeyBackup` returns it to any 
 session, because a device restoring from it has no key to bind with yet, and the blob is useless
 without the recovery key.
 
+## Identity vault, authenticator and pairing
+
+`E2ee/AccountSecurityService`, served by `DeviceService`. These go with
+[signing in with a device key](users.md#signing-in-with-a-device-key), and the client uses all of them
+([its identity doc](../../RaindropClient/docs/identity.md)).
+
+**Vault.** A person's root secret sealed under their recovery key, and their vault (server list, device
+names, pinned identities) sealed under the root — both produced by the Rust core
+(`RaindropCrypto/docs/root-identity.md`) and opaque here. `PutIdentityVault` and `GetIdentityVault` need a
+bound session. `GetSealedRoot(lookup_id)` is **anonymous**: it is what a device holding only the recovery
+words calls first. The lookup id is 128 bits derived from the recovery key and this server's identity key
+(32 lower-case hex characters), unique per server, and what comes back opens only with that key. A lookup
+id already in use by another account is refused (`invalid_vault`). Limits: sealed root 256 bytes, vault
+`E2eeOptions.MaximumVaultBytes` (256 KiB).
+
+**Authenticator.** The recovery words are enough to derive an account's identity key, and so to certify a
+new device. An authenticator (RFC 6238 TOTP: SHA-1, 30 s, six digits — `Security/Totp.cs`) is the second
+thing a device **new to the account** must present in `CompleteAuth`, so leaked words are not, alone, the
+account.
+
+- A registered device never needs a code; neither does the first device of a new account.
+- The code is only checked after the device's certificate proved it holds the account's identity key, so
+  nobody else can try a code or learn that an account has an authenticator.
+- A code is good once: the 30-second step it belongs to must be newer than the last accepted
+  (`IAuthenticatorStore.TryAdvanceStepAsync`, one atomic statement). One step either side of now is accepted.
+- Five wrong codes (`MaximumAuthenticatorFailures`) lock adding devices for the rest of fifteen minutes
+  (`AuthenticatorLockout`), counted in memory per account — even the right code is then `authenticator_locked`.
+- `EnrollAuthenticator` needs a bound session and a current code from the **new** secret, not the old: any
+  device still paired replaces a lost authenticator. `DisableAuthenticator` needs a bound session.
+- Up to ten one-time **backup codes** may be enrolled (8–32 letters and digits; case, spaces and hyphens
+  forgiven). They are stored as SHA-256 over the account and the code, and each stands in for a code once.
+- The secret is the one thing in this area the server can read — it has to, to check a code. The client
+  keeps it out of the vault and hands it to a newly paired device over the pairing channel only, which is
+  why pairing needs no code typed: the new device computes one.
+
+**Pairing relay.** `IPairingRelay` (in memory). A device with no account anywhere calls `StartPairing`
+(**anonymous**, offer ≤ 1 KiB) and gets a pairing id for its pairing code plus a 256-bit take token. A
+paired device (bound session) calls `GetPairingOffer` and `ApprovePairing` (approval ≤ 512 KiB); the new
+device polls `TakePairingApproval` (**anonymous**, needs the token), which hands the approval over once.
+Pairings last `DeviceLinkLifetime` (5 min) and at most `MaximumOpenPairings` (1000) are open. Everything
+carried is opaque: the pairing code commits to the offer, the approval is sealed to the new device. Any
+member who guessed a pairing id could at worst stop that pairing completing.
+
+**Rate limit.** `Security/RequestThrottle`: `BeginAuth`, `CompleteAuth`, `GetSealedRoot` and `StartPairing`
+are limited to `AnonymousRequestsPerMinute` (60) per remote address, a fixed one-minute window in memory;
+beyond it, `rate_limited` (`RESOURCE_EXHAUSTED`). `TakePairingApproval` is polled and is not counted.
+Everybody behind one address shares the limit.
+
+An identity reset or an erased account deletes the vault and authenticator (`OnIdentityResetAsync`).
+
+Not built: telling a person's connected devices that a pairing is waiting (they open it from settings and
+type or scan the code), and device names on the server — names are meant to live in the vault, where only
+the person's own devices read them.
+
 ## API
 
 All authenticated. Every opaque blob (certificate, signature, nonce, backup, offer, approval, MLS
@@ -164,6 +218,9 @@ Three tables, created like every other (see [Database modules](database-modules.
 - `raindrop_devices(user_id, device_id, signature_key, certificate, created_at, revoked_at, PK(user_id, device_id))`.
   Revoked rows are kept, so a revoked device id cannot be registered again.
 - `raindrop_key_backups(user_id PK, blob_data, updated_at)`
+- `raindrop_identity_vaults(user_id PK, lookup_id UNIQUE, sealed_root, vault, updated_at)`
+- `raindrop_authenticators(user_id PK, secret, backup_codes, last_step, created_at)` — `backup_codes` is the
+  unused codes' hashes, comma-separated
 
 The delivery service adds four more:
 

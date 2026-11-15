@@ -59,7 +59,9 @@ shape (unary, client, server and duplex streaming):
     `context.Session()`.
 - A method marked `[AllowAnonymous]` skips this step. The interceptor reads the attribute from the
   endpoint metadata ASP.NET Core attaches to each gRPC method, so the marker sits on the override
-  itself. Six RPCs carry it: the handshake and the five sign-in calls.
+  itself. Eleven RPCs carry it: the handshake, the five password sign-in calls,
+  `BeginAuth`/`CompleteAuth` (signing in with a device key), and `GetSealedRoot`, `StartPairing` and
+  `TakePairingApproval` (recovering or pairing a device that has no account yet).
 
 ## Errors
 

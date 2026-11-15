@@ -1,7 +1,9 @@
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
+using RaindropServer.E2ee;
 using RaindropServer.Grpc.Mapping;
 using RaindropServer.Members;
+using RaindropServer.Security;
 using RaindropServer.Users;
 using static RaindropServer.Grpc.Mapping.Wire;
 using Proto = RaindropServer.Grpc.Protocol;
@@ -40,8 +42,42 @@ public sealed class ServerGrpcService : Proto.ServerService.ServerServiceBase
 public sealed class UserGrpcService : Proto.UserService.UserServiceBase
 {
     private readonly UserService _users;
+    private readonly DeviceAuthService _auth;
+    private readonly RequestThrottle _throttle;
 
-    public UserGrpcService(UserService users) => _users = users;
+    public UserGrpcService(UserService users, DeviceAuthService auth, RequestThrottle throttle)
+    {
+        _users = users;
+        _auth = auth;
+        _throttle = throttle;
+    }
+
+    [AllowAnonymous]
+    public override async Task<Proto.BeginAuthResponse> BeginAuth(Proto.BeginAuthRequest request, ServerCallContext context)
+    {
+        _throttle.Check(context.Caller());
+        var challenge = await _auth.BeginAsync(Id(request.UserId, "user_id"), context.CancellationToken);
+        return new Proto.BeginAuthResponse { Nonce = Bytes(challenge.Nonce), ExpiresAt = Time(challenge.ExpiresAtUtc) };
+    }
+
+    [AllowAnonymous]
+    public override async Task<Proto.CompleteAuthResponse> CompleteAuth(
+        Proto.CompleteAuthRequest request, ServerCallContext context)
+    {
+        _throttle.Check(context.Caller());
+        var session = await _auth.CompleteAsync(
+            new CompleteAuthRequest(
+                Id(request.UserId, "user_id"),
+                Id(request.DeviceId, "device_id"),
+                request.Nonce.ToByteArray(),
+                request.Signature.ToByteArray(),
+                OptionalBytes(request.HasCertificate, request.Certificate),
+                request.HasUsername ? request.Username : null,
+                request.HasAuthenticatorCode ? request.AuthenticatorCode : null),
+            context.CancellationToken);
+
+        return new Proto.CompleteAuthResponse { Session = session.ToProto() };
+    }
 
     [AllowAnonymous]
     public override async Task<Proto.GetUserStatusResponse> GetUserStatus(

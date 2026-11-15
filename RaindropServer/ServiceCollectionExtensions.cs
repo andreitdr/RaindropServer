@@ -334,6 +334,12 @@ public static class ServiceCollectionExtensions
         services.AddRaindropUsers();
         services.TryAddSingleton<IDeviceLinkRelay, InMemoryDeviceLinkRelay>();
         services.TryAddSingleton<DeviceService>();
+        services.TryAddSingleton<IPairingRelay, InMemoryPairingRelay>();
+        services.TryAddSingleton<Security.RequestThrottle>();
+        services.TryAddSingleton<AccountSecurityService>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IDeviceListener, AccountSecurityService>(
+            sp => sp.GetRequiredService<AccountSecurityService>()));
+        services.TryAddSingleton<DeviceAuthService>();
         services.AddServerEventHandler<MemberEvent, ErasedMemberCleanup>();
 
         // The MLS delivery service, and keeping its groups in step with who may be in them.
@@ -384,6 +390,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(driver.CreateVoiceMuteStore(options));
         services.AddSingleton(driver.CreateDeviceStore(options));
         services.AddSingleton(driver.CreateKeyBackupStore(options));
+        services.AddSingleton(driver.CreateIdentityVaultStore(options));
+        services.AddSingleton(driver.CreateAuthenticatorStore(options));
         services.AddSingleton(driver.CreateMlsGroupStore(options));
         services.AddSingleton(driver.CreateKeyPackageStore(options));
         services.AddSingleton(driver.CreateWelcomeStore(options));

@@ -87,7 +87,7 @@ Each is one file: `SqliteDatabaseDriver.cs`, `PostgresDatabaseDriver.cs`, `SqlSe
 Tables: `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`, `raindrop_roles`,
 `raindrop_member_roles`, `raindrop_deleted_messages`, `raindrop_permission_rollouts`,
 `raindrop_voice_mutes`, and for [end-to-end encryption](e2ee.md#storage) `raindrop_user_identities`,
-`raindrop_devices`, `raindrop_key_backups` and the delivery service's `raindrop_mls_groups`,
+`raindrop_devices`, `raindrop_key_backups`, `raindrop_identity_vaults`, `raindrop_authenticators` and the delivery service's `raindrop_mls_groups`,
 `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`, and
 `raindrop_encrypted_messages` (encrypted messages, merged with `raindrop_text_messages` when history is
 read), `raindrop_message_reports` (reported encrypted messages, with the text the reporter revealed) — public keys and opaque blobs in byte columns (`BLOB`, `bytea`, `varbinary`), epochs as `bigint` — and

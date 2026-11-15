@@ -219,6 +219,79 @@ public sealed class UserService
         return await OpenSessionAsync(rejoined, cancellationToken);
     }
 
+    // ── Signing in with a device key ─────────────────────────────────────────
+    //
+    // The three calls below are the account half of passwordless sign-in. They prove nothing
+    // themselves: E2ee.DeviceAuthService has already verified a device's signature and certificate
+    // before it calls any of them.
+
+    /// <summary>
+    /// Creates an account that has no password: whoever holds a device key the account's identity key
+    /// certified is its owner. Same rules as <see cref="RegisterAsync"/> otherwise.
+    /// </summary>
+    public async Task<UserRecord> RegisterForDeviceAsync(Guid userId, string? username, CancellationToken cancellationToken)
+    {
+        RequireUserId(userId);
+        var validated = UsernamePolicy.Validate(username);
+
+        var existing = await _store.FindByIdAsync(userId, cancellationToken);
+        if (existing is { Status: UserStatus.Active or UserStatus.LeftDataPreserved })
+            throw ApiException.Conflict("already_registered", "This UUID already has an account on this server.");
+
+        var normalized = UsernamePolicy.Normalize(validated);
+        await RequireUsernameFreeAsync(normalized, cancellationToken);
+
+        var now = UtcNow;
+        var user = new UserRecord
+        {
+            UserId = userId,
+            Username = validated,
+            UsernameNormalized = normalized,
+            PasswordHash = null,
+            Status = UserStatus.Active,
+            CreatedAtUtc = now,
+            LastLoginAtUtc = now
+        };
+
+        if (existing is null)
+            await _store.InsertAsync(user, cancellationToken);
+        else
+            await _store.UpdateAsync(user, cancellationToken);
+
+        await AnnounceRegistrationAsync(user, cancellationToken);
+        await _events.PublishAsync(ServerEventTypes.MemberJoined, new MemberEvent(user.UserId, user.Username));
+        return user;
+    }
+
+    /// <summary>Brings back an account that left with its data preserved, for a device that proved it is the owner's.</summary>
+    public async Task<UserRecord> RejoinForDeviceAsync(UserRecord user, CancellationToken cancellationToken)
+    {
+        if (user.Status != UserStatus.LeftDataPreserved)
+            return user;
+
+        var rejoined = user with { Status = UserStatus.Active, LeftAtUtc = null, DataExpiresAtUtc = null };
+        await _store.UpdateAsync(rejoined, cancellationToken);
+        await _events.PublishAsync(ServerEventTypes.MemberJoined, new MemberEvent(rejoined.UserId, rejoined.Username));
+        return rejoined;
+    }
+
+    /// <summary>Opens a session that is bound to <paramref name="deviceId"/> from the start.</summary>
+    public async Task<SessionResponse> OpenDeviceSessionAsync(UserRecord user, Guid deviceId, CancellationToken cancellationToken)
+    {
+        var loggedIn = user with { LastLoginAtUtc = UtcNow };
+        await _store.UpdateAsync(loggedIn, cancellationToken);
+
+        var session = _sessions.Create(loggedIn.UserId, loggedIn.Username!);
+        if (!_sessions.BindDevice(session.Token, deviceId))
+        {
+            _sessions.Remove(session.Token);
+            throw ApiException.Unauthorized("invalid_session", "The session could not be opened. Try again.");
+        }
+
+        await AnnounceSessionsChangedAsync(loggedIn.UserId, cancellationToken);
+        return new SessionResponse(ToProfile(loggedIn), session.Token, session.ExpiresAtUtc);
+    }
+
     /// <summary>Ends this one session. Other devices logged in as the same user stay logged in.</summary>
     public async Task<MessageResponse> LogoutAsync(UserSession session, CancellationToken cancellationToken)
     {
@@ -291,9 +364,19 @@ public sealed class UserService
     {
         var user = await RequireActiveAsync(session, cancellationToken);
 
-        if (user.PasswordHash is null || !_hasher.Verify(request.Password ?? string.Empty, user.PasswordHash))
+        // An account made by a device has no password to confirm with; what stands in for it is the
+        // session being bound to one of the owner's devices, which a stolen token alone is not.
+        if (user.PasswordHash is null)
+        {
+            if (session.DeviceId is null)
+                throw ApiException.Forbidden("device_required",
+                    "Leaving the server has to be confirmed from one of your devices.");
+        }
+        else if (!_hasher.Verify(request.Password ?? string.Empty, user.PasswordHash))
+        {
             throw ApiException.Unauthorized("invalid_credentials",
                 "The password is incorrect. Leaving the server has to be confirmed with your password.");
+        }
 
         // Asked before anything is written: a guard that refuses leaves the account exactly as it was.
         foreach (var guard in _leaveGuards)

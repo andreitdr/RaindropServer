@@ -232,6 +232,36 @@ public sealed class SqlServerDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        """
+        IF OBJECT_ID(N'raindrop_identity_vaults', N'U') IS NULL
+        CREATE TABLE raindrop_identity_vaults (
+            user_id     varchar(36)    NOT NULL PRIMARY KEY,
+            lookup_id   varchar(64)    NOT NULL,
+            sealed_root varbinary(max) NOT NULL,
+            vault       varbinary(max) NOT NULL,
+            updated_at  datetime2      NOT NULL
+        )
+        """,
+
+        """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'ux_raindrop_identity_vaults_lookup' AND object_id = OBJECT_ID(N'raindrop_identity_vaults'))
+        CREATE UNIQUE INDEX ux_raindrop_identity_vaults_lookup
+            ON raindrop_identity_vaults (lookup_id)
+        """,
+
+        """
+        IF OBJECT_ID(N'raindrop_authenticators', N'U') IS NULL
+        CREATE TABLE raindrop_authenticators (
+            user_id      varchar(36)    NOT NULL PRIMARY KEY,
+            secret       varbinary(max) NOT NULL,
+            backup_codes varchar(max)   NOT NULL,
+            last_step    bigint         NOT NULL,
+            created_at   datetime2      NOT NULL
+        )
+        """,
+
         // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
         """
         IF OBJECT_ID(N'raindrop_mls_groups', N'U') IS NULL

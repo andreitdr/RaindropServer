@@ -31,6 +31,26 @@ public sealed class E2eeOptions
     /// <summary>The largest sealed key backup accepted.</summary>
     public int MaximumBackupBytes { get; set; } = 64 * 1024;
 
+    /// <summary>The largest sealed identity vault accepted.</summary>
+    public int MaximumVaultBytes { get; set; } = 256 * 1024;
+
+    /// <summary>The largest pairing approval accepted; it carries the vault's contents to the new device.</summary>
+    public int MaximumPairingApprovalBytes { get; set; } = 512 * 1024;
+
+    /// <summary>How many pairings may be open at once. They are opened anonymously, so this bounds the memory they can hold.</summary>
+    public int MaximumOpenPairings { get; set; } = 1000;
+
+    /// <summary>
+    /// How many anonymous sign-in, recovery and pairing calls one address may make each minute.
+    /// Zero switches the limit off.
+    /// </summary>
+    public int AnonymousRequestsPerMinute { get; set; } = 60;
+
+    /// <summary>Wrong authenticator codes an account may be given within <see cref="AuthenticatorLockout"/> before it is locked for the rest of it.</summary>
+    public int MaximumAuthenticatorFailures { get; set; } = 5;
+
+    public TimeSpan AuthenticatorLockout { get; set; } = TimeSpan.FromMinutes(15);
+
     /// <summary>The most users one device listing may ask about.</summary>
     public int MaximumUsersPerListing { get; set; } = 500;
 
