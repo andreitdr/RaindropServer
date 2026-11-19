@@ -49,7 +49,7 @@ try
         services.AddRaindropLiveKit(config.ApplyTo);
 
     services.AddRaindropServer(config.ApplyTo, config.ApplyTo, config.ApplyTo,
-        configureVoice: config.ApplyTo, configureAttachments: config.ApplyTo);
+        configureVoice: config.ApplyTo, configureAttachments: config.ApplyTo, configureE2ee: config.ApplyTo);
     services.AddRaindropGrpc();
 }
 catch (InvalidOperationException ex)

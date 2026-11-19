@@ -98,6 +98,10 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         new RelationalAuthenticatorStore(this, options.ConnectionString);
 
     /// <inheritdoc />
+    public IRecoveryStore CreateRecoveryStore(DatabaseOptions options) =>
+        new RelationalRecoveryStore(this, options.ConnectionString);
+
+    /// <inheritdoc />
     public IMlsGroupStore CreateMlsGroupStore(DatabaseOptions options) =>
         new RelationalMlsGroupStore(this, options.ConnectionString);
 
@@ -152,6 +156,7 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         "raindrop_key_backups",
         "raindrop_identity_vaults",
         "raindrop_authenticators",
+        "raindrop_pending_recoveries",
         "raindrop_mls_groups",
         "raindrop_mls_commits",
         "raindrop_mls_key_packages",

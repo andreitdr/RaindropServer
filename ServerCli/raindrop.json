@@ -24,7 +24,11 @@
   "users": {
     "dataRetentionDays": 730,
     "sessionIdleTimeoutHours": 12,
-    "minimumPasswordLength": 8
+    "minimumPasswordLength": 8,
+    // How long a device recovered with the recovery words, but with no authenticator code, waits
+    // before it is let in. The person's other devices are told and can cancel. 0 lets nobody in
+    // without a code.
+    "recoveryWaitDays": 7
   },
 
   // Messages are end-to-end encrypted; the server stores ciphertext it cannot

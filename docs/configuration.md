@@ -28,7 +28,8 @@ is how the Docker container is configured without editing the file.
   "users": {
     "dataRetentionDays": 730,
     "sessionIdleTimeoutHours": 12,
-    "minimumPasswordLength": 8
+    "minimumPasswordLength": 8,
+    "recoveryWaitDays": 7
   },
 
   "channels": {
@@ -117,6 +118,10 @@ See [Users](users.md) for the domain behavior these configure.
 - `sessionIdleTimeoutHours` — how long an idle session stays valid; also what presence
   (see [Members](members.md)) is sharpened or dulled by.
 - `minimumPasswordLength` — enforced at registration and password change.
+- `recoveryWaitDays` — how long a device that recovered the identity with the recovery words, but has no
+  authenticator or backup code, waits before it is let in (`E2eeOptions.RecoveryWait`; see
+  [E2EE](e2ee.md#recovering-without-the-authenticator)). The account's devices are told and can cancel.
+  `0` lets nobody in without a code; above 90 is an error, below one day a warning.
 
 ### `channels`
 

@@ -214,6 +214,19 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        // Devices waiting to be let in without an authenticator code, one row per device.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_pending_recoveries (
+            user_id       varchar(36) NOT NULL,
+            device_id     varchar(36) NOT NULL,
+            signature_key bytea       NOT NULL,
+            requested_at  timestamptz NOT NULL,
+            eligible_at   timestamptz NOT NULL,
+            cancelled_at  timestamptz NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
         // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
         """
         CREATE TABLE IF NOT EXISTS raindrop_mls_groups (

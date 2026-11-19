@@ -76,6 +76,13 @@ public interface IDatabaseDriver
         throw new NotSupportedException($"The '{Name}' database driver does not support authenticators.");
 
     /// <summary>
+    /// Creates the persistence for devices waiting to be let in without an authenticator code. Same
+    /// default as <see cref="CreateDeviceStore"/>.
+    /// </summary>
+    IRecoveryStore CreateRecoveryStore(DatabaseOptions options) =>
+        throw new NotSupportedException($"The '{Name}' database driver does not support recovery waits.");
+
+    /// <summary>
     /// Creates the MLS delivery service's persistence for groups and their commit logs. Same default
     /// as <see cref="CreateDeviceStore"/>.
     /// </summary>

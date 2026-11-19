@@ -214,7 +214,22 @@ public class GrpcTests
             new Proto.GetPairingOfferRequest { PairingId = started.PairingId }));
         Assert.Equal("missing_token", ReasonOf(anonymous));
 
-        // Sixty a minute from one address; two are spent above.
+        // Asking to wait out a lost authenticator needs no session (it is proven by a challenge), but
+        // seeing and cancelling the waits is for the account's devices.
+        var unproven = await Refused(async () => await new Proto.UserService.UserServiceClient(server.Channel)
+            .RequestRecoveryAsync(new Proto.RequestRecoveryRequest
+            {
+                UserId = Guid.NewGuid().ToString("D"),
+                DeviceId = Guid.NewGuid().ToString("D")
+            }));
+        // Reached the service rather than being stopped for a token: this test server has no identity key.
+        Assert.Equal("auth_unavailable", ReasonOf(unproven));
+        Assert.Equal("missing_token", ReasonOf(await Refused(async () =>
+            await devices.GetRecoveryStatusAsync(new Proto.GetRecoveryStatusRequest()))));
+        Assert.Equal("missing_token", ReasonOf(await Refused(async () =>
+            await devices.CancelRecoveryAsync(new Proto.CancelRecoveryRequest()))));
+
+        // Sixty a minute from one address; three are spent above.
         RpcException? limited = null;
         for (var call = 0; call < 60 && limited is null; call++)
         {

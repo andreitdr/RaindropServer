@@ -63,3 +63,45 @@ public interface IAuthenticatorStore
     Task<bool> TryReplaceBackupCodesAsync(
         Guid userId, IReadOnlyList<string> expected, IReadOnlyList<string> remaining, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// A device waiting to be let in without an authenticator code: its owner has the recovery words but
+/// lost the authenticator and its backup codes. It gets in once <paramref name="EligibleAtUtc"/> has
+/// passed, unless one of the account's devices cancelled it first.
+/// </summary>
+/// <param name="UserId">The account.</param>
+/// <param name="DeviceId">The device waiting.</param>
+/// <param name="SignatureKey">The device key it proved it holds; only that key is let in at the end.</param>
+/// <param name="RequestedAtUtc">When the wait started.</param>
+/// <param name="EligibleAtUtc">When it ends.</param>
+/// <param name="CancelledAtUtc">When one of the account's devices cancelled it; null while it runs.</param>
+public sealed record PendingRecoveryRecord(
+    Guid UserId, Guid DeviceId, byte[] SignatureKey, DateTime RequestedAtUtc, DateTime EligibleAtUtc,
+    DateTime? CancelledAtUtc)
+{
+    public bool IsCancelled => CancelledAtUtc is not null;
+}
+
+/// <summary>Persistence for recovery waits: at most one per device of an account.</summary>
+public interface IRecoveryStore
+{
+    /// <summary>Every wait on the account, cancelled ones included, oldest first.</summary>
+    Task<IReadOnlyList<PendingRecoveryRecord>> ListAsync(Guid userId, CancellationToken cancellationToken);
+
+    Task<PendingRecoveryRecord?> FindAsync(Guid userId, Guid deviceId, CancellationToken cancellationToken);
+
+    /// <summary>Starts a wait. Returns false, changing nothing, when the device already has one.</summary>
+    Task<bool> TryAddAsync(PendingRecoveryRecord recovery, CancellationToken cancellationToken);
+
+    /// <summary>Marks every running wait on the account cancelled. Returns how many there were.</summary>
+    Task<int> CancelAllAsync(Guid userId, DateTime cancelledAtUtc, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Forgets one device's wait. Returns false when it was already gone — so of two sign-ins racing
+    /// on one finished wait, only one is let in by it.
+    /// </summary>
+    Task<bool> DeleteAsync(Guid userId, Guid deviceId, CancellationToken cancellationToken);
+
+    /// <summary>Forgets every wait on the account.</summary>
+    Task DeleteAllAsync(Guid userId, CancellationToken cancellationToken);
+}

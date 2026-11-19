@@ -21,6 +21,14 @@ public sealed record CompleteAuthRequest(
     Guid UserId, Guid DeviceId, byte[] Nonce, byte[] Signature, byte[]? Certificate, string? Username,
     string? AuthenticatorCode = null);
 
+/// <param name="UserId">The account the device wants to join.</param>
+/// <param name="DeviceId">The device asking.</param>
+/// <param name="Nonce">A nonce <see cref="DeviceAuthService.BeginAsync"/> issued for that account.</param>
+/// <param name="Signature">The device key's signature over <see cref="DeviceAuthService.SignedBytes"/>.</param>
+/// <param name="Certificate">The device's certificate, signed by the account's identity key.</param>
+public sealed record RequestRecoveryRequest(
+    Guid UserId, Guid DeviceId, byte[] Nonce, byte[] Signature, byte[]? Certificate);
+
 /// <summary>
 /// Signing in without a password. An account belongs to whoever holds a device key that the account's
 /// identity key has certified, so a session is opened by a device signing a one-time challenge, and
@@ -138,23 +146,88 @@ public sealed class DeviceAuthService
     /// </summary>
     public async Task<SessionResponse> CompleteAsync(CompleteAuthRequest request, CancellationToken cancellationToken)
     {
+        var proof = await ProveAsync(
+            request.UserId, request.DeviceId, request.Nonce, request.Signature, request.Certificate, cancellationToken);
+        var user = proof.User;
+
+        // From here on the caller holds the device key. What is left is whether that device is the
+        // account owner's, which the certificate's signer answers.
+        if (user is null || user.Status == UserStatus.Erased)
+        {
+            if (proof.Registered)
+                throw Refused();
+
+            user = await _accounts.RegisterForDeviceAsync(request.UserId, request.Username, cancellationToken);
+            await _deviceService.RegisterCertificateAsync(user.UserId, request.Certificate, cancellationToken);
+        }
+        else
+        {
+            if (!proof.Registered)
+            {
+                await RequireAccountIdentityAsync(user, proof.Presented!, cancellationToken);
+                await _security.RequireCodeForNewDeviceAsync(
+                    user.UserId, request.DeviceId, proof.SignatureKey, request.AuthenticatorCode, cancellationToken);
+                await _deviceService.RegisterCertificateAsync(user.UserId, request.Certificate, cancellationToken);
+            }
+
+            user = await _accounts.RejoinForDeviceAsync(user, cancellationToken);
+        }
+
+        return await _accounts.OpenDeviceSessionAsync(user, request.DeviceId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Starts the wait after which a device new to an account is let in without an authenticator code
+    /// (see <see cref="AccountSecurityService.StartRecoveryAsync"/>), or answers with the one already
+    /// running. Proven exactly like <see cref="CompleteAsync"/>: a fresh challenge signed by the device,
+    /// and its certificate from the account's identity key.
+    /// </summary>
+    public async Task<PendingRecovery> RequestRecoveryAsync(RequestRecoveryRequest request, CancellationToken cancellationToken)
+    {
+        var proof = await ProveAsync(
+            request.UserId, request.DeviceId, request.Nonce, request.Signature, request.Certificate, cancellationToken);
+
+        if (proof.User is not { Status: UserStatus.Active or UserStatus.LeftDataPreserved } user)
+            throw Refused();
+        if (proof.Registered)
+            throw ApiException.Conflict("recovery_not_needed", "This device is already on the account: it can simply sign in.");
+
+        await RequireAccountIdentityAsync(user, proof.Presented!, cancellationToken);
+        return await _security.StartRecoveryAsync(user.UserId, request.DeviceId, proof.SignatureKey, cancellationToken);
+    }
+
+    /// <summary>What a signed challenge established about its caller.</summary>
+    /// <param name="User">The account, if there is one.</param>
+    /// <param name="Registered">Whether the device is already active on it.</param>
+    /// <param name="Presented">The certificate the device presented, when it is not registered.</param>
+    /// <param name="SignatureKey">The device key that signed.</param>
+    private sealed record Proof(UserRecord? User, bool Registered, DeviceCertificate? Presented, byte[] SignatureKey);
+
+    /// <summary>
+    /// Uses up the challenge and checks that the device signed it: with its registered key, or with the
+    /// key in a certificate about exactly this user and device. Every failure is the same refusal.
+    /// </summary>
+    private async Task<Proof> ProveAsync(
+        Guid userId, Guid deviceId, byte[]? nonce, byte[]? signature, byte[]? certificateBytes,
+        CancellationToken cancellationToken)
+    {
         var serverKey = RequireIdentityKey();
 
-        if (request.Nonce is not { Length: NonceBytes }
-            || !_challenges.TryRemove(Convert.ToHexString(request.Nonce), out var challenge)
-            || challenge.UserId != request.UserId
+        if (nonce is not { Length: NonceBytes }
+            || !_challenges.TryRemove(Convert.ToHexString(nonce), out var challenge)
+            || challenge.UserId != userId
             || challenge.ExpiresAtUtc <= UtcNow)
         {
             throw ApiException.Unauthorized("invalid_challenge", "Ask for a challenge first; it lapses after a short while.");
         }
 
-        var user = await _users.FindByIdAsync(request.UserId, cancellationToken);
-        var device = await _devices.FindDeviceAsync(request.UserId, request.DeviceId, cancellationToken);
+        var user = await _users.FindByIdAsync(userId, cancellationToken);
+        var device = await _devices.FindDeviceAsync(userId, deviceId, cancellationToken);
         var registered = device is { IsActive: true };
 
         // Which key must have signed: the registered device's, or the one in a certificate that is
         // about exactly this user and device. A revoked device is not helped by presenting its
-        // certificate again — registering it below is refused, because its id is taken.
+        // certificate again — registering it is refused, because its id is taken.
         byte[] signatureKey;
         DeviceCertificate? presented = null;
         if (registered)
@@ -163,58 +236,41 @@ public sealed class DeviceAuthService
         }
         else
         {
-            if (request.Certificate is null)
+            if (certificateBytes is null)
                 throw Refused();
 
-            var certificate = DeviceCertificate.Parse(request.Certificate);
-            if (certificate.UserId != request.UserId || certificate.DeviceId != request.DeviceId
-                || !certificate.IsSignatureValid())
-            {
+            var certificate = DeviceCertificate.Parse(certificateBytes);
+            if (certificate.UserId != userId || certificate.DeviceId != deviceId || !certificate.IsSignatureValid())
                 throw Refused();
-            }
 
             presented = certificate;
             signatureKey = certificate.DeviceSignatureKey;
         }
 
-        if (!Ed25519Signatures.Verify(signatureKey, SignedBytes(serverKey, request.Nonce), request.Signature ?? []))
+        if (!Ed25519Signatures.Verify(signatureKey, SignedBytes(serverKey, nonce), signature ?? []))
             throw Refused();
 
-        // From here on the caller holds the device key. What is left is whether that device is the
-        // account owner's, which the certificate's signer answers.
-        if (user is null || user.Status == UserStatus.Erased)
-        {
-            if (registered)
-                throw Refused();
+        return new Proof(user, registered, presented, signatureKey);
+    }
 
-            user = await _accounts.RegisterForDeviceAsync(request.UserId, request.Username, cancellationToken);
-            await _deviceService.RegisterCertificateAsync(user.UserId, request.Certificate, cancellationToken);
-        }
-        else
-        {
-            if (!registered)
-            {
-                // An account with no identity key was made with a password and has never had a
-                // device. Letting a certificate establish its identity here would hand the account
-                // to whoever asked first.
-                var identity = await _devices.FindIdentityAsync(user.UserId, cancellationToken);
-                if (identity is null)
-                    throw Refused();
+    /// <summary>
+    /// Refuses a certificate not signed by <paramref name="user"/>'s identity key. Checked before the
+    /// authenticator, so that only somebody holding that key ever gets to try a code — or to learn
+    /// there is one to try.
+    /// </summary>
+    private async Task RequireAccountIdentityAsync(
+        UserRecord user, DeviceCertificate presented, CancellationToken cancellationToken)
+    {
+        // An account with no identity key was made with a password and has never had a device.
+        // Letting a certificate establish its identity here would hand the account to whoever asked
+        // first.
+        var identity = await _devices.FindIdentityAsync(user.UserId, cancellationToken);
+        if (identity is null)
+            throw Refused();
 
-                // Checked here, before the authenticator, so that only somebody holding the
-                // account's identity key ever gets to try a code — or to learn there is one to try.
-                if (!CryptographicOperations.FixedTimeEquals(identity.IdentityKey, presented!.UserIdentityKey))
-                    throw ApiException.Conflict("identity_mismatch",
-                        "That certificate was signed by a different identity key than this account's.");
-
-                await _security.RequireCodeForNewDeviceAsync(user.UserId, request.AuthenticatorCode, cancellationToken);
-                await _deviceService.RegisterCertificateAsync(user.UserId, request.Certificate, cancellationToken);
-            }
-
-            user = await _accounts.RejoinForDeviceAsync(user, cancellationToken);
-        }
-
-        return await _accounts.OpenDeviceSessionAsync(user, request.DeviceId, cancellationToken);
+        if (!CryptographicOperations.FixedTimeEquals(identity.IdentityKey, presented.UserIdentityKey))
+            throw ApiException.Conflict("identity_mismatch",
+                "That certificate was signed by a different identity key than this account's.");
     }
 
     private byte[] RequireIdentityKey() =>

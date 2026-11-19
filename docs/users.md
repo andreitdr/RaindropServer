@@ -74,8 +74,10 @@ certificate establish *that* account's identity would hand it to whoever asked f
 identity key answers `auth_unavailable`.
 
 A device new to an account that has an authenticator must also send `authenticator_code`
-(`authenticator_required`, `invalid_authenticator_code`, `authenticator_locked`), and both calls are
-rate-limited per address — see [E2EE](e2ee.md#identity-vault-authenticator-and-pairing).
+(`authenticator_required`, `invalid_authenticator_code`, `authenticator_locked`), unless it has waited
+out a recovery started with `RequestRecovery` (`recovery_pending` until then, `recovery_cancelled` if one
+of the account's devices said no). All three calls are rate-limited per address — see
+[E2EE](e2ee.md#recovering-without-the-authenticator).
 
 Not built yet: removing the password calls. `LeaveServer` and `ResetIdentity` already accept a
 device-bound session in place of a password for an account that has none. See the [roadmap](roadmap.md).

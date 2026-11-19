@@ -33,6 +33,7 @@ public static class ServiceCollectionExtensions
     /// <param name="configureEvents">Optionally adjusts how the event stream treats its connections.</param>
     /// <param name="configureVoice">Optionally adjusts voice call rules. The media server itself is registered separately — see <see cref="AddRaindropVoice"/>.</param>
     /// <param name="configureAttachments">Optionally adjusts which files members may add to messages.</param>
+    /// <param name="configureE2ee">Optionally adjusts end-to-end encryption limits and the recovery wait.</param>
     /// <remarks>
     /// A database module still has to be enabled with <see cref="AddRaindropDatabase(IServiceCollection, Action{DatabaseOptions})"/>
     /// before the server can do anything with users.
@@ -44,7 +45,8 @@ public static class ServiceCollectionExtensions
         Action<RoleOptions>? configureRoles = null,
         Action<EventOptions>? configureEvents = null,
         Action<VoiceOptions>? configureVoice = null,
-        Action<AttachmentOptions>? configureAttachments = null)
+        Action<AttachmentOptions>? configureAttachments = null,
+        Action<E2eeOptions>? configureE2ee = null)
     {
         services.AddRouting();
         services.AddRaindropEvents(configureEvents);
@@ -57,7 +59,7 @@ public static class ServiceCollectionExtensions
         services.AddRaindropAttachments(configureAttachments);
         services.AddRaindropChannels(configureChannels);
         services.AddRaindropVoice(configureVoice);
-        services.AddRaindropE2ee();
+        services.AddRaindropE2ee(configureE2ee);
 
         return services;
     }
@@ -392,6 +394,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(driver.CreateKeyBackupStore(options));
         services.AddSingleton(driver.CreateIdentityVaultStore(options));
         services.AddSingleton(driver.CreateAuthenticatorStore(options));
+        services.AddSingleton(driver.CreateRecoveryStore(options));
         services.AddSingleton(driver.CreateMlsGroupStore(options));
         services.AddSingleton(driver.CreateKeyPackageStore(options));
         services.AddSingleton(driver.CreateWelcomeStore(options));

@@ -104,6 +104,10 @@ public sealed class ProtobufEventEncoder : IEventEncoder
         {
             KeyPackagesLow = new Proto.KeyPackagesLowEvent { DeviceId = Text(low.DeviceId), Remaining = low.Remaining }
         },
+        (E2eeEventTypes.RecoveryChanged, RecoveryChangedEvent recovery) => new()
+        {
+            RecoveryChanged = new Proto.RecoveryChangedEvent { Recoveries = { recovery.Recoveries.Select(r => r.ToProto()) } }
+        },
 
         // Anything else is a plugin's. A built-in type arriving with an unexpected payload falls through
         // to here too, and is refused below unless that payload happens to be a protobuf message.

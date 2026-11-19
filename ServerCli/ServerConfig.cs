@@ -10,6 +10,7 @@ using RaindropServer.Channels;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Configuration;
 using RaindropServer.Data;
+using RaindropServer.E2ee;
 using RaindropServer.Roles;
 using RaindropServer.Security;
 using RaindropServer.Users;
@@ -237,6 +238,21 @@ public sealed record ServerConfig
             valid = false;
         }
 
+        if (Users.RecoveryWaitDays is < 0 or > MaximumRecoveryWaitDays)
+        {
+            users.Error("recoveryWaitDays",
+                $"is {Users.RecoveryWaitDays}; a device recovering without an authenticator code waits between 1 and " +
+                $"{MaximumRecoveryWaitDays} days, or 0 lets nobody in without a code.");
+
+            valid = false;
+        }
+        else if (Users.RecoveryWaitDays is > 0 and < 1)
+        {
+            users.Warn("recoveryWaitDays",
+                $"is {Users.RecoveryWaitDays}: less than a day leaves a person little time to notice and cancel " +
+                "a device added with leaked recovery words.");
+        }
+
         if (valid)
             Apply(report, "users", ApplyTo, (UserOptions options) => options.Validate(users));
     }
@@ -412,6 +428,13 @@ public sealed record ServerConfig
         options.AutoCreateSchema = Database.AutoCreateSchema;
         options.WipeOnStartup = Database.WipeOnStartup;
     }
+
+    /// <summary>The longest wait a recovering device may be given: three months.</summary>
+    public const int MaximumRecoveryWaitDays = 90;
+
+    /// <summary>Applies the configured recovery wait to the options the server reads.</summary>
+    public void ApplyTo(E2eeOptions options) =>
+        options.RecoveryWait = TimeSpan.FromDays(Users.RecoveryWaitDays);
 
     /// <summary>Applies the configured account rules to the options the server reads.</summary>
     public void ApplyTo(UserOptions options)
@@ -906,10 +929,15 @@ public sealed record DatabaseConfig(
 /// </param>
 /// <param name="SessionIdleTimeoutHours">How long a session survives without a request.</param>
 /// <param name="MinimumPasswordLength">The shortest password this server accepts.</param>
+/// <param name="RecoveryWaitDays">
+/// How long a device that recovered the identity with the recovery words, but has no authenticator code,
+/// waits before it is let in. The account's devices are told and can cancel. 0 lets nobody in without a code.
+/// </param>
 public sealed record UserConfig(
     int DataRetentionDays = 730,
     double SessionIdleTimeoutHours = 12,
-    int MinimumPasswordLength = 8);
+    int MinimumPasswordLength = 8,
+    double RecoveryWaitDays = 7);
 
 /// <param name="MaximumMessageLength">The longest message this server accepts, in characters.</param>
 /// <param name="DefaultHistoryPageSize">How many messages a history request returns by default.</param>

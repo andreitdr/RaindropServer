@@ -58,10 +58,8 @@ public sealed class DeviceGrpcService : Proto.DeviceService.DeviceServiceBase
         Proto.GetSealedRootRequest request, ServerCallContext context)
     {
         _throttle.Check(context.Caller());
-        return new Proto.GetSealedRootResponse
-        {
-            SealedRoot = Bytes(await _security.GetSealedRootAsync(request.LookupId, context.CancellationToken))
-        };
+        var sealedRoot = await _security.GetSealedRootAsync(request.LookupId, context.CancellationToken);
+        return new Proto.GetSealedRootResponse { SealedRoot = Bytes(sealedRoot.SealedRoot), Vault = Bytes(sealedRoot.Vault) };
     }
 
     public override async Task<Proto.EnrollAuthenticatorResponse> EnrollAuthenticator(
@@ -83,6 +81,17 @@ public sealed class DeviceGrpcService : Proto.DeviceService.DeviceServiceBase
         var status = await _security.GetAuthenticatorStatusAsync(context.Session(), context.CancellationToken);
         return new Proto.GetAuthenticatorStatusResponse { Enabled = status.Enabled, BackupCodesLeft = status.BackupCodesLeft };
     }
+
+    public override async Task<Proto.GetRecoveryStatusResponse> GetRecoveryStatus(
+        Proto.GetRecoveryStatusRequest request, ServerCallContext context) =>
+        new()
+        {
+            Recoveries = { (await _security.GetRecoveriesAsync(context.Session(), context.CancellationToken)).Select(r => r.ToProto()) }
+        };
+
+    public override async Task<Proto.CancelRecoveryResponse> CancelRecovery(
+        Proto.CancelRecoveryRequest request, ServerCallContext context) =>
+        new() { Cancelled = await _security.CancelRecoveriesAsync(context.Session(), context.CancellationToken) };
 
     [AllowAnonymous]
     public override Task<Proto.StartPairingResponse> StartPairing(Proto.StartPairingRequest request, ServerCallContext context)

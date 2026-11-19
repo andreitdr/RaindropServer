@@ -80,6 +80,27 @@ public sealed class UserGrpcService : Proto.UserService.UserServiceBase
     }
 
     [AllowAnonymous]
+    public override async Task<Proto.RequestRecoveryResponse> RequestRecovery(
+        Proto.RequestRecoveryRequest request, ServerCallContext context)
+    {
+        _throttle.Check(context.Caller());
+        var recovery = await _auth.RequestRecoveryAsync(
+            new RequestRecoveryRequest(
+                Id(request.UserId, "user_id"),
+                Id(request.DeviceId, "device_id"),
+                request.Nonce.ToByteArray(),
+                request.Signature.ToByteArray(),
+                request.Certificate.IsEmpty ? null : request.Certificate.ToByteArray()),
+            context.CancellationToken);
+
+        return new Proto.RequestRecoveryResponse
+        {
+            RequestedAt = Time(recovery.RequestedAtUtc),
+            EligibleAt = Time(recovery.EligibleAtUtc)
+        };
+    }
+
+    [AllowAnonymous]
     public override async Task<Proto.GetUserStatusResponse> GetUserStatus(
         Proto.GetUserStatusRequest request, ServerCallContext context)
     {

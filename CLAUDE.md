@@ -181,8 +181,8 @@ contract records are not protobuf types and must stay that way.
 
 - **Authentication**: `RaindropInterceptor` resolves `authorization: Bearer <token>` metadata through
   `ISessionStore.TryValidate` before any handler runs (`missing_token`, `invalid_session`) — for every
-  call shape, streams included. A method marked `[AllowAnonymous]` skips it; eleven do (`GetServerInfo`,
-  the five password sign-in calls, `BeginAuth`/`CompleteAuth`, and `GetSealedRoot`/`StartPairing`/`TakePairingApproval`). Handlers read the caller with `context.Session()`.
+  call shape, streams included. A method marked `[AllowAnonymous]` skips it; twelve do (`GetServerInfo`,
+  the five password sign-in calls, `BeginAuth`/`CompleteAuth`/`RequestRecovery`, and `GetSealedRoot`/`StartPairing`/`TakePairingApproval`). Handlers read the caller with `context.Session()`.
 - **Errors**: services and the library throw `ApiException` (`ApiException.Conflict("username_taken",
   …)`). Its `ApiErrorKind` picks the gRPC status (BadRequest→INVALID_ARGUMENT, Unauthorized→
   UNAUTHENTICATED, Forbidden→PERMISSION_DENIED, NotFound→NOT_FOUND, Conflict→FAILED_PRECONDITION,
@@ -267,6 +267,10 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
   set by `DeviceService.BindSessionAsync` after the device signs a one-time challenge. Revoking another
   device, replacing the backup and approving a link need a bound session, so a password alone cannot
   take the owner's devices or backup away. Revoking a device ends its sessions.
+- **Recovery wait** (`raindrop_pending_recoveries`, `UserService.RequestRecovery`): a device that proves
+  it holds the identity key but has no authenticator code is let in after `E2eeOptions.RecoveryWait`
+  (`users.recoveryWaitDays`, 7 by default, 0 = never); `e2ee.recovery.changed` tells the account and any
+  bound session cancels it for good (`DeviceService.CancelRecovery`). See `docs/e2ee.md`.
 - **Key backup** (`raindrop_key_backups`), **device linking** through `IDeviceLinkRelay` (in memory,
   opaque offer/approval; the link code's commitment stops the server substituting keys), **identity
   reset** with the password (publishes `e2ee.identity.reset`).
@@ -679,7 +683,8 @@ it a unique `Name`. The tables are `raindrop_users`, `raindrop_channels`, `raind
 message text), `raindrop_permission_rollouts` (which one-time permission grants this database has had),
 `raindrop_voice_mutes` (members muted for everyone), and for end-to-end encryption
 `raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, `raindrop_identity_vaults`,
-`raindrop_authenticators`, and the delivery service's
+`raindrop_authenticators`, `raindrop_pending_recoveries` (devices waiting to be let in without an
+authenticator code), and the delivery service's
 `raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`,
 `raindrop_encrypted_messages` and `raindrop_message_reports`, and `raindrop_attachments` (records of
 encrypted files; the bytes live in `IAttachmentStorage`) — everything after the first five added as new

@@ -215,6 +215,19 @@ public sealed class SqliteDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        // Devices waiting to be let in without an authenticator code, one row per device.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_pending_recoveries (
+            user_id       TEXT NOT NULL,
+            device_id     TEXT NOT NULL,
+            signature_key BLOB NOT NULL,
+            requested_at  TEXT NOT NULL,
+            eligible_at   TEXT NOT NULL,
+            cancelled_at  TEXT NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
         // The MLS delivery service: groups (one per channel), their commit logs, devices' key
         // packages and pending Welcomes. Every message is opaque; the server cannot read any of it.
         // The commit log's key (channel_id, epoch) is what refuses a second commit for an epoch.

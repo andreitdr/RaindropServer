@@ -105,7 +105,8 @@ without the recovery key.
 names, pinned identities) sealed under the root — both produced by the Rust core
 (`RaindropCrypto/docs/root-identity.md`) and opaque here. `PutIdentityVault` and `GetIdentityVault` need a
 bound session. `GetSealedRoot(lookup_id)` is **anonymous**: it is what a device holding only the recovery
-words calls first. The lookup id is 128 bits derived from the recovery key and this server's identity key
+words calls first. It returns the vault beside the sealed root — the vault opens only with the root — so
+that device learns every server the person is on at once, before it can sign in to any. The lookup id is 128 bits derived from the recovery key and this server's identity key
 (32 lower-case hex characters), unique per server, and what comes back opens only with that key. A lookup
 id already in use by another account is refused (`invalid_vault`). Limits: sealed root 256 bytes, vault
 `E2eeOptions.MaximumVaultBytes` (256 KiB).
@@ -130,6 +131,33 @@ account.
   keeps it out of the vault and hands it to a newly paired device over the pairing channel only, which is
   why pairing needs no code typed: the new device computes one.
 
+### Recovering without the authenticator
+
+Someone who has the recovery words but lost every device, the authenticator and its backup codes would
+otherwise be shut out. `UserService.RequestRecovery` (**anonymous**, rate-limited) lets such a device ask to
+be let in **after a wait**, `E2eeOptions.RecoveryWait` (`users.recoveryWaitDays`, a week by default):
+
+- It is proven exactly like `CompleteAuth` (`DeviceAuthService.ProveAsync`): a `BeginAuth` nonce signed by the
+  device, and a certificate from the account's identity key (`identity_mismatch` otherwise). So only someone
+  holding the identity — the words, in practice — can start one.
+- The wait is stored per device (`IRecoveryStore`, `raindrop_pending_recoveries`) with the device key that
+  proved it. Asking again answers with the same wait; the clock never restarts. At most
+  `MaximumPendingRecoveries` (5) run on one account (`too_many_recoveries`).
+- The account is told at once: `e2ee.recovery.changed`, to the account only, carries every running wait.
+  Any bound session of the account reads them (`DeviceService.GetRecoveryStatus`) and can cancel them all
+  (`CancelRecovery`). **A cancelled wait is kept**, so the device it named is never let in by it
+  (`recovery_cancelled`) — only by a code, like any other device.
+- `CompleteAuth` with no code then answers `recovery_pending` until `eligible_at`, and after it lets the
+  device in — the same device id and key only. The wait is forgotten once the device is registered
+  (`OnDeviceAddedAsync`), whether it waited or gave a code after all, so a registration refused for
+  another reason (`too_many_devices`) does not cost the person another week.
+- `recovery_not_needed`: the account has no authenticator, or the device is already on it.
+  `recovery_unavailable`: the server's wait is zero, so nobody gets in without a code.
+
+What it changes: leaked words are still not, alone, the account **while the owner has a device to say no
+with**. Someone who has the words and the owner's every device gone gets in after the wait — which is
+also exactly the person this is for. A server owner who would rather nobody could sets the wait to zero.
+
 **Pairing relay.** `IPairingRelay` (in memory). A device with no account anywhere calls `StartPairing`
 (**anonymous**, offer ≤ 1 KiB) and gets a pairing id for its pairing code plus a 256-bit take token. A
 paired device (bound session) calls `GetPairingOffer` and `ApprovePairing` (approval ≤ 512 KiB); the new
@@ -138,12 +166,13 @@ Pairings last `DeviceLinkLifetime` (5 min) and at most `MaximumOpenPairings` (10
 carried is opaque: the pairing code commits to the offer, the approval is sealed to the new device. Any
 member who guessed a pairing id could at worst stop that pairing completing.
 
-**Rate limit.** `Security/RequestThrottle`: `BeginAuth`, `CompleteAuth`, `GetSealedRoot` and `StartPairing`
+**Rate limit.** `Security/RequestThrottle`: `BeginAuth`, `CompleteAuth`, `RequestRecovery`, `GetSealedRoot` and `StartPairing`
 are limited to `AnonymousRequestsPerMinute` (60) per remote address, a fixed one-minute window in memory;
 beyond it, `rate_limited` (`RESOURCE_EXHAUSTED`). `TakePairingApproval` is polled and is not counted.
 Everybody behind one address shares the limit.
 
-An identity reset or an erased account deletes the vault and authenticator (`OnIdentityResetAsync`).
+An identity reset or an erased account deletes the vault, the authenticator and any recovery waits
+(`OnIdentityResetAsync`).
 
 Not built: telling a person's connected devices that a pairing is waiting (they open it from settings and
 type or scan the code), and device names on the server — names are meant to live in the vault, where only
@@ -170,6 +199,8 @@ message) is protobuf `bytes`; the server stores and relays them as it receives t
 | `GetDeviceLinkOffer` | bound | `{link_id}` returns `{offer}` |
 | `ApproveDeviceLink` | bound | `{link_id, approval}` (≤ 8 KiB) |
 | `TakeDeviceLinkApproval` | the session that started the link | `{link_id}` returns `{approval}`, absent until approved, delivered once |
+| `GetRecoveryStatus` | bound | the account's running recovery waits: `{device_id, requested_at, eligible_at}` each |
+| `CancelRecovery` | bound | cancels every running wait for good; returns `{cancelled}` |
 
 **The delivery service**, `raindrop.v1.DeliveryService`. All need a bound session.
 
@@ -205,6 +236,7 @@ Open-string types. The first three go to every connected member:
 | `e2ee.device.added` | `DeviceEvent(UserId, DeviceId, Certificate)` |
 | `e2ee.device.revoked` | `DeviceEvent(UserId, DeviceId, Certificate)` |
 | `e2ee.identity.reset` | `IdentityResetEvent(UserId)` |
+| `e2ee.recovery.changed` | `RecoveryChangedEvent(Recoveries)`: every running wait, to the account only |
 | `e2ee.handshake` | `HandshakeEvent(ChannelId, Epoch, Message)`: an accepted commit. Sent to the group's policy audience, not to everyone. |
 | `e2ee.welcome` | `WelcomeEvent(ChannelId, DeviceId)`, to the recipient only |
 | `e2ee.group.reconcile` | `GroupReconcileEvent(ChannelId)`, to the group's audience |
@@ -221,6 +253,7 @@ Three tables, created like every other (see [Database modules](database-modules.
 - `raindrop_identity_vaults(user_id PK, lookup_id UNIQUE, sealed_root, vault, updated_at)`
 - `raindrop_authenticators(user_id PK, secret, backup_codes, last_step, created_at)` — `backup_codes` is the
   unused codes' hashes, comma-separated
+- `raindrop_pending_recoveries(user_id, device_id, signature_key, requested_at, eligible_at, cancelled_at, PK(user_id, device_id))`
 
 The delivery service adds four more:
 

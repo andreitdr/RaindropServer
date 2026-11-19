@@ -85,6 +85,13 @@ public static class E2eeEventTypes
     /// number as changed. Data: <see cref="IdentityResetEvent"/>.
     /// </summary>
     public const string IdentityReset = "e2ee.identity.reset";
+
+    /// <summary>
+    /// A wait to let a device in without an authenticator code started, was cancelled or ended. To the
+    /// account only: its devices warn the person, who cancels it if it was not them. Data:
+    /// <see cref="RecoveryChangedEvent"/>.
+    /// </summary>
+    public const string RecoveryChanged = "e2ee.recovery.changed";
 }
 
 /// <param name="UserId">Whose device.</param>
@@ -94,3 +101,12 @@ public record DeviceEvent(Guid UserId, Guid DeviceId, byte[] Certificate);
 
 /// <param name="UserId">The user whose identity key was reset.</param>
 public record IdentityResetEvent(Guid UserId);
+
+/// <summary>A device waiting to be let in without an authenticator code.</summary>
+/// <param name="DeviceId">The device.</param>
+/// <param name="RequestedAtUtc">When it started waiting.</param>
+/// <param name="EligibleAtUtc">When it gets in, unless cancelled before then.</param>
+public sealed record PendingRecovery(Guid DeviceId, DateTime RequestedAtUtc, DateTime EligibleAtUtc);
+
+/// <param name="Recoveries">Every wait still running on the account, oldest first.</param>
+public sealed record RecoveryChangedEvent(IReadOnlyList<PendingRecovery> Recoveries);

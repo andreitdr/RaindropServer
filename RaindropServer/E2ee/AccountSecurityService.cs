@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using RaindropServer.Events;
 using RaindropServer.Security;
 using RaindropServer.Users;
 
@@ -23,6 +24,10 @@ public sealed record AuthenticatorStatusResponse(bool Enabled, int BackupCodesLe
 
 public sealed record StartPairingResponse(string PairingId, string TakeToken, DateTime ExpiresAtUtc);
 
+/// <param name="SealedRoot">The root secret, sealed under the recovery key.</param>
+/// <param name="Vault">The vault, sealed under the root.</param>
+public sealed record SealedRootResponse(byte[] SealedRoot, byte[] Vault);
+
 /// <summary>
 /// What surrounds signing in with a device key: the vault and sealed root a person recovers their
 /// identity from, the authenticator that guards adding a device, and the relay a brand-new device is
@@ -40,7 +45,10 @@ public sealed record StartPairingResponse(string PairingId, string TakeToken, Da
 /// <para>
 /// <b>Getting back in without it.</b> Changing the authenticator needs a session bound to a device
 /// and nothing else, so any device still paired replaces a lost one. With no device left, a backup
-/// code stands in for a code, once each.
+/// code stands in for a code, once each. With no backup code either, a device that proves it holds the
+/// identity key can ask to be let in after <see cref="E2eeOptions.RecoveryWait"/>: the account's
+/// devices are told at once and any of them can cancel, so leaked words alone still get nobody in
+/// while the owner has a device to say no with.
 /// </para>
 /// </remarks>
 public sealed class AccountSecurityService : IDeviceListener
@@ -54,8 +62,10 @@ public sealed class AccountSecurityService : IDeviceListener
 
     private readonly IIdentityVaultStore _vaults;
     private readonly IAuthenticatorStore _authenticators;
+    private readonly IRecoveryStore _recoveries;
     private readonly IUserStore _users;
     private readonly IPairingRelay _pairings;
+    private readonly IEventPublisher _events;
     private readonly E2eeOptions _options;
     private readonly TimeProvider _time;
 
@@ -66,15 +76,19 @@ public sealed class AccountSecurityService : IDeviceListener
     public AccountSecurityService(
         IIdentityVaultStore vaults,
         IAuthenticatorStore authenticators,
+        IRecoveryStore recoveries,
         IUserStore users,
         IPairingRelay pairings,
+        IEventPublisher events,
         E2eeOptions options,
         TimeProvider? time = null)
     {
         _vaults = vaults;
         _authenticators = authenticators;
+        _recoveries = recoveries;
         _users = users;
         _pairings = pairings;
+        _events = events;
         _options = options;
         _time = time ?? TimeProvider.System;
     }
@@ -112,17 +126,18 @@ public sealed class AccountSecurityService : IDeviceListener
     }
 
     /// <summary>
-    /// The sealed root stored under a lookup id, for anybody who asks: the caller is a device with the
-    /// recovery words and no account yet. The id is 128 bits derived from the recovery key, so it
-    /// cannot be guessed, and what comes back opens only with that key.
+    /// The sealed root stored under a lookup id, and the vault sealed under that root, for anybody who
+    /// asks: the caller is a device with the recovery words and no account yet. The id is 128 bits
+    /// derived from the recovery key, so it cannot be guessed; the root opens only with that key, and
+    /// the vault only with the root. The vault comes too so the device learns every server at once.
     /// </summary>
-    public async Task<byte[]> GetSealedRootAsync(string? lookupId, CancellationToken cancellationToken)
+    public async Task<SealedRootResponse> GetSealedRootAsync(string? lookupId, CancellationToken cancellationToken)
     {
         if (IsLookupId(lookupId)
             && await _vaults.FindByLookupAsync(lookupId!, cancellationToken) is { } vault
             && await _users.FindByIdAsync(vault.UserId, cancellationToken) is { Status: UserStatus.Active or UserStatus.LeftDataPreserved })
         {
-            return vault.SealedRoot;
+            return new SealedRootResponse(vault.SealedRoot, vault.Vault);
         }
 
         throw ApiException.NotFound("vault_not_found", "Nothing is stored for those recovery words on this server.");
@@ -183,11 +198,13 @@ public sealed class AccountSecurityService : IDeviceListener
 
     /// <summary>
     /// Checks the code a device new to <paramref name="userId"/>'s account presented. Returns without
-    /// complaint when the account has no authenticator. Called by <see cref="DeviceAuthService"/>
-    /// only after the device has shown a certificate signed by the account's identity key, so nobody
-    /// else can learn from the answer whether an account has one.
+    /// complaint when the account has no authenticator, or when the device presents no code but has
+    /// waited out its recovery (<see cref="StartRecoveryAsync"/>) with the same key. Called by
+    /// <see cref="DeviceAuthService"/> only after the device has shown a certificate signed by the
+    /// account's identity key, so nobody else can learn from the answer whether an account has one.
     /// </summary>
-    public async Task RequireCodeForNewDeviceAsync(Guid userId, string? code, CancellationToken cancellationToken)
+    public async Task RequireCodeForNewDeviceAsync(
+        Guid userId, Guid deviceId, byte[] signatureKey, string? code, CancellationToken cancellationToken)
     {
         var authenticator = await _authenticators.FindAsync(userId, cancellationToken);
         if (authenticator is null)
@@ -195,8 +212,13 @@ public sealed class AccountSecurityService : IDeviceListener
 
         code = (code ?? "").Trim();
         if (code.Length == 0)
+        {
+            if (await HasWaitedOutRecoveryAsync(userId, deviceId, signatureKey, cancellationToken))
+                return;
+
             throw ApiException.Unauthorized("authenticator_required",
                 "This account needs a code from your authenticator to add a device.");
+        }
 
         var now = UtcNow;
         if (_failures.TryGetValue(userId, out var failures)
@@ -237,6 +259,119 @@ public sealed class AccountSecurityService : IDeviceListener
         return await _authenticators.TryReplaceBackupCodesAsync(
             authenticator.UserId, authenticator.BackupCodeHashes, remaining, cancellationToken);
     }
+
+    // ── Recovering without the authenticator ─────────────────────────────────
+
+    /// <summary>
+    /// Starts the wait after which <paramref name="deviceId"/> is let in without an authenticator
+    /// code, or answers with the one already running. Called by <see cref="DeviceAuthService"/> only
+    /// once the device has proved it holds <paramref name="signatureKey"/> and a certificate from the
+    /// account's identity key — so only somebody with the recovery words (or a paired device) gets here.
+    /// The account's devices are told at once.
+    /// </summary>
+    public async Task<PendingRecovery> StartRecoveryAsync(
+        Guid userId, Guid deviceId, byte[] signatureKey, CancellationToken cancellationToken)
+    {
+        if (_options.RecoveryWait <= TimeSpan.Zero)
+            throw ApiException.ServiceUnavailable("recovery_unavailable",
+                "This server lets no device in without an authenticator code. Use a backup code, or add " +
+                "this device from one you still have.");
+
+        if (await _authenticators.FindAsync(userId, cancellationToken) is null)
+            throw ApiException.Conflict("recovery_not_needed",
+                "This account has no authenticator, so this device can sign in without waiting.");
+
+        var record = await _recoveries.FindAsync(userId, deviceId, cancellationToken);
+        if (record is null)
+        {
+            var running = (await _recoveries.ListAsync(userId, cancellationToken)).Count(r => !r.IsCancelled);
+            if (running >= _options.MaximumPendingRecoveries)
+                throw ApiException.Conflict("too_many_recoveries",
+                    "Too many devices are already waiting to be added to this account.");
+
+            var now = UtcNow;
+            var started = new PendingRecoveryRecord(
+                userId, deviceId, signatureKey, now, now + _options.RecoveryWait, CancelledAtUtc: null);
+            if (await _recoveries.TryAddAsync(started, cancellationToken))
+            {
+                await PublishRecoveriesAsync(userId, cancellationToken);
+                return ToPending(started);
+            }
+
+            // The same device asked twice at once; the other request started it.
+            record = await _recoveries.FindAsync(userId, deviceId, cancellationToken)
+                     ?? throw ApiException.Conflict("recovery_pending", "This device's wait is being started. Try again.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(record.SignatureKey, signatureKey))
+            throw ApiException.Unauthorized("invalid_credentials", "This device could not be signed in to that account.");
+        if (record.IsCancelled)
+            throw RecoveryCancelled();
+
+        return ToPending(record);
+    }
+
+    /// <summary>The waits running on the caller's account. Needs a bound session.</summary>
+    public async Task<IReadOnlyList<PendingRecovery>> GetRecoveriesAsync(UserSession session, CancellationToken cancellationToken)
+    {
+        await RequireBoundAsync(session, cancellationToken);
+        return await RunningAsync(session.UserId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Cancels every wait running on the caller's account, for good: those devices are never let in
+    /// without a code. Needs a bound session. Returns how many there were.
+    /// </summary>
+    public async Task<int> CancelRecoveriesAsync(UserSession session, CancellationToken cancellationToken)
+    {
+        await RequireBoundAsync(session, cancellationToken);
+        var cancelled = await _recoveries.CancelAllAsync(session.UserId, UtcNow, cancellationToken);
+        if (cancelled > 0)
+            await PublishRecoveriesAsync(session.UserId, cancellationToken);
+        return cancelled;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="deviceId"/> may be added with no code because its wait is over. Throws
+    /// while it is still running, and once it was cancelled. The wait is forgotten only once the device
+    /// is registered (<see cref="OnDeviceAddedAsync"/>), so a registration refused for another reason
+    /// — too many devices — does not cost the person another week.
+    /// </summary>
+    private async Task<bool> HasWaitedOutRecoveryAsync(
+        Guid userId, Guid deviceId, byte[] signatureKey, CancellationToken cancellationToken)
+    {
+        if (_options.RecoveryWait <= TimeSpan.Zero)
+            return false;
+
+        var record = await _recoveries.FindAsync(userId, deviceId, cancellationToken);
+        if (record is null || !CryptographicOperations.FixedTimeEquals(record.SignatureKey, signatureKey))
+            return false;
+        if (record.IsCancelled)
+            throw RecoveryCancelled();
+        if (UtcNow < record.EligibleAtUtc)
+            throw ApiException.Conflict("recovery_pending",
+                $"This device can be added without a code from {record.EligibleAtUtc:yyyy-MM-dd HH:mm} UTC.");
+
+        return true;
+    }
+
+    private async Task<IReadOnlyList<PendingRecovery>> RunningAsync(Guid userId, CancellationToken cancellationToken) =>
+        (await _recoveries.ListAsync(userId, cancellationToken))
+        .Where(r => !r.IsCancelled)
+        .Select(ToPending)
+        .ToList();
+
+    private async Task PublishRecoveriesAsync(Guid userId, CancellationToken cancellationToken) =>
+        await _events.PublishAsync(E2eeEventTypes.RecoveryChanged,
+            new RecoveryChangedEvent(await RunningAsync(userId, cancellationToken)), EventAudiences.Only(userId));
+
+    private static PendingRecovery ToPending(PendingRecoveryRecord record) =>
+        new(record.DeviceId, record.RequestedAtUtc, record.EligibleAtUtc);
+
+    private static ApiException RecoveryCancelled() =>
+        ApiException.Forbidden("recovery_cancelled",
+            "One of your devices cancelled this device's wait. Add it from a device you still have, or with " +
+            "an authenticator or backup code.");
 
     // ── Pairing a device that has no account yet ─────────────────────────────
 
@@ -288,7 +423,21 @@ public sealed class AccountSecurityService : IDeviceListener
     {
         await _vaults.DeleteAsync(userId, cancellationToken);
         await _authenticators.DeleteAsync(userId, cancellationToken);
+        await _recoveries.DeleteAllAsync(userId, cancellationToken);
         _failures.TryRemove(userId, out _);
+    }
+
+    /// <summary>
+    /// A device joined the account — after its wait, or with a code after all: it is not waiting any
+    /// more. A cancelled wait is kept, so the device it named can never be let in by it.
+    /// </summary>
+    public async Task OnDeviceAddedAsync(DeviceRecord device, CancellationToken cancellationToken)
+    {
+        if (await _recoveries.FindAsync(device.UserId, device.DeviceId, cancellationToken) is { IsCancelled: false }
+            && await _recoveries.DeleteAsync(device.UserId, device.DeviceId, cancellationToken))
+        {
+            await PublishRecoveriesAsync(device.UserId, cancellationToken);
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

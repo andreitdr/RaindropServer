@@ -262,6 +262,20 @@ public sealed class SqlServerDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        // Devices waiting to be let in without an authenticator code, one row per device.
+        """
+        IF OBJECT_ID(N'raindrop_pending_recoveries', N'U') IS NULL
+        CREATE TABLE raindrop_pending_recoveries (
+            user_id       varchar(36)    NOT NULL,
+            device_id     varchar(36)    NOT NULL,
+            signature_key varbinary(max) NOT NULL,
+            requested_at  datetime2      NOT NULL,
+            eligible_at   datetime2      NOT NULL,
+            cancelled_at  datetime2      NULL,
+            PRIMARY KEY (user_id, device_id)
+        )
+        """,
+
         // The MLS delivery service: groups, commit logs, key packages and pending Welcomes.
         """
         IF OBJECT_ID(N'raindrop_mls_groups', N'U') IS NULL

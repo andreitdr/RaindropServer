@@ -227,6 +227,28 @@ public class ServerConfigTests : IDisposable
     }
 
     [Fact]
+    public void The_recovery_wait_is_days_and_zero_switches_it_off()
+    {
+        var (config, report) = Read("""{ "users": { "recoveryWaitDays": 3 } }""");
+        Assert.False(report.HasProblems);
+        var options = new RaindropServer.E2ee.E2eeOptions();
+        config.ApplyTo(options);
+        Assert.Equal(TimeSpan.FromDays(3), options.RecoveryWait);
+
+        var (off, quiet) = Read("""{ "users": { "recoveryWaitDays": 0 } }""");
+        Assert.False(quiet.HasProblems);
+        off.ApplyTo(options);
+        Assert.Equal(TimeSpan.Zero, options.RecoveryWait);
+
+        Assert.Equal(ConfigurationSeverity.Error,
+            Find(Read("""{ "users": { "recoveryWaitDays": -1 } }""").Report, "users.recoveryWaitDays").Severity);
+        Assert.Equal(ConfigurationSeverity.Error,
+            Find(Read("""{ "users": { "recoveryWaitDays": 365 } }""").Report, "users.recoveryWaitDays").Severity);
+        Assert.Equal(ConfigurationSeverity.Warning,
+            Find(Read("""{ "users": { "recoveryWaitDays": 0.25 } }""").Report, "users.recoveryWaitDays").Severity);
+    }
+
+    [Fact]
     public void A_default_page_size_larger_than_the_maximum_is_a_contradiction()
     {
         var (_, report) = Read("""

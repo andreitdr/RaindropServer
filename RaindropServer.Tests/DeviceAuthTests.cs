@@ -90,7 +90,7 @@ public class DeviceAuthTests
 
     private sealed record Setup(
         DeviceAuthService Auth, DeviceService Devices, IUserStore Users, InMemorySessionStore Sessions,
-        AccountSecurityService Security, AuthClock Clock)
+        AccountSecurityService Security, AuthClock Clock, RecordingPublisher Events)
     {
         public UserSession Live(SessionResponse session) =>
             Sessions.TryValidate(session.Token, out var live) ? live : throw new InvalidOperationException("no session");
@@ -107,22 +107,40 @@ public class DeviceAuthTests
                     withCertificate ? device.Certificate : null, username, code),
                 default);
         }
+
+        public async Task<PendingRecovery> RequestRecoveryAsync(TestDevice device)
+        {
+            var challenge = await Auth.BeginAsync(device.Owner.UserId, default);
+            return await Auth.RequestRecoveryAsync(
+                new RequestRecoveryRequest(
+                    device.Owner.UserId, device.DeviceId, challenge.Nonce,
+                    device.SignChallenge(ServerKey, challenge.Nonce), device.Certificate),
+                default);
+        }
+
+        /// <summary>The waits the last recovery event announced.</summary>
+        public IReadOnlyList<PendingRecovery>? LastRecoveryEvent() =>
+            Events.Published.LastOrDefault(e => e.Type == E2eeEventTypes.RecoveryChanged).Data is RecoveryChangedEvent changed
+                ? changed.Recoveries
+                : null;
     }
 
-    private static async Task<Setup> CreateAsync()
+    private static async Task<Setup> CreateAsync(TimeSpan? recoveryWait = null)
     {
         var (driver, options) = await TestDatabases.OpenAsync("sqlite");
         var users = driver.CreateUserStore(options);
         var userOptions = new UserOptions();
         var sessions = new InMemorySessionStore(userOptions);
         var e2ee = new E2eeOptions();
+        if (recoveryWait is { } wait)
+            e2ee.RecoveryWait = wait;
         var events = new RecordingPublisher();
         var deviceStore = driver.CreateDeviceStore(options);
 
         var clock = new AuthClock();
         var security = new AccountSecurityService(
-            driver.CreateIdentityVaultStore(options), driver.CreateAuthenticatorStore(options), users,
-            new InMemoryPairingRelay(e2ee, clock), e2ee, clock);
+            driver.CreateIdentityVaultStore(options), driver.CreateAuthenticatorStore(options),
+            driver.CreateRecoveryStore(options), users, new InMemoryPairingRelay(e2ee, clock), events, e2ee, clock);
         var devices = new DeviceService(
             deviceStore, driver.CreateKeyBackupStore(options), users, new Pbkdf2PasswordHasher(1_000), sessions,
             new InMemoryDeviceLinkRelay(e2ee), events, e2ee, deviceListeners: [security]);
@@ -131,7 +149,7 @@ public class DeviceAuthTests
 
         return new Setup(
             new DeviceAuthService(users, deviceStore, accounts, devices, security, identity, e2ee, clock),
-            devices, users, sessions, security, clock);
+            devices, users, sessions, security, clock, events);
     }
 
     private static string Name() => $"u{Guid.NewGuid():N}"[..20];
@@ -323,10 +341,13 @@ public class DeviceAuthTests
     private static string CodeAt(Setup setup, int stepsFromNow = 0) =>
         Totp.Code(Secret, Totp.StepAt(setup.Clock.Now) + stepsFromNow);
 
+    private static Task<(Setup Setup, TestIdentity Person, UserSession Phone)> WithAuthenticatorAsync(
+        params string[] backupCodes) => WithAuthenticatorAsync(null, backupCodes);
+
     private static async Task<(Setup Setup, TestIdentity Person, UserSession Phone)> WithAuthenticatorAsync(
-        params string[] backupCodes)
+        TimeSpan? recoveryWait, params string[] backupCodes)
     {
-        var setup = await CreateAsync();
+        var setup = await CreateAsync(recoveryWait);
         var person = new TestIdentity();
         var phone = setup.Live(await setup.SignInAsync(person.NewDevice(), Name()));
         await setup.Security.EnrollAuthenticatorAsync(
@@ -440,6 +461,134 @@ public class DeviceAuthTests
         await setup.SignInAsync(person.NewDevice());
     }
 
+    // ── Recovering without the authenticator ─────────────────────────────────
+
+    [Fact]
+    public async Task A_device_that_waits_out_its_recovery_gets_in_without_a_code()
+    {
+        var (setup, person, phone) = await WithAuthenticatorAsync();
+        var laptop = person.NewDevice();
+        var started = setup.Clock.Now;
+
+        var recovery = await setup.RequestRecoveryAsync(laptop);
+        Assert.Equal(laptop.DeviceId, recovery.DeviceId);
+        Assert.Equal(started + TimeSpan.FromDays(7), recovery.EligibleAtUtc);
+
+        // The account is told, and only the account.
+        var announced = Assert.Single(setup.Events.Published, e => e.Type == E2eeEventTypes.RecoveryChanged);
+        Assert.NotNull(announced.Audience);
+        Assert.True(await announced.Audience!(person.UserId, default));
+        Assert.False(await announced.Audience(Guid.NewGuid(), default));
+        Assert.Equal([recovery], setup.LastRecoveryEvent());
+        Assert.Equal([recovery], await setup.Security.GetRecoveriesAsync(phone, default));
+
+        // Asking again changes nothing: the clock is not restarted.
+        setup.Clock.Now += TimeSpan.FromDays(3);
+        Assert.Equal(recovery, await setup.RequestRecoveryAsync(laptop));
+
+        Assert.Equal("recovery_pending", await RefusalAsync(() => setup.SignInAsync(laptop)));
+        setup.Clock.Now = recovery.EligibleAtUtc;
+        await setup.SignInAsync(laptop);
+
+        // In, and no longer waiting; signing in again needs nothing.
+        Assert.Empty(await setup.Security.GetRecoveriesAsync(phone, default));
+        Assert.Empty(setup.LastRecoveryEvent()!);
+        await setup.SignInAsync(laptop, withCertificate: false);
+    }
+
+    [Fact]
+    public async Task A_finished_wait_lets_in_only_the_device_that_waited()
+    {
+        var (setup, person, _) = await WithAuthenticatorAsync();
+        var laptop = person.NewDevice();
+        await setup.RequestRecoveryAsync(laptop);
+        setup.Clock.Now += TimeSpan.FromDays(8);
+
+        Assert.Equal("authenticator_required", await RefusalAsync(() => setup.SignInAsync(person.NewDevice())));
+        await setup.SignInAsync(laptop);
+    }
+
+    [Fact]
+    public async Task Any_device_of_the_account_cancels_the_wait_for_good()
+    {
+        var (setup, person, phone) = await WithAuthenticatorAsync();
+        var thief = person.NewDevice();
+        await setup.RequestRecoveryAsync(thief);
+
+        // An unbound session cannot cancel; a device can.
+        Assert.Equal("device_required",
+            await RefusalAsync(() => setup.Security.CancelRecoveriesAsync(Sessions.For(person.UserId), default)));
+        Assert.Equal(1, await setup.Security.CancelRecoveriesAsync(phone, default));
+        Assert.Empty(setup.LastRecoveryEvent()!);
+        Assert.Empty(await setup.Security.GetRecoveriesAsync(phone, default));
+
+        setup.Clock.Now += TimeSpan.FromDays(30);
+        Assert.Equal("recovery_cancelled", await RefusalAsync(() => setup.SignInAsync(thief)));
+        Assert.Equal("recovery_cancelled", await RefusalAsync(() => setup.RequestRecoveryAsync(thief)));
+
+        // The right code still works for it, as for any device.
+        Assert.Equal(0, await setup.Security.CancelRecoveriesAsync(phone, default));
+        await setup.SignInAsync(thief, code: CodeAt(setup));
+    }
+
+    [Fact]
+    public async Task A_code_ends_the_wait_too()
+    {
+        var (setup, person, phone) = await WithAuthenticatorAsync();
+        var laptop = person.NewDevice();
+        await setup.RequestRecoveryAsync(laptop);
+
+        await setup.SignInAsync(laptop, code: CodeAt(setup));
+        Assert.Empty(await setup.Security.GetRecoveriesAsync(phone, default));
+    }
+
+    [Fact]
+    public async Task Only_the_identitys_holder_may_start_a_wait_and_only_where_one_is_needed()
+    {
+        var (setup, person, _) = await WithAuthenticatorAsync();
+
+        var impostor = new TestIdentity(person.UserId).NewDevice();
+        Assert.Equal("identity_mismatch", await RefusalAsync(() => setup.RequestRecoveryAsync(impostor)));
+        Assert.Equal("invalid_credentials",
+            await RefusalAsync(() => setup.RequestRecoveryAsync(new TestIdentity().NewDevice())));
+
+        // A device already on the account just signs in.
+        var laptop = person.NewDevice();
+        await setup.SignInAsync(laptop, code: CodeAt(setup));
+        Assert.Equal("recovery_not_needed", await RefusalAsync(() => setup.RequestRecoveryAsync(laptop)));
+
+        // So does any device of an account with no authenticator.
+        var plain = await CreateAsync();
+        var other = new TestIdentity();
+        await plain.SignInAsync(other.NewDevice(), Name());
+        Assert.Equal("recovery_not_needed", await RefusalAsync(() => plain.RequestRecoveryAsync(other.NewDevice())));
+        Assert.DoesNotContain(setup.Events.Published, e => e.Type == E2eeEventTypes.RecoveryChanged);
+    }
+
+    [Fact]
+    public async Task Waits_are_bounded_and_can_be_switched_off()
+    {
+        var (setup, person, _) = await WithAuthenticatorAsync();
+        for (var i = 0; i < 5; i++)
+            await setup.RequestRecoveryAsync(person.NewDevice());
+        Assert.Equal("too_many_recoveries", await RefusalAsync(() => setup.RequestRecoveryAsync(person.NewDevice())));
+
+        var (off, owner, _) = await WithAuthenticatorAsync(TimeSpan.Zero);
+        Assert.Equal("recovery_unavailable", await RefusalAsync(() => off.RequestRecoveryAsync(owner.NewDevice())));
+    }
+
+    [Fact]
+    public async Task Resetting_an_identity_ends_every_wait()
+    {
+        var (setup, person, _) = await WithAuthenticatorAsync();
+        await setup.RequestRecoveryAsync(person.NewDevice());
+
+        await setup.Devices.EraseAsync(person.UserId, default);
+
+        // Read as any bound session of the account would.
+        Assert.Empty(await setup.Security.GetRecoveriesAsync(Sessions.For(person.UserId, Guid.NewGuid()), default));
+    }
+
     // ── The vault ────────────────────────────────────────────────────────────
 
     private const string LookupId = "0123456789abcdef0123456789abcdef";
@@ -457,7 +606,9 @@ public class DeviceAuthTests
         Assert.Equal([4, 5], mine.Vault);
         Assert.Null((await setup.Security.GetVaultAsync(stranger, default)).Vault);
 
-        Assert.Equal([1, 2, 3], await setup.Security.GetSealedRootAsync(LookupId, default));
+        var found = await setup.Security.GetSealedRootAsync(LookupId, default);
+        Assert.Equal([1, 2, 3], found.SealedRoot);
+        Assert.Equal([4, 5], found.Vault);
         Assert.Equal("vault_not_found",
             await RefusalAsync(() => setup.Security.GetSealedRootAsync("ffffffffffffffffffffffffffffffff", default)));
         Assert.Equal("vault_not_found", await RefusalAsync(() => setup.Security.GetSealedRootAsync("not-hex", default)));
@@ -465,7 +616,7 @@ public class DeviceAuthTests
         // Nobody can park their own blob on somebody else's lookup id, or write without a device.
         Assert.Equal("invalid_vault", await RefusalAsync(() =>
             setup.Security.PutVaultAsync(stranger, new PutIdentityVaultRequest(LookupId, [9], [9]), default)));
-        Assert.Equal([1, 2, 3], await setup.Security.GetSealedRootAsync(LookupId, default));
+        Assert.Equal([1, 2, 3], (await setup.Security.GetSealedRootAsync(LookupId, default)).SealedRoot);
         Assert.Equal("device_required", await RefusalAsync(() => setup.Security.PutVaultAsync(
             Sessions.For(phone.UserId), new PutIdentityVaultRequest(LookupId, [9], [9]), default)));
 
@@ -614,5 +765,36 @@ public class AccountSecurityStoreTests
         Assert.Empty((await authenticators.FindAsync(user, default))!.BackupCodeHashes);
         await authenticators.DeleteAsync(user, default);
         Assert.Null(await authenticators.FindAsync(user, default));
+    }
+
+    [Theory]
+    [MemberData(nameof(TestDatabases.Providers), MemberType = typeof(TestDatabases))]
+    public async Task A_device_waits_once_and_cancelling_stops_every_wait(string provider)
+    {
+        var (driver, options) = await TestDatabases.OpenAsync(provider);
+        var recoveries = driver.CreateRecoveryStore(options);
+        var user = Guid.NewGuid();
+        var (laptop, tablet) = (Guid.NewGuid(), Guid.NewGuid());
+        var now = new DateTime(2026, 11, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        var first = new PendingRecoveryRecord(user, laptop, [1, 2], now, now.AddDays(7), null);
+        var added = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => recoveries.TryAddAsync(first, default))));
+        Assert.Equal(1, added.Count(ok => ok));
+        Assert.True(await recoveries.TryAddAsync(first with { DeviceId = tablet, RequestedAtUtc = now.AddHours(1) }, default));
+
+        var listed = await recoveries.ListAsync(user, default);
+        Assert.Equal([laptop, tablet], listed.Select(r => r.DeviceId));
+        Assert.Equal([1, 2], listed[0].SignatureKey);
+        Assert.Equal(now.AddDays(7), listed[0].EligibleAtUtc);
+        Assert.Null(listed[0].CancelledAtUtc);
+
+        Assert.Equal(2, await recoveries.CancelAllAsync(user, now.AddDays(1), default));
+        Assert.Equal(0, await recoveries.CancelAllAsync(user, now.AddDays(2), default));
+        Assert.Equal(now.AddDays(1), (await recoveries.FindAsync(user, laptop, default))!.CancelledAtUtc);
+
+        Assert.True(await recoveries.DeleteAsync(user, laptop, default));
+        Assert.False(await recoveries.DeleteAsync(user, laptop, default));
+        await recoveries.DeleteAllAsync(user, default);
+        Assert.Empty(await recoveries.ListAsync(user, default));
     }
 }

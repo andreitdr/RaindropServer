@@ -161,3 +161,85 @@ internal sealed class RelationalAuthenticatorStore : RelationalStore, IAuthentic
     private static IReadOnlyList<string> Split(string hashes) =>
         hashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
 }
+
+/// <summary>The <see cref="IRecoveryStore"/> every SQL driver shares.</summary>
+internal sealed class RelationalRecoveryStore : RelationalStore, IRecoveryStore
+{
+    public const string Table = "raindrop_pending_recoveries";
+    private const string Columns = "user_id, device_id, signature_key, requested_at, eligible_at, cancelled_at";
+
+    public RelationalRecoveryStore(RelationalDatabaseDriver driver, string connectionString)
+        : base(driver, connectionString)
+    {
+    }
+
+    public Task<IReadOnlyList<PendingRecoveryRecord>> ListAsync(Guid userId, CancellationToken cancellationToken) =>
+        ReadManyAsync($"SELECT {Columns} FROM {Table} WHERE user_id = @user_id ORDER BY requested_at, device_id",
+            command => AddValue(command, "@user_id", userId.ToString()), Read, cancellationToken);
+
+    public Task<PendingRecoveryRecord?> FindAsync(Guid userId, Guid deviceId, CancellationToken cancellationToken) =>
+        FindOneAsync($"SELECT {Columns} FROM {Table} WHERE user_id = @user_id AND device_id = @device_id",
+            command =>
+            {
+                AddValue(command, "@user_id", userId.ToString());
+                AddValue(command, "@device_id", deviceId.ToString());
+            },
+            Read, cancellationToken);
+
+    public async Task<bool> TryAddAsync(PendingRecoveryRecord recovery, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ExecuteAsync(
+                $"INSERT INTO {Table} ({Columns}) " +
+                "VALUES (@user_id, @device_id, @signature_key, @requested_at, @eligible_at, @cancelled_at)",
+                command =>
+                {
+                    AddValue(command, "@user_id", recovery.UserId.ToString());
+                    AddValue(command, "@device_id", recovery.DeviceId.ToString());
+                    AddBytes(command, "@signature_key", recovery.SignatureKey);
+                    AddTimestamp(command, "@requested_at", recovery.RequestedAtUtc);
+                    AddTimestamp(command, "@eligible_at", recovery.EligibleAtUtc);
+                    AddTimestamp(command, "@cancelled_at", recovery.CancelledAtUtc);
+                },
+                cancellationToken);
+            return true;
+        }
+        catch (DbException)
+        {
+            // The primary key: this device is already waiting.
+            return false;
+        }
+    }
+
+    public Task<int> CancelAllAsync(Guid userId, DateTime cancelledAtUtc, CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            $"UPDATE {Table} SET cancelled_at = @cancelled_at WHERE user_id = @user_id AND cancelled_at IS NULL",
+            command =>
+            {
+                AddValue(command, "@user_id", userId.ToString());
+                AddTimestamp(command, "@cancelled_at", cancelledAtUtc);
+            },
+            cancellationToken);
+
+    public async Task<bool> DeleteAsync(Guid userId, Guid deviceId, CancellationToken cancellationToken) =>
+        await ExecuteAsync($"DELETE FROM {Table} WHERE user_id = @user_id AND device_id = @device_id",
+            command =>
+            {
+                AddValue(command, "@user_id", userId.ToString());
+                AddValue(command, "@device_id", deviceId.ToString());
+            },
+            cancellationToken) > 0;
+
+    public Task DeleteAllAsync(Guid userId, CancellationToken cancellationToken) =>
+        ExecuteAsync($"DELETE FROM {Table} WHERE user_id = @user_id",
+            command => AddValue(command, "@user_id", userId.ToString()), cancellationToken);
+
+    private PendingRecoveryRecord Read(DbDataReader reader) => new(
+        Guid.Parse(reader.GetString(0)),
+        Guid.Parse(reader.GetString(1)),
+        reader.GetFieldValue<byte[]>(2),
+        Driver.ReadTimestamp(reader, 3),
+        Driver.ReadTimestamp(reader, 4),
+        reader.IsDBNull(5) ? null : Driver.ReadTimestamp(reader, 5));
+}

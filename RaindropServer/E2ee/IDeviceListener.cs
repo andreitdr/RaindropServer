@@ -51,6 +51,19 @@ public sealed class E2eeOptions
 
     public TimeSpan AuthenticatorLockout { get; set; } = TimeSpan.FromMinutes(15);
 
+    /// <summary>
+    /// How long a device that holds the account's identity key — recovered with the recovery words —
+    /// waits to be let in without an authenticator code, while the account's devices are told and may
+    /// cancel. <see cref="TimeSpan.Zero"/> lets nobody in without a code.
+    /// </summary>
+    public TimeSpan RecoveryWait { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// How many devices may be waiting on one account at once. Each needs the identity key, so this
+    /// only bounds somebody who has the recovery words already.
+    /// </summary>
+    public int MaximumPendingRecoveries { get; set; } = 5;
+
     /// <summary>The most users one device listing may ask about.</summary>
     public int MaximumUsersPerListing { get; set; } = 500;
 

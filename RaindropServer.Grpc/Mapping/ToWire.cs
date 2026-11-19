@@ -58,6 +58,13 @@ internal static class ToWire
         ExpiresAt = Time(session.ExpiresAtUtc)
     };
 
+    public static Proto.PendingRecovery ToProto(this PendingRecovery recovery) => new()
+    {
+        DeviceId = Text(recovery.DeviceId),
+        RequestedAt = Time(recovery.RequestedAtUtc),
+        EligibleAt = Time(recovery.EligibleAtUtc)
+    };
+
     // ── Members ──────────────────────────────────────────────────────────────
 
     public static Proto.Member ToProto(this Member member) => new()
