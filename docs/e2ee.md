@@ -69,6 +69,7 @@ clients, not trusted.
 | Refuse to store or deliver things (denial of service) | Sign as a user or read what they encrypt |
 | See who has how many devices, and when they were added | Add a device to a user whose identity key is pinned: it cannot produce the certificate |
 | Let an account holder **reset** their identity with the password | Make that reset silent: every member is sent `e2ee.identity.reset`, and peers' clients see the safety number change |
+| Let a **new identity take an account over** with a claim code its owner issued (`reclaim`) | Do it quietly, or read what the old identity could: the same reset, the same event, and old history stays sealed |
 
 ## Linking a new device
 
@@ -157,6 +158,28 @@ be let in **after a wait**, `E2eeOptions.RecoveryWait` (`users.recoveryWaitDays`
 What it changes: leaked words are still not, alone, the account **while the owner has a device to say no
 with**. Someone who has the words and the owner's every device gone gets in after the wait — which is
 also exactly the person this is for. A server owner who would rather nobody could sets the wait to zero.
+
+### Reclaiming an account
+
+The last resort, for someone who lost every device, the recovery words and any backup, so nothing of
+theirs can prove the account is theirs. The server's owner, satisfied it is really them, runs
+`reclaim <username>` in the console ([`AccountClaimService`](../RaindropServer/E2ee/AccountClaimService.cs)):
+
+- It prints a **claim code**, `RDC1-<user id>-<32 hex>`: single use, `E2eeOptions.ClaimLifetime` (a day),
+  kept hashed in memory, one per account (a new one replaces the old; a restart forgets them). The
+  account must be active or have left with its data preserved. **Nothing changes until it is redeemed.**
+- The person's new identity redeems it in `CompleteAuth` (`claim_code`): a device certifying itself
+  for that account id with the new identity key (the client's `create_identity_from_root_for`), proven
+  like any sign-in. The code is spent first (`invalid_claim` for a wrong, spent, lapsed or other
+  account's code, or a device already on the account); then `DeviceService.ResetIdentityForClaimAsync`
+  resets the old identity exactly as `ResetIdentity` would — devices revoked and their sessions ended,
+  key backup, vault, authenticator and recovery waits dropped, `e2ee.identity.reset` to every member —
+  the certificate becomes the account's identity, and the session opens.
+- The account keeps its id, username, roles and authorship. Encrypted history from before stays
+  unreadable to the new identity, as forward-only history means it would.
+
+It gives the owner nothing they lacked — they can rewrite the database — but makes doing so visible
+rather than a hand-edited row.
 
 **Pairing relay.** `IPairingRelay` (in memory). A device with no account anywhere calls `StartPairing`
 (**anonymous**, offer ≤ 1 KiB) and gets a pairing id for its pairing code plus a 256-bit take token. A

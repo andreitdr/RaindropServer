@@ -10,6 +10,7 @@ using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Configuration;
 using RaindropServer.Data;
+using RaindropServer.E2ee;
 using RaindropServer.Events;
 using RaindropServer.Grpc;
 using RaindropServer.Roles;
@@ -194,6 +195,7 @@ var events = server.Services.GetRequiredService<IEventConnectionRegistry>();
 var voiceState = server.Services.GetRequiredService<IVoiceStateStore>();
 var channelStore = server.Services.GetRequiredService<IChannelStore>();
 var userStore = server.Services.GetRequiredService<IUserStore>();
+var claims = server.Services.GetRequiredService<AccountClaimService>();
 
 // ── 7. Main thread: the server owner's console ───────────────────────────────
 // The server runs independently; use this loop for your own CLI commands.
@@ -228,6 +230,7 @@ while (true)
             Console.WriteLine("  roles                    list this server's roles and what they grant");
             Console.WriteLine("  grant <user> <role>      give a member a role");
             Console.WriteLine("  revoke <user> <role>     take a role away from a member");
+            Console.WriteLine("  reclaim <user>           let a member who lost everything take their account back");
             Console.WriteLine("  events                   show how many clients are listening for events");
             Console.WriteLine("  voice                    list who is in which voice call");
             Console.WriteLine("  purge-plaintext          delete every message stored before end-to-end encryption");
@@ -243,6 +246,10 @@ while (true)
         case "grant":
         case "revoke":
             await ChangeRoleAsync(words);
+            break;
+
+        case "reclaim":
+            await ReclaimAsync(words);
             break;
 
         case "events":
@@ -415,6 +422,43 @@ async Task PrintAttachmentsAsync()
 
 // Deletes every plaintext message and the archive of deleted messages' text: everything the server
 // could read. Encrypted messages stay. Asks first, since it cannot be undone.
+// The last resort for a member who lost every device, their recovery words and any backup: a
+// one-time code their new identity redeems to take the account over (AccountClaimService). Nothing
+// changes until it is redeemed; then their old identity is reset, visibly, as a reset by them would be.
+async Task ReclaimAsync(string[] words)
+{
+    if (words.Length != 2)
+    {
+        Console.WriteLine("  Usage: reclaim <user>");
+        return;
+    }
+
+    Console.WriteLine($"  Only do this once you are sure the person asking is '{words[1]}' — in person, or by a");
+    Console.WriteLine("  channel you trust. Whoever redeems the code becomes that member: their devices are signed");
+    Console.WriteLine("  out, every member sees their safety number change, and messages they could read before");
+    Console.Write("  stay unreadable to the new identity. Type 'yes' to issue a code: ");
+    if (!string.Equals(Console.ReadLine()?.Trim(), "yes", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("  No code was issued.");
+        return;
+    }
+
+    try
+    {
+        var claim = await claims.IssueAsync(words[1], CancellationToken.None);
+        Console.WriteLine($"  Claim code for {claim.Username}, good once until {claim.ExpiresAtUtc:yyyy-MM-dd HH:mm} UTC:");
+        Console.WriteLine();
+        Console.WriteLine($"    {claim.Code}");
+        Console.WriteLine();
+        Console.WriteLine("  They enter it in Raindrop when joining this server, from a new identity. Issuing another");
+        Console.WriteLine("  replaces this one; restarting the server forgets it.");
+    }
+    catch (ApiException ex)
+    {
+        Console.WriteLine($"  {ex.Message}");
+    }
+}
+
 async Task PurgePlaintextAsync()
 {
     Console.Write("  Delete every plaintext message and the deleted-message archive? This cannot be undone. Type 'yes': ");

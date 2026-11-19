@@ -64,6 +64,9 @@ public sealed class E2eeOptions
     /// </summary>
     public int MaximumPendingRecoveries { get; set; } = 5;
 
+    /// <summary>How long a claim code the server's owner issued (<see cref="AccountClaimService"/>) works.</summary>
+    public TimeSpan ClaimLifetime { get; set; } = TimeSpan.FromHours(24);
+
     /// <summary>The most users one device listing may ask about.</summary>
     public int MaximumUsersPerListing { get; set; } = 500;
 

@@ -90,21 +90,21 @@ public class DeviceAuthTests
 
     private sealed record Setup(
         DeviceAuthService Auth, DeviceService Devices, IUserStore Users, InMemorySessionStore Sessions,
-        AccountSecurityService Security, AuthClock Clock, RecordingPublisher Events)
+        AccountSecurityService Security, AuthClock Clock, RecordingPublisher Events, AccountClaimService Claims)
     {
         public UserSession Live(SessionResponse session) =>
             Sessions.TryValidate(session.Token, out var live) ? live : throw new InvalidOperationException("no session");
 
         public async Task<SessionResponse> SignInAsync(
             TestDevice device, string? username = null, bool withCertificate = true, byte[]? serverKey = null,
-            string? code = null)
+            string? code = null, string? claim = null)
         {
             var challenge = await Auth.BeginAsync(device.Owner.UserId, default);
             return await Auth.CompleteAsync(
                 new CompleteAuthRequest(
                     device.Owner.UserId, device.DeviceId, challenge.Nonce,
                     device.SignChallenge(serverKey ?? ServerKey, challenge.Nonce),
-                    withCertificate ? device.Certificate : null, username, code),
+                    withCertificate ? device.Certificate : null, username, code, claim),
                 default);
         }
 
@@ -146,10 +146,11 @@ public class DeviceAuthTests
             new InMemoryDeviceLinkRelay(e2ee), events, e2ee, deviceListeners: [security]);
         var accounts = new UserService(users, new Pbkdf2PasswordHasher(1_000), sessions, userOptions, events);
         var identity = new ServerIdentity(ServerIdentity.CurrentProtocolVersion, null, ServerKey);
+        var claims = new AccountClaimService(users, e2ee, clock);
 
         return new Setup(
-            new DeviceAuthService(users, deviceStore, accounts, devices, security, identity, e2ee, clock),
-            devices, users, sessions, security, clock, events);
+            new DeviceAuthService(users, deviceStore, accounts, devices, security, claims, identity, e2ee, clock),
+            devices, users, sessions, security, clock, events, claims);
     }
 
     private static string Name() => $"u{Guid.NewGuid():N}"[..20];
@@ -587,6 +588,88 @@ public class DeviceAuthTests
 
         // Read as any bound session of the account would.
         Assert.Empty(await setup.Security.GetRecoveriesAsync(Sessions.For(person.UserId, Guid.NewGuid()), default));
+    }
+
+    // ── Reclaiming an account with the owner's claim code ───────────────────
+
+    [Fact]
+    public async Task A_claim_code_lets_a_new_identity_take_the_account_over()
+    {
+        var (setup, person, phone) = await WithAuthenticatorAsync();
+        await setup.Security.PutVaultAsync(phone, new PutIdentityVaultRequest(LookupId, [1], [2]), default);
+        var username = (await setup.Users.FindByIdAsync(person.UserId, default))!.Username!;
+
+        var claim = await setup.Claims.IssueAsync(username.ToUpperInvariant(), default);
+        Assert.Equal(person.UserId, claim.UserId);
+        Assert.StartsWith($"RDC1-{person.UserId:D}-", claim.Code);
+
+        // Everything is lost: a brand-new identity, certifying for the same account id.
+        var reborn = new TestIdentity(person.UserId).NewDevice();
+        Assert.Equal("identity_mismatch", await RefusalAsync(() => setup.SignInAsync(reborn)));
+        var session = setup.Live(await setup.SignInAsync(reborn, claim: claim.Code));
+
+        // Same account, now this identity's; the old one's devices and sessions, vault and
+        // authenticator are gone, and every member is told.
+        Assert.Equal(person.UserId, session.UserId);
+        Assert.Equal(reborn.DeviceId, session.DeviceId);
+        Assert.Equal(username, (await setup.Users.FindByIdAsync(person.UserId, default))!.Username);
+        Assert.False(setup.Sessions.TryValidate(phone.Token, out _));
+        Assert.Contains(setup.Events.Published, e =>
+            e.Type == E2eeEventTypes.IdentityReset && e.Data is IdentityResetEvent reset && reset.UserId == person.UserId);
+        Assert.Equal("vault_not_found", await RefusalAsync(() => setup.Security.GetSealedRootAsync(LookupId, default)));
+        Assert.False((await setup.Security.GetAuthenticatorStatusAsync(session, default)).Enabled);
+
+        // The new identity's other devices join by its certificate, as any identity's do.
+        await setup.SignInAsync(reborn.Owner.NewDevice());
+    }
+
+    [Fact]
+    public async Task A_claim_code_works_once_for_its_account_and_lapses()
+    {
+        var setup = await CreateAsync();
+        var alice = new TestIdentity();
+        var bob = new TestIdentity();
+        var aliceName = Name();
+        await setup.SignInAsync(alice.NewDevice(), aliceName);
+        await setup.SignInAsync(bob.NewDevice(), Name());
+
+        var claim = await setup.Claims.IssueAsync(aliceName, default);
+
+        // Not for another account, and not a near miss.
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(bob.UserId).NewDevice(), claim: claim.Code)));
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: claim.Code[..^1] + "0")));
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: "nonsense")));
+
+        // Once.
+        await setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: claim.Code);
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: claim.Code)));
+
+        // A day, and a newer code replaces an older one.
+        var older = await setup.Claims.IssueAsync(aliceName, default);
+        var newer = await setup.Claims.IssueAsync(aliceName, default);
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: older.Code)));
+        setup.Clock.Now += TimeSpan.FromHours(25);
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: newer.Code)));
+
+        Assert.Equal("user_not_found", await RefusalAsync(() => setup.Claims.IssueAsync("nobody-here", default)));
+    }
+
+    [Fact]
+    public void A_claim_code_is_read_forgivingly_and_strictly()
+    {
+        var id = Guid.NewGuid();
+        Assert.True(AccountClaimService.TryParse($"  RDC1-{id:D}-0123456789ABCDEF0123456789abcdef ", out var read, out _));
+        Assert.Equal(id, read);
+        Assert.False(AccountClaimService.TryParse($"RDC1-{id:D}-0123456789abcdef", out _, out _));
+        Assert.False(AccountClaimService.TryParse($"RDC2-{id:D}-0123456789abcdef0123456789abcdef", out _, out _));
+        Assert.False(AccountClaimService.TryParse($"RDC1-{id:D}-0123456789abcdef0123456789abcdeg", out _, out _));
+        Assert.False(AccountClaimService.TryParse(null, out _, out _));
     }
 
     // ── The vault ────────────────────────────────────────────────────────────

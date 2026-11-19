@@ -341,6 +341,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<AccountSecurityService>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IDeviceListener, AccountSecurityService>(
             sp => sp.GetRequiredService<AccountSecurityService>()));
+        services.TryAddSingleton<AccountClaimService>();
         services.TryAddSingleton<DeviceAuthService>();
         services.AddServerEventHandler<MemberEvent, ErasedMemberCleanup>();
 

@@ -17,9 +17,10 @@ public sealed record AuthChallengeResponse(byte[] Nonce, DateTime ExpiresAtUtc);
 /// <param name="Certificate">The device's certificate; needed until the device is registered here.</param>
 /// <param name="Username">The username to claim; needed when the UUID has no account yet.</param>
 /// <param name="AuthenticatorCode">An authenticator or backup code; needed when the device is new to an account that has an authenticator.</param>
+/// <param name="ClaimCode">A claim code from the server's owner (<see cref="AccountClaimService"/>): the device's new identity takes the account over.</param>
 public sealed record CompleteAuthRequest(
     Guid UserId, Guid DeviceId, byte[] Nonce, byte[] Signature, byte[]? Certificate, string? Username,
-    string? AuthenticatorCode = null);
+    string? AuthenticatorCode = null, string? ClaimCode = null);
 
 /// <param name="UserId">The account the device wants to join.</param>
 /// <param name="DeviceId">The device asking.</param>
@@ -70,6 +71,7 @@ public sealed class DeviceAuthService
     private readonly UserService _accounts;
     private readonly DeviceService _deviceService;
     private readonly AccountSecurityService _security;
+    private readonly AccountClaimService _claims;
     private readonly ServerIdentity _identity;
     private readonly E2eeOptions _options;
     private readonly TimeProvider _time;
@@ -83,10 +85,12 @@ public sealed class DeviceAuthService
         UserService accounts,
         DeviceService deviceService,
         AccountSecurityService security,
+        AccountClaimService claims,
         ServerIdentity identity,
         E2eeOptions options,
         TimeProvider? time = null)
     {
+        _claims = claims;
         _users = users;
         _devices = devices;
         _accounts = accounts;
@@ -150,6 +154,9 @@ public sealed class DeviceAuthService
             request.UserId, request.DeviceId, request.Nonce, request.Signature, request.Certificate, cancellationToken);
         var user = proof.User;
 
+        if (request.ClaimCode is not null)
+            return await ReclaimAsync(request, proof, cancellationToken);
+
         // From here on the caller holds the device key. What is left is whether that device is the
         // account owner's, which the certificate's signer answers.
         if (user is null || user.Status == UserStatus.Erased)
@@ -194,6 +201,30 @@ public sealed class DeviceAuthService
 
         await RequireAccountIdentityAsync(user, proof.Presented!, cancellationToken);
         return await _security.StartRecoveryAsync(user.UserId, request.DeviceId, proof.SignatureKey, cancellationToken);
+    }
+
+    /// <summary>
+    /// A new identity takes an account over with a claim code from the server's owner: the account's
+    /// old identity is reset — its devices revoked and their sessions ended, its vault, authenticator
+    /// and recovery waits dropped, every member told — and the presenting device's certificate becomes
+    /// the account's identity. The code is spent before anything changes, so it works once.
+    /// </summary>
+    private async Task<SessionResponse> ReclaimAsync(
+        CompleteAuthRequest request, Proof proof, CancellationToken cancellationToken)
+    {
+        if (proof.User is not { Status: UserStatus.Active or UserStatus.LeftDataPreserved } user
+            || proof.Registered
+            || !_claims.TryRedeem(user.UserId, request.ClaimCode))
+        {
+            throw ApiException.Unauthorized("invalid_claim",
+                "That claim code is not right for this account, was already used, or has lapsed. Ask the " +
+                "server's owner for a new one.");
+        }
+
+        await _deviceService.ResetIdentityForClaimAsync(user.UserId, cancellationToken);
+        await _deviceService.RegisterCertificateAsync(user.UserId, request.Certificate, cancellationToken);
+        user = await _accounts.RejoinForDeviceAsync(user, cancellationToken);
+        return await _accounts.OpenDeviceSessionAsync(user, request.DeviceId, cancellationToken);
     }
 
     /// <summary>What a signed challenge established about its caller.</summary>

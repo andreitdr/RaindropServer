@@ -73,7 +73,8 @@ public sealed class UserGrpcService : Proto.UserService.UserServiceBase
                 request.Signature.ToByteArray(),
                 OptionalBytes(request.HasCertificate, request.Certificate),
                 request.HasUsername ? request.Username : null,
-                request.HasAuthenticatorCode ? request.AuthenticatorCode : null),
+                request.HasAuthenticatorCode ? request.AuthenticatorCode : null,
+                request.HasClaimCode ? request.ClaimCode : null),
             context.CancellationToken);
 
         return new Proto.CompleteAuthResponse { Session = session.ToProto() };

@@ -93,7 +93,9 @@ The event stream is bidirectional; `-d @` reads its frames from stdin:
 
 In the running CLI's console, `drivers` lists the installed database modules, `db` shows the active
 one, `fingerprint` prints the TLS fingerprint for clients to pin, `roles` lists the server's roles
-and what each grants, `grant <user> <role>` and `revoke <user> <role>` change who holds one,
+and what each grants, `grant <user> <role>` and `revoke <user> <role>` change who holds one, `reclaim <user>` issues a
+one-time claim code that lets a member who lost everything take their account back with a new identity
+(after a `yes`),
 `events` shows how many clients have the event stream open, `voice` lists who is in which voice call,
 `purge-plaintext` deletes every pre-encryption message and the deleted-message archive (after a `yes`),
 `reports` shows the latest reported messages, `attachments` shows how many encrypted files are stored and
@@ -271,6 +273,9 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
   it holds the identity key but has no authenticator code is let in after `E2eeOptions.RecoveryWait`
   (`users.recoveryWaitDays`, 7 by default, 0 = never); `e2ee.recovery.changed` tells the account and any
   bound session cancels it for good (`DeviceService.CancelRecovery`). See `docs/e2ee.md`.
+- **Reclaiming an account** (`AccountClaimService`, console `reclaim <user>`): a one-time claim code,
+  redeemed in `CompleteAuth` (`claim_code`), resets the old identity visibly and hands the account to
+  a new one. See `docs/e2ee.md#reclaiming-an-account`.
 - **Key backup** (`raindrop_key_backups`), **device linking** through `IDeviceLinkRelay` (in memory,
   opaque offer/approval; the link code's commitment stops the server substituting keys), **identity
   reset** with the password (publishes `e2ee.identity.reset`).

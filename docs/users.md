@@ -63,6 +63,7 @@ An account belongs to whoever holds a device key that the account's identity key
 | New to an active account | signature + certificate | The certificate must be signed by the account's identity key (`identity_mismatch` otherwise); the device is registered, then signs in |
 | The first for a UUID with no account (or an erased one) | signature + certificate + username | The account is created with **no password**, the certificate establishes its identity key |
 | Anything on an account that left with data preserved | as above | The account is restored |
+| New, with a claim code from the server's owner | signature + certificate (any identity) + `claim_code` | The account's old identity is reset and this one takes over ([E2EE](e2ee.md#reclaiming-an-account)) |
 
 The session is **bound to the device from the start** (`UserService.OpenDeviceSessionAsync`), so there is
 no separate `BindSession` step. Other sessions of the account are left alone.

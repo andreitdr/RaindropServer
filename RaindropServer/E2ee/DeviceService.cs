@@ -219,6 +219,17 @@ public sealed class DeviceService
     }
 
     /// <summary>
+    /// Resets <paramref name="userId"/>'s identity for a new one taking the account over with a claim
+    /// code from the server's owner (<see cref="AccountClaimService"/>): the same as
+    /// <see cref="ResetIdentityAsync"/>, which the account's holder cannot call, having lost every device.
+    /// </summary>
+    public async Task ResetIdentityForClaimAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        await EraseAsync(userId, cancellationToken);
+        await _events.PublishAsync(E2eeEventTypes.IdentityReset, new IdentityResetEvent(userId));
+    }
+
+    /// <summary>
     /// Forgets everything end-to-end encryption held for a user: identity key, backup, devices and the
     /// sessions bound to them. Used by an identity reset and when an account is erased.
     /// </summary>
