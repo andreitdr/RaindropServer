@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- LibraryImport generates its marshalling as unsafe code, for the host metrics read from macOS
+         and Windows (Metrics/MacHostMetrics.cs, Metrics/WindowsHostMetrics.cs). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- The owner's dashboard: its own port, its own sign-in, and a page served from memory. Nothing
+       here is reachable by clients; see docs/dashboard.md. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RaindropServer\RaindropServer.csproj" />
+  </ItemGroup>
+
+  <!-- The page is embedded rather than served from a folder: one file less to ship and to get wrong,
+       and nothing on disk an attacker could swap. -->
+  <ItemGroup>
+    <EmbeddedResource Include="wwwroot\*" LogicalName="dashboard/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RaindropServer.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -181,6 +181,11 @@ theirs can prove the account is theirs. The server's owner, satisfied it is real
 It gives the owner nothing they lacked — they can rewrite the database — but makes doing so visible
 rather than a hand-edited row.
 
+The [owner dashboard](dashboard.md#recovering-an-account) issues the same code from a browser, by
+username or account id, after showing the account so the owner can be sure it is the right one.
+Outstanding codes can be listed (`AccountClaimService.ListPending`: who, issued, expiry — never the code)
+and withdrawn (`Cancel`), from the dashboard or with `reclaims` / `reclaim-cancel <user>` in the console.
+
 **Pairing relay.** `IPairingRelay` (in memory). A device with no account anywhere calls `StartPairing`
 (**anonymous**, offer ≤ 1 KiB) and gets a pairing id for its pairing code plus a 256-bit take token. A
 paired device (bound session) calls `GetPairingOffer` and `ApprovePairing` (approval ≤ 512 KiB); the new

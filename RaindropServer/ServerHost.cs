@@ -1,9 +1,11 @@
+using System.Net;
 using System.Net.Security;
 using System.Runtime.Versioning;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -68,7 +70,9 @@ public sealed class ServerHost : IAsyncDisposable
         IServiceCollection services, ServerHostOptions options, Action<WebApplicationBuilder>? configure = null)
     {
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls(options.Urls);
+        builder.WebHost.UseUrls([.. options.Urls, .. options.Listeners.Select(listener => listener.Url)]);
+
+        var listeners = ListenersByPort(options);
 
         // Without this the host would take its default 30 seconds to drain, which is longer than
         // anything supervising a container waits before resorting to SIGKILL.
@@ -79,7 +83,26 @@ public sealed class ServerHost : IAsyncDisposable
             // HTTP/2 carries gRPC — every call and stream multiplexed over one connection. HTTP/1.1 stays
             // for the one thing that needs it: the voice signalling relay's WebSocket, which LiveKit's
             // client SDK opens as an ordinary upgrade. ALPN picks per connection.
-            kestrel.ConfigureEndpointDefaults(endpoint => endpoint.Protocols = HttpProtocols.Http1AndHttp2);
+            kestrel.ConfigureEndpointDefaults(endpoint =>
+            {
+                endpoint.Protocols = HttpProtocols.Http1AndHttp2;
+
+                // Added before Kestrel adds TLS to the endpoint, so a refused address is dropped before
+                // the handshake: it learns nothing, not even the certificate.
+                if (listeners.Count > 0)
+                    endpoint.Use(next => connection =>
+                    {
+                        if (connection.LocalEndPoint is IPEndPoint local &&
+                            listeners.TryGetValue(local.Port, out var listener) &&
+                            (connection.RemoteEndPoint is not IPEndPoint remote || !listener.AcceptsRemote(remote.Address)))
+                        {
+                            connection.Abort();
+                            return Task.CompletedTask;
+                        }
+
+                        return next(connection);
+                    });
+            });
 
             if (options.Certificate is { } certificate)
                 kestrel.ConfigureHttpsDefaults(https =>
@@ -108,10 +131,40 @@ public sealed class ServerHost : IAsyncDisposable
 
         var app = builder.Build();
 
+        // Routing has already run when this does (WebApplication puts it first), so the endpoint is
+        // known: one scoped to a listener answers only on that listener's port, and that port answers
+        // nothing else — gRPC and the voice relay are not reachable on the dashboard's port.
+        if (listeners.Count > 0)
+            app.Use((context, next) =>
+            {
+                var scope = context.GetEndpoint()?.Metadata.GetMetadata<ListenerScope>()?.Name;
+                var listener = listeners.GetValueOrDefault(context.Connection.LocalPort)?.Name;
+
+                if (!string.Equals(scope, listener, StringComparison.Ordinal))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return Task.CompletedTask;
+                }
+
+                return next(context);
+            });
+
         foreach (var contributor in app.Services.GetServices<IRouteContributor>())
             contributor.Map(app);
 
         return app;
+    }
+
+    /// <summary>The extra listeners by the port each listens on; ports they share are left out.</summary>
+    private static Dictionary<int, ServerListener> ListenersByPort(ServerHostOptions options)
+    {
+        var listeners = new Dictionary<int, ServerListener>();
+
+        foreach (var listener in options.Listeners)
+            if (listener.Port is { } port)
+                listeners.TryAdd(port, listener);
+
+        return listeners;
     }
 
     [SupportedOSPlatform("linux")]

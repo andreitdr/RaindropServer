@@ -33,6 +33,14 @@ public interface IUserStore
     /// </remarks>
     Task<IReadOnlyList<UserRecord>> ListByStatusAsync(UserStatus status, CancellationToken cancellationToken);
 
+    /// <summary>How many accounts are in <paramref name="status"/> — what the owner's dashboard shows.</summary>
+    /// <remarks>
+    /// The default counts the list, so a driver written before this existed still answers; the
+    /// relational stores ask the database instead.
+    /// </remarks>
+    async Task<long> CountByStatusAsync(UserStatus status, CancellationToken cancellationToken) =>
+        (await ListByStatusAsync(status, cancellationToken)).Count;
+
     /// <summary>
     /// Returns users who left with their data preserved and whose retention window has now closed,
     /// so that <see cref="RetentionCleanupService"/> can erase them.

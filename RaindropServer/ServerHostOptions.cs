@@ -45,6 +45,13 @@ public sealed class ServerHostOptions
     /// </remarks>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Ports of their own for things that are not for clients, such as the owner's dashboard. Each is
+    /// served with the same certificate, answers only its own endpoints, and refuses connections from
+    /// addresses it does not accept. See <see cref="ServerListener"/>.
+    /// </summary>
+    public List<ServerListener> Listeners { get; set; } = [];
+
     /// <summary>Throws when the addresses and the certificate contradict each other.</summary>
     /// <exception cref="InvalidOperationException">A setting is missing or contradicts another.</exception>
     public void Validate()
@@ -89,6 +96,8 @@ public sealed class ServerHostOptions
         if (Urls.Length != Urls.Distinct(StringComparer.OrdinalIgnoreCase).Count())
             report.Warn("urls", "lists the same address more than once.");
 
+        ValidateListeners(report, hosts);
+
         if (Certificate is null)
             report.Error("tls.certificatePath",
                 "names no certificate, and this server cannot listen without one.",
@@ -106,6 +115,43 @@ public sealed class ServerHostOptions
 
         if (Certificate is { } certificate)
             ValidateCertificate(certificate, hosts, report.Section("tls"));
+    }
+
+    /// <summary>
+    /// Each extra listener: an https address like the main ones, on a port of its own. Sharing a port
+    /// with the client-facing addresses would put whatever it serves in front of every client, which
+    /// is exactly what a separate listener is there to prevent.
+    /// </summary>
+    private void ValidateListeners(ConfigurationReport report, List<string> hosts)
+    {
+        var clientPorts = Urls
+            .Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Port : -1)
+            .Where(port => port > 0)
+            .ToHashSet();
+        var seen = new Dictionary<int, string>();
+
+        foreach (var listener in Listeners)
+        {
+            var setting = report.Section(listener.Name);
+
+            if (!Uri.TryCreate(listener.Url, UriKind.Absolute, out var uri) || uri.Scheme != "https")
+            {
+                setting.Error("url", $"'{listener.Url}' is not an https:// address.",
+                    "Write the scheme, host and port together, as in https://0.0.0.0:5002. It is served with the same " +
+                    "certificate as the server, and never without TLS.");
+                continue;
+            }
+
+            if (clientPorts.Contains(uri.Port))
+                setting.Error("url",
+                    $"uses port {uri.Port}, which clients already connect to. It needs a port of its own, or it would be " +
+                    "reachable by everyone who can reach the server.",
+                    "Pick another port, e.g. 5002.");
+            else if (!seen.TryAdd(uri.Port, listener.Name))
+                setting.Error("url", $"uses port {uri.Port}, which {seen[uri.Port]} already listens on.");
+
+            hosts.Add(uri.Host);
+        }
     }
 
     /// <summary>

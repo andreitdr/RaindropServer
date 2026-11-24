@@ -54,8 +54,15 @@ services:
       # by default; set RAINDROP_DEV_WIPE_DATABASE=true in .env for a "fresh database every restart"
       # dev loop, and never on a deployment whose data matters.
       RAINDROP_DEV_WIPE_DATABASE: ${RAINDROP_DEV_WIPE_DATABASE:-false}
+      # The owner's dashboard (docs/dashboard.md). Its account file sits on the data volume with the keys;
+      # the first start prints a setup code — `docker compose logs server` shows it.
+      RAINDROP_DASHBOARD_URL: https://0.0.0.0:5002
+      RAINDROP_DASHBOARD_CREDENTIALS_PATH: /app/data/dashboard-account.json
     ports:
       - "${RAINDROP_PORT:-5001}:5001"
+      # The dashboard. Publish it on one address to narrow who can reach it, e.g.
+      # RAINDROP_DASHBOARD_PUBLISH=192.168.1.10:5002 (a LAN address) or 127.0.0.1:5002 (an SSH tunnel).
+      - "${RAINDROP_DASHBOARD_PUBLISH:-5002}:5002"
     volumes:
       # The TLS certificate and server identity key must outlive the container — see
       # ServerCli/Dockerfile and docs/transport-security.md#two-consequences.

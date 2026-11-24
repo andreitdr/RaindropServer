@@ -19,22 +19,34 @@ public sealed class RequestThrottle
     private const int MaximumCallers = 100_000;
 
     private readonly ConcurrentDictionary<string, int> _counts = new(StringComparer.Ordinal);
-    private readonly E2eeOptions _options;
+    private readonly Func<int> _limit;
     private readonly TimeProvider _time;
     private readonly Lock _gate = new();
     private DateTime _windowStartedUtc;
 
     public RequestThrottle(E2eeOptions options, TimeProvider? time = null)
+        : this(() => options.AnonymousRequestsPerMinute, time)
     {
-        _options = options;
+    }
+
+    private RequestThrottle(Func<int> limit, TimeProvider? time)
+    {
+        _limit = limit;
         _time = time ?? TimeProvider.System;
         _windowStartedUtc = _time.GetUtcNow().UtcDateTime;
     }
 
+    /// <summary>
+    /// A throttle with a limit of its own rather than the anonymous calls' one — the owner's dashboard
+    /// allows far fewer sign-in attempts than a client makes handshakes.
+    /// </summary>
+    public static RequestThrottle PerMinute(int requestsPerMinute, TimeProvider? time = null) =>
+        new(() => requestsPerMinute, time);
+
     /// <summary>Counts one call by <paramref name="caller"/>, refusing it with <c>rate_limited</c> when it is one too many.</summary>
     public void Check(string caller)
     {
-        var limit = _options.AnonymousRequestsPerMinute;
+        var limit = _limit();
         if (limit <= 0)
             return;
 

@@ -62,4 +62,10 @@ public interface ISessionStore
     /// The default forgets nothing, for a store that expires sessions by itself (or an older one).
     /// </remarks>
     int RemoveExpired() => 0;
+
+    /// <summary>
+    /// How many sessions are open right now, expired ones not yet swept left out. The default says
+    /// none, for a store that cannot count them cheaply (or an older one).
+    /// </summary>
+    int Count => 0;
 }

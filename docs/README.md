@@ -28,7 +28,7 @@ same formats is [E2EE](e2ee.md).
 
 | Doc | Covers |
 |---|---|
-| [Architecture overview](architecture-overview.md) | Solution layout, the seven projects, how they depend on each other |
+| [Architecture overview](architecture-overview.md) | Solution layout, the nine projects, how they depend on each other |
 | [gRPC services & DI wiring](grpc-services.md) | The `raindrop.v1` services, authentication, how errors arrive, `IRouteContributor`, `AddRaindropServer`/`AddRaindropGrpc` and friends |
 | [Wire format](wire-formats.md) | Protobuf over gRPC, and the three things that are not |
 | [Transport security](transport-security.md) | TLS, self-signed certificates, fingerprint pinning |
@@ -43,6 +43,7 @@ same formats is [E2EE](e2ee.md).
 | [Events (push)](events.md) | The bidirectional `EventService.Connect` stream, heartbeats, every event, how a stream ends, and the publisher/transport/handler seams plugins build on |
 | [Database modules](database-modules.md) | `IDatabaseDriver`, the relational store family, schema, adding a driver |
 | [Configuration](configuration.md) | `raindrop.json`, environment variables, the owner console |
+| [Owner dashboard](dashboard.md) | The owner's web page on its own port: server status and resource use, the machine or Docker container, connected clients and accounts, recovering a member's account; who can reach it and how it signs in |
 | [Local development & Docker](local-development-and-docker.md) | Running the whole stack (server, database, LiveKit) with Docker Compose, developing against Postgres/SQL Server locally, the Docker image |
 | [Deploying to a server](deployment.md) | `deploy.sh`: putting the server on a Docker host over SSH — what a deploy does and refuses, the layout on the server, first deploy, rolling back, backups |
 | [CI & releases](ci-and-releases.md) | The GitHub Actions workflows: build/test on `main`, self-contained packages on a version tag |
@@ -56,7 +57,9 @@ same formats is [E2EE](e2ee.md).
 - **Transport:** TLS always, self-signed by default with trust-on-first-use fingerprint pinning (same
   model as SSH host keys).
 - **API:** gRPC and protobuf only, defined in [RaindropProto](../../RaindropProto/README.md). No REST, no
-  JSON. The one non-gRPC route is the voice signalling relay, which carries LiveKit's own protocol.
+  JSON for clients. The one non-gRPC route clients use is the voice signalling relay, which carries
+  LiveKit's own protocol. The [owner dashboard](dashboard.md) is a JSON page on a port of its own that
+  clients never reach.
 - **Push:** a bidirectional gRPC stream delivers every change a member may see, as it happens; its
   heartbeats are what presence is made of.
 - **What's implemented:** accounts, sessions, roles/permissions, text channels and messages, end-to-end

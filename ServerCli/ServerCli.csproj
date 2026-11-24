@@ -34,4 +34,9 @@
       <ProjectReference Include="..\RaindropServer.Grpc\RaindropServer.Grpc.csproj" />
     </ItemGroup>
 
+    <!-- The owner's dashboard, on a port of its own. Idle unless raindrop.json's dashboard.enabled is on. -->
+    <ItemGroup>
+      <ProjectReference Include="..\RaindropServer.Dashboard\RaindropServer.Dashboard.csproj" />
+    </ItemGroup>
+
 </Project>

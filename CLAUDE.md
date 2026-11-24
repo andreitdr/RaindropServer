@@ -96,6 +96,9 @@ one, `fingerprint` prints the TLS fingerprint for clients to pin, `roles` lists 
 and what each grants, `grant <user> <role>` and `revoke <user> <role>` change who holds one, `reclaim <user>` issues a
 one-time claim code that lets a member who lost everything take their account back with a new identity
 (after a `yes`),
+`reclaims` lists the claim codes waiting and `reclaim-cancel <user>` withdraws one,
+`dashboard` shows where the owner dashboard listens (and its setup code until it is set up),
+`dashboard-reset` forgets the dashboard's password and prints a new setup code (after a `yes`),
 `events` shows how many clients have the event stream open, `voice` lists who is in which voice call,
 `purge-plaintext` deletes every pre-encryption message and the deleted-message archive (after a `yes`),
 `reports` shows the latest reported messages, `attachments` shows how many encrypted files are stored and
@@ -138,7 +141,7 @@ that way. See [`docs/ci-and-releases.md`](docs/ci-and-releases.md).
 
 ## Architecture
 
-A solution of eight projects targeting `net10.0` (the eighth, `RaindropServer.Tests`, is the xUnit
+A solution of nine projects targeting `net10.0` (the ninth, `RaindropServer.Tests`, is the xUnit
 suite), built against the sibling RaindropProto checkout:
 
 - **RaindropServer** (`RaindropServer/`) — the library: hosts an ASP.NET Core app on a background
@@ -157,6 +160,16 @@ suite), built against the sibling RaindropProto checkout:
   hand-written, and the room API is binary Twirp over LiveKit's RoomService messages, vendored in
   `Protos/` from the protocol version the pinned `livekit-server` image is built against. Idle unless
   `voice.provider` names it.
+- **RaindropServer.Dashboard** — the owner's web dashboard ([`docs/dashboard.md`](docs/dashboard.md)):
+  server status, process and machine resource use (only the container's own when it runs in Docker),
+  connected clients, accounts, and account recovery (the console's `reclaim`, from a browser). It
+  listens on **a port of its own** — a `ServerListener` in `ServerHostOptions.Listeners`, whose
+  connections from addresses outside `dashboard.allowedNetworks` are dropped before TLS, and whose
+  endpoints carry `ListenerScope("dashboard")` so they answer only there while gRPC answers everywhere
+  else. Its own username and password (not a Raindrop account), created on first visit with a one-time
+  setup code printed at start; in-memory cookie sessions. The page is plain HTML/JS embedded in the
+  assembly, under a strict CSP. Host metrics are per OS (`/proc`, Mach/`sysctl` and Win32 P/Invoke),
+  container metrics read the cgroup. Idle unless `dashboard.enabled`.
 - **ServerCli** (`ServerCli/`) — the executable everyone runs. It reads `raindrop.json`, enables one
   database module, registers the domain (`AddRaindropServer`) and the gRPC transport
   (`AddRaindropGrpc`), starts the server, and hosts the owner's console. `ServerCli probe <url>` asks a
@@ -199,8 +212,9 @@ contract records are not protobuf types and must stay that way.
   it back to null. Keep it that way when adding fields.
 - **Routes**: `ServerHost` maps every `IRouteContributor`; `AddRaindropGrpc` registers the one mapping
   the services. Messages are capped at 1 MiB (`MaximumMessageBytes`); attachment frames are 256 KiB.
-- **The one route that is not gRPC** is `/api/channels/voice/signal/{path}`: LiveKit's own signalling
-  WebSocket, relayed. It is why Kestrel still speaks HTTP/1.1 beside HTTP/2.
+- **The one route clients use that is not gRPC** is `/api/channels/voice/signal/{path}`: LiveKit's own
+  signalling WebSocket, relayed. It is why Kestrel still speaks HTTP/1.1 beside HTTP/2. The owner
+  dashboard's JSON routes are on their own port and answer nowhere else.
 
 Adding an RPC: add it to the `.proto` in RaindropProto (its CLAUDE.md has the rules — own
 `<Rpc>Request`/`<Rpc>Response`, never renumber), override it in the matching `*GrpcService`, map with
@@ -765,13 +779,15 @@ the caller may not see is `channel_not_found`, never forbidden. Uploads need `se
 
 `ServerCli/raindrop.json` is copied next to the executable and read at startup; its sections are
 `urls`, `tls`, `database`, `users`, `channels` (message length and history page sizes), `roles`,
-`voice` and `attachments`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
+`voice`, `attachments` and `dashboard`; environment variables override it, which is how the container is configured: `RAINDROP_URLS`,
 `RAINDROP_DB_PROVIDER`, `RAINDROP_DB_CONNECTION_STRING`, `RAINDROP_DEV_WIPE_DATABASE`,
 `RAINDROP_TLS_ENABLED` (only `true` is accepted),
 `RAINDROP_TLS_CERTIFICATE_PATH`, `RAINDROP_TLS_CERTIFICATE_PASSWORD`, `RAINDROP_TLS_IDENTITY_KEY_PATH`,
 `RAINDROP_VOICE_PROVIDER`, `RAINDROP_VOICE_STARTUP_CHECK`, `RAINDROP_LIVEKIT_API_URL`, `RAINDROP_LIVEKIT_API_KEY`,
 `RAINDROP_LIVEKIT_API_SECRET`, `RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET`, `RAINDROP_ATTACHMENTS_ENABLED`,
-`RAINDROP_ATTACHMENTS_PATH`, `RAINDROP_ATTACHMENTS_MAX_MB`.
+`RAINDROP_ATTACHMENTS_PATH`, `RAINDROP_ATTACHMENTS_MAX_MB`, `RAINDROP_DASHBOARD_ENABLED`,
+`RAINDROP_DASHBOARD_URL`, `RAINDROP_DASHBOARD_ALLOWED_NETWORKS` (comma-separated CIDRs),
+`RAINDROP_DASHBOARD_CREDENTIALS_PATH`.
 
 The `attachments` section is `enabled`, `storagePath` (relative to the executable; back it up with the
 database), `maximumFileSizeMegabytes` and `maximumFileSizeMegabytesByExtension` (a map, e.g.

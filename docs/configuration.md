@@ -248,6 +248,30 @@ write it, and a repeated entry is a warning. A section of settings that includes
 overrides) is still checked strictly: a misspelled setting beside it is reported, and so is a map
 value that is not a whole number.
 
+### `dashboard`
+
+The [owner dashboard](dashboard.md), off unless set (the shipped `raindrop.json` and the Docker image turn
+it on):
+
+```json
+"dashboard": {
+  "enabled": true,
+  "url": "https://0.0.0.0:5002",
+  "allowedNetworks": [ "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10" ],
+  "credentialsPath": "dashboard-account.json",
+  "sessionIdleMinutes": 30
+}
+```
+
+- `url` — https, on a port of its own: one that `urls` already uses is an error, because whatever
+  listens there is reachable by every client. Served with the server's certificate.
+- `allowedNetworks` — CIDR blocks; connections from anywhere else are closed before TLS. Left out, the
+  private ranges above. An entry that is not a network, or has bits set past its prefix
+  (`192.168.1.5/24`), is an error; `0.0.0.0/0` or `::/0` is a warning. An empty list is an error.
+- `credentialsPath` — the dashboard's username and password hash, relative to the executable. Delete it
+  (or run `dashboard-reset`) to set the dashboard up again.
+- `sessionIdleMinutes` — how long a signed-in browser may sit idle; a sign-in lasts 12 hours at most.
+
 ## Environment variable overrides
 
 Used by the Docker container instead of editing `raindrop.json` directly:
@@ -271,6 +295,10 @@ Used by the Docker container instead of editing `raindrop.json` directly:
 | `RAINDROP_ATTACHMENTS_ENABLED` | `attachments.enabled` |
 | `RAINDROP_ATTACHMENTS_PATH` | `attachments.storagePath` |
 | `RAINDROP_ATTACHMENTS_MAX_MB` | `attachments.maximumFileSizeMegabytes` (a whole number) |
+| `RAINDROP_DASHBOARD_ENABLED` | `dashboard.enabled` |
+| `RAINDROP_DASHBOARD_URL` | `dashboard.url` — the Docker image sets `https://0.0.0.0:5002` |
+| `RAINDROP_DASHBOARD_ALLOWED_NETWORKS` | `dashboard.allowedNetworks`, as a comma-separated list |
+| `RAINDROP_DASHBOARD_CREDENTIALS_PATH` | `dashboard.credentialsPath` — the Docker image and `docker-compose.yml` point it at `/app/data/dashboard-account.json`, on the mounted volume |
 
 ## Startup validation
 
@@ -304,7 +332,8 @@ find, naming each problem by the setting path it lives at):
 | `RoleOptions.Validate` | an `everyone` role seeded with permissions that administer the server |
 | `VoiceOptions.Validate` | call size, join grace and reconcile interval |
 | `LiveKitOptions.Validate` | the media server's address and credentials — see [Voice](voice.md#what-is-checked-at-startup) |
-| `ServerHostOptions.Validate` | the listening addresses, and the certificate against the names they promise |
+| `DashboardOptions.Validate` | the dashboard's address and allowed networks — see [Owner dashboard](dashboard.md#who-can-reach-it) |
+| `ServerHostOptions.Validate` | the listening addresses, extra listeners such as the dashboard's (https, on a port of their own), and the certificate against the names they promise |
 
 A **misspelled setting is an error, not a shrug**. JSON deserialization ignores a name it does not
 know, which leaves a server running on a default nobody chose: `apisecrets` instead of `apiSecret`
@@ -327,6 +356,8 @@ away afterwards. The checks this build ships:
   API, it accepts this server's key and secret, and its clock agrees with this one's
 - **the key files** — `raindrop.pfx` and `server-identity.key` readable, creatable where they are
   expected to be generated, and not left readable by every account on the machine
+- **the dashboard's account file** — when it exists, readable and holding an account; one that is not
+  stops the server rather than refusing every sign-in
 
 A plugin adds its own with `services.AddStartupCheck<T>()`; a plugin's options validate themselves by
 taking a `ConfigurationReport` the same way the built-in ones do.
@@ -344,6 +375,11 @@ an interactive console on the main thread:
 | `roles` | Lists this server's roles and what each grants |
 | `grant <user> <role>` | Gives a member a role |
 | `revoke <user> <role>` | Takes a role away from a member |
+| `reclaim <user>` | Issues a claim code with which a member who lost everything takes their account back, after a typed `yes` — see [E2EE](e2ee.md#reclaiming-an-account) |
+| `reclaims` | Lists the claim codes waiting to be used (never the codes) |
+| `reclaim-cancel <user>` | Withdraws a member's claim code |
+| `dashboard` | Shows where the [owner dashboard](dashboard.md) listens and, until it is set up, its setup code |
+| `dashboard-reset` | Forgets the dashboard's username and password, signs every browser out and prints a new setup code, after a typed `yes` |
 | `events` | Shows how many clients have the [event stream](events.md) open |
 | `voice` | Lists who is in which [voice call](voice.md), and whether they are connecting, muted or deafened |
 | `attachments` | Shows the [attachment](attachments.md) folder, how many files are stored and how much room they take, and uploads waiting to be sent |

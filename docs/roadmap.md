@@ -15,6 +15,7 @@ useful end to end:
 | Area | What works | Doc |
 |---|---|---|
 | Hosting | ASP.NET Core on Kestrel hosted in-process by a console app, the owner console, bounded shutdown | [Architecture](architecture-overview.md) |
+| Owner dashboard | A web page on its own port, for private networks only, with its own username and password: server status, process and machine resource use (or the container's own, inside Docker), connected clients, accounts, storage, an hour of charts, and recovering a member's account with a claim code. **Checked on macOS and in tests; not yet run inside Docker or on Windows** | [Owner dashboard](dashboard.md) |
 | API | Every client call over gRPC (`raindrop.v1`, defined in RaindropProto): interceptor-resolved sessions, error statuses with `ErrorInfo` reasons, streamed uploads and downloads | [gRPC services](grpc-services.md) |
 | Accounts | Registration, login, logout, sessions, username/password changes, username availability, user lookup, leaving and rejoining, PBKDF2 hashing, retention cleanup of left accounts | [Users](users.md) |
 | Roster | Members with presence (online while an event stream is open, offline a minute after its heartbeats stop), presence broadcast | [Members](members.md) |
@@ -76,9 +77,11 @@ each channel's MLS group through this delivery service. See
   would be a new implementation.
 
 ### Operations
-- **Rate limiting, metrics and a health check.** None of these exist. A reverse proxy cannot add them
-  either, since it has to pass TLS through untouched. `ServerCli probe` is the nearest thing to a health
-  check. A gRPC health service (`grpc.health.v1`) would be the natural one.
+- **Metrics export and a health check.** The [owner dashboard](dashboard.md) shows the server's status
+  and resource use to a person, but there is nothing for a monitoring system to scrape, and no history
+  past the last hour. A reverse proxy cannot add them, since it has to pass TLS through untouched.
+  `ServerCli probe` is the nearest thing to a health check; a gRPC health service (`grpc.health.v1`)
+  would be the natural one. Rate limiting covers the session-less calls and the dashboard's sign-in only.
 - **Automated backups.** `deploy.sh` snapshots before a deploy; scheduled backups are the owner's
   job. [Deployment](deployment.md)
 

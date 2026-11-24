@@ -108,6 +108,17 @@ internal sealed class RelationalUserStore : RelationalStore, IUserStore
             Read,
             cancellationToken);
 
+    public async Task<long> CountByStatusAsync(UserStatus status, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+
+        command.CommandText = $"SELECT COUNT(*) FROM {Table} WHERE status = @status";
+        AddValue(command, "@status", (int)status);
+
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+    }
+
     public Task<IReadOnlyList<UserRecord>> FindExpiredPreservedAsync(DateTime utcNow, CancellationToken cancellationToken) =>
         ReadManyAsync(
             $"{SelectSql} WHERE status = @status AND data_expires_at IS NOT NULL AND data_expires_at <= @now",

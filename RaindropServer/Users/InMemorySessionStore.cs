@@ -104,6 +104,15 @@ public sealed class InMemorySessionStore : ISessionStore
         }
     }
 
+    public int Count
+    {
+        get
+        {
+            var now = _time.GetUtcNow().UtcDateTime;
+            return _sessions.Values.Count(session => session.ExpiresAtUtc > now);
+        }
+    }
+
     public int RemoveExpired()
     {
         var now = _time.GetUtcNow().UtcDateTime;

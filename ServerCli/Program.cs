@@ -9,6 +9,7 @@ using RaindropServer.Channels;
 using RaindropServer.Channels.Text;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Configuration;
+using RaindropServer.Dashboard;
 using RaindropServer.Data;
 using RaindropServer.E2ee;
 using RaindropServer.Events;
@@ -52,6 +53,9 @@ try
     services.AddRaindropServer(config.ApplyTo, config.ApplyTo, config.ApplyTo,
         configureVoice: config.ApplyTo, configureAttachments: config.ApplyTo, configureE2ee: config.ApplyTo);
     services.AddRaindropGrpc();
+
+    // Which build this is and when it started — the owner's dashboard shows both; clients never see them.
+    services.AddSingleton(ServerBuildInfo.For(typeof(ServerConfig).Assembly));
 }
 catch (InvalidOperationException ex)
 {
@@ -89,6 +93,16 @@ catch (Exception ex) when (ex is CryptographicException or IOException or Unauth
     Console.Error.WriteLine($"Cannot start Raindrop: {ex.Message}");
     Console.Error.WriteLine("Check the 'urls' and 'tls' sections of raindrop.json.");
     return 1;
+}
+
+// The owner's dashboard, on a port of its own that clients never use (docs/dashboard.md).
+var dashboardOptions = new DashboardOptions();
+config.ApplyTo(dashboardOptions);
+
+if (dashboardOptions.Enabled)
+{
+    services.AddRaindropDashboard(dashboardOptions);
+    hostOptions.Listeners.Add(dashboardOptions.Listener);
 }
 
 var fingerprint = hostOptions.Certificate is { } certificate ? ServerCertificate.Fingerprint(certificate) : null;
@@ -186,6 +200,9 @@ Console.WriteLine(config.Attachments.Enabled
     ? $"Attachments: up to {config.Attachments.MaximumFileSizeMegabytes} MB, kept in {server.Services.GetRequiredService<AttachmentOptions>().StoragePath}"
     : "Attachments: off — set attachments.enabled in raindrop.json to let members share files.");
 
+var dashboard = dashboardOptions.Enabled ? server.Services.GetRequiredService<DashboardAuth>() : null;
+PrintDashboard();
+
 Console.WriteLine("Type 'help' for commands, 'quit' to stop.\n");
 
 // Granting a role from the terminal has to go through the very service that is answering requests,
@@ -231,6 +248,10 @@ while (true)
             Console.WriteLine("  grant <user> <role>      give a member a role");
             Console.WriteLine("  revoke <user> <role>     take a role away from a member");
             Console.WriteLine("  reclaim <user>           let a member who lost everything take their account back");
+            Console.WriteLine("  reclaims                 list the claim codes waiting to be used");
+            Console.WriteLine("  reclaim-cancel <user>    withdraw a member's claim code");
+            Console.WriteLine("  dashboard                show where the owner's dashboard is, and its setup code if it needs one");
+            Console.WriteLine("  dashboard-reset          forget the dashboard's password and issue a new setup code");
             Console.WriteLine("  events                   show how many clients are listening for events");
             Console.WriteLine("  voice                    list who is in which voice call");
             Console.WriteLine("  purge-plaintext          delete every message stored before end-to-end encryption");
@@ -250,6 +271,22 @@ while (true)
 
         case "reclaim":
             await ReclaimAsync(words);
+            break;
+
+        case "reclaims":
+            PrintClaims();
+            break;
+
+        case "reclaim-cancel":
+            await CancelClaimAsync(words);
+            break;
+
+        case "dashboard":
+            PrintDashboard();
+            break;
+
+        case "dashboard-reset":
+            ResetDashboard();
             break;
 
         case "events":
@@ -420,8 +457,6 @@ async Task PrintAttachmentsAsync()
         Console.WriteLine($"  removing: {stats.AwaitingRemoval} file(s) from deleted messages, on the next maintenance pass");
 }
 
-// Deletes every plaintext message and the archive of deleted messages' text: everything the server
-// could read. Encrypted messages stay. Asks first, since it cannot be undone.
 // The last resort for a member who lost every device, their recovery words and any backup: a
 // one-time code their new identity redeems to take the account over (AccountClaimService). Nothing
 // changes until it is redeemed; then their old identity is reset, visibly, as a reset by them would be.
@@ -459,6 +494,8 @@ async Task ReclaimAsync(string[] words)
     }
 }
 
+// Deletes every plaintext message and the archive of deleted messages' text: everything the server
+// could read. Encrypted messages stay. Asks first, since it cannot be undone.
 async Task PurgePlaintextAsync()
 {
     Console.Write("  Delete every plaintext message and the deleted-message archive? This cannot be undone. Type 'yes': ");
@@ -477,6 +514,78 @@ async Task PurgePlaintextAsync()
     catch (Exception ex) when (ex is DbException or NotSupportedException)
     {
         Console.WriteLine($"  {ex.Message}");
+    }
+}
+
+// The claim codes issued and not yet used — from here or from the dashboard — without the codes themselves.
+void PrintClaims()
+{
+    var pending = claims.ListPending();
+    if (pending.Count == 0)
+    {
+        Console.WriteLine("  no claim codes are waiting to be used");
+        return;
+    }
+
+    foreach (var claim in pending)
+        Console.WriteLine($"  {claim.Username}  issued {claim.IssuedAtUtc:yyyy-MM-dd HH:mm} UTC, works until {claim.ExpiresAtUtc:yyyy-MM-dd HH:mm} UTC");
+}
+
+// Withdraws a member's claim code — one given to the wrong person, or no longer needed.
+async Task CancelClaimAsync(string[] words)
+{
+    if (words.Length != 2)
+    {
+        Console.WriteLine("  Usage: reclaim-cancel <user>");
+        return;
+    }
+
+    var user = await userStore.FindByUsernameAsync(words[1].Trim().ToLowerInvariant(), CancellationToken.None);
+    Console.WriteLine(user is not null && claims.Cancel(user.UserId)
+        ? $"  The claim code for {user.Username} no longer works."
+        : $"  '{words[1]}' has no claim code waiting.");
+}
+
+// Where the dashboard listens, and — until somebody has set it up — the code its first visit needs.
+void PrintDashboard()
+{
+    if (dashboard is null)
+    {
+        Console.WriteLine("Dashboard: off — set dashboard.enabled in raindrop.json to see this server from a browser.");
+        return;
+    }
+
+    Console.WriteLine($"Dashboard: {dashboardOptions.Url} (from {string.Join(", ", dashboardOptions.AllowedNetworks)})");
+
+    if (dashboard.PendingSetupCode is { } code)
+        Console.WriteLine($"Dashboard setup code: {code}  — open the dashboard and enter it to choose its username and password.");
+}
+
+// The way back in for an owner who forgot the dashboard's password: whoever is at the console owns the
+// server, so they may start the dashboard's setup again.
+void ResetDashboard()
+{
+    if (dashboard is null)
+    {
+        Console.WriteLine("  The dashboard is off.");
+        return;
+    }
+
+    Console.Write("  Forget the dashboard's username and password and sign out every browser? Type 'yes': ");
+    if (!string.Equals(Console.ReadLine()?.Trim(), "yes", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("  Nothing was changed.");
+        return;
+    }
+
+    try
+    {
+        var code = dashboard.Reset();
+        Console.WriteLine($"  New setup code: {code}  — open {dashboardOptions.Url} and enter it to set the dashboard up again.");
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        Console.WriteLine($"  The account file could not be deleted: {ex.Message}");
     }
 }
 

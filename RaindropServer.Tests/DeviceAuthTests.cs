@@ -661,6 +661,44 @@ public class DeviceAuthTests
     }
 
     [Fact]
+    public async Task A_claim_code_issued_by_account_id_is_listed_until_it_is_cancelled_or_used()
+    {
+        var setup = await CreateAsync();
+        var alice = new TestIdentity();
+        var aliceName = Name();
+        await setup.SignInAsync(alice.NewDevice(), aliceName);
+
+        // By id, as the dashboard issues it when the member gives the owner their account id.
+        var claim = await setup.Claims.IssueAsync(alice.UserId, default);
+        Assert.Equal(aliceName, claim.Username);
+
+        // Listed without the code, and nothing else is.
+        var pending = Assert.Single(setup.Claims.ListPending());
+        Assert.Equal((alice.UserId, aliceName, claim.ExpiresAtUtc), (pending.UserId, pending.Username, pending.ExpiresAtUtc));
+        Assert.True(setup.Claims.HasPending(alice.UserId));
+
+        // Cancelled: it no longer works, and the list is empty.
+        Assert.True(setup.Claims.Cancel(alice.UserId));
+        Assert.False(setup.Claims.Cancel(alice.UserId));
+        Assert.Empty(setup.Claims.ListPending());
+        Assert.Equal("invalid_claim", await RefusalAsync(() =>
+            setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: claim.Code)));
+
+        // Issued again and used: it leaves the list.
+        var again = await setup.Claims.IssueAsync(alice.UserId, default);
+        await setup.SignInAsync(new TestIdentity(alice.UserId).NewDevice(), claim: again.Code);
+        Assert.Empty(setup.Claims.ListPending());
+
+        // A lapsed code drops off the list by itself.
+        await setup.Claims.IssueAsync(alice.UserId, default);
+        setup.Clock.Now += TimeSpan.FromHours(25);
+        Assert.Empty(setup.Claims.ListPending());
+        Assert.False(setup.Claims.HasPending(alice.UserId));
+
+        Assert.Equal("user_not_found", await RefusalAsync(() => setup.Claims.IssueAsync(Guid.NewGuid(), default)));
+    }
+
+    [Fact]
     public void A_claim_code_is_read_forgivingly_and_strictly()
     {
         var id = Guid.NewGuid();

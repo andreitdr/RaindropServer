@@ -77,6 +77,23 @@
     }
   },
 
+  // The owner's dashboard: server status, resource use, connected clients, accounts, and recovering a
+  // member's account. It has a port of its own that clients never use, its own username and password
+  // (not a Raindrop account), and answers only the networks listed here — everything else has its
+  // connection closed before TLS. On first start the server prints a one-time setup code; the first
+  // visit asks for it and for the username and password to create. See docs/dashboard.md.
+  "dashboard": {
+    "enabled": true,
+    "url": "https://0.0.0.0:5002",
+    // CIDR blocks. Loopback and the private ranges by default; narrow it to the networks you manage
+    // the server from. Never 0.0.0.0/0 unless something else in front already does this job.
+    "allowedNetworks": [ "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10" ],
+    // Relative to the executable. Holds the username and password hash; delete it (or run
+    // dashboard-reset in the console) to set the dashboard up again.
+    "credentialsPath": "dashboard-account.json",
+    "sessionIdleMinutes": 30
+  },
+
   // Voice calls need a media server to carry the audio. Set "provider" to
   // "livekit" and point "livekit" at one to switch them on; with null, voice
   // channels can be created but nobody can join them. Clients never reach

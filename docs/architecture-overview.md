@@ -2,7 +2,7 @@
 
 ## Solution layout
 
-RaindropServer is a `.sln` of eight projects, all targeting `net10.0`, built next to a sibling checkout of
+RaindropServer is a `.sln` of nine projects, all targeting `net10.0`, built next to a sibling checkout of
 [RaindropProto](../../RaindropProto/README.md), which holds the wire protocol:
 
 | Project | Role |
@@ -13,6 +13,7 @@ RaindropServer is a `.sln` of eight projects, all targeting `net10.0`, built nex
 | [`RaindropServer.Data.Postgres/`](../RaindropServer.Data.Postgres/) | Database module: PostgreSQL driver. |
 | [`RaindropServer.Data.SqlServer/`](../RaindropServer.Data.SqlServer/) | Database module: SQL Server driver. |
 | [`RaindropServer.Voice.LiveKit/`](../RaindropServer.Voice.LiveKit/) | Media module: carries voice calls on a LiveKit sidecar — tokens, the room API (binary Twirp, over LiveKit's RoomService messages vendored in `Protos/`), and the signalling relay. Idle unless `voice.provider` names it. See [Voice](voice.md). |
+| [`RaindropServer.Dashboard/`](../RaindropServer.Dashboard/) | The owner's web dashboard, on a port of its own: status, resource use, the machine or container, clients and accounts, account recovery. Its own sign-in; never reachable on the client port. Idle unless `dashboard.enabled`. See [Owner dashboard](dashboard.md). |
 | [`ServerCli/`](../ServerCli/) | The executable everyone runs. Reads `raindrop.json`, enables one database module, registers the domain and the gRPC transport, starts the server, and hosts the owner's console. `ServerCli probe <url>` asks a running server for its handshake instead. |
 | [`RaindropServer.Tests/`](../RaindropServer.Tests/) | xUnit tests for the library and the CLI's wiring — services, stores, configuration, attachments, identity and MLS framing — and, in `GrpcTests.cs`, the whole server in memory called through a real gRPC client. Runs on SQLite, so it needs no database server. See [CI & releases](ci-and-releases.md). |
 
@@ -76,7 +77,9 @@ permission name, an unreachable database, a missing certificate — not bugs):
    can never arrive without a schema, and so the two built-in roles exist before anyone can register.
    This is also where pending [permission rollouts](roles-and-permissions.md#permission-rollouts) are
    applied.
-4. **Load or generate the TLS certificate** — see [Transport security](transport-security.md).
+4. **Load or generate the TLS certificate** — see [Transport security](transport-security.md). When
+   `dashboard.enabled`, `AddRaindropDashboard(...)` registers the [owner dashboard](dashboard.md) and its
+   listener is added to `ServerHostOptions.Listeners`, so the host opens its port too.
 5. **Start the server on a background thread** — `ServerHost.Start(services, hostOptions)` runs
    ASP.NET Core inside `Task.Run`, keeping the calling thread free for the console loop below.
 6. **Run the owner's console** on the main thread — see [Configuration](configuration.md#the-owner-console)

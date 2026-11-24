@@ -9,6 +9,7 @@ using RaindropServer.Attachments;
 using RaindropServer.Channels;
 using RaindropServer.Channels.Voice;
 using RaindropServer.Configuration;
+using RaindropServer.Dashboard;
 using RaindropServer.Data;
 using RaindropServer.E2ee;
 using RaindropServer.Roles;
@@ -63,6 +64,9 @@ public sealed record ServerConfig
 
     /// <summary>Files added to messages: how large, of which types, and which types clients preview.</summary>
     public AttachmentConfig Attachments { get; init; } = new();
+
+    /// <summary>The owner's dashboard: its own port, who may reach it, and where its sign-in is kept.</summary>
+    public DashboardConfig Dashboard { get; init; } = new();
 
     /// <summary>The media servers this build can enable, besides none at all.</summary>
     private static readonly string[] KnownVoiceProviders = ["livekit"];
@@ -178,6 +182,7 @@ public sealed record ServerConfig
         Apply(report, "channels", ApplyTo, (ChannelOptions options) => options.Validate(report.Section("channels")));
         Apply(report, "roles", ApplyTo, (RoleOptions options) => options.Validate(report.Section("roles")));
         Apply(report, "attachments", ApplyTo, (AttachmentOptions options) => options.Validate(report.Section("attachments")));
+        Apply(report, "dashboard", ApplyTo, (DashboardOptions options) => options.Validate(report.Section("dashboard")));
 
         ValidateVoice(report);
     }
@@ -486,6 +491,19 @@ public sealed record ServerConfig
     }
 
     /// <summary>
+    /// Applies the configured dashboard to the options its module reads. The account file is resolved
+    /// next to the executable, like the certificate; the networks left out mean the private ranges.
+    /// </summary>
+    public void ApplyTo(DashboardOptions options)
+    {
+        options.Enabled = Dashboard.Enabled;
+        options.Url = Dashboard.Url;
+        options.AllowedNetworks = Dashboard.AllowedNetworks ?? [.. DashboardOptions.DefaultAllowedNetworks];
+        options.CredentialsPath = string.IsNullOrWhiteSpace(Dashboard.CredentialsPath) ? "" : ResolvePath(Dashboard.CredentialsPath);
+        options.SessionIdleTimeout = TimeSpan.FromMinutes(Math.Clamp(Dashboard.SessionIdleMinutes, -1e6, 1e6));
+    }
+
+    /// <summary>
     /// Applies the configured role rules to the options the server reads.
     /// </summary>
     /// <exception cref="InvalidOperationException">
@@ -743,7 +761,11 @@ public sealed record ServerConfig
         ["RAINDROP_LIVEKIT_ALLOW_WEAK_SECRET"] = "voice.livekit.allowWeakSecret",
         ["RAINDROP_ATTACHMENTS_ENABLED"] = "attachments.enabled",
         ["RAINDROP_ATTACHMENTS_PATH"] = "attachments.storagePath",
-        ["RAINDROP_ATTACHMENTS_MAX_MB"] = "attachments.maximumFileSizeMegabytes"
+        ["RAINDROP_ATTACHMENTS_MAX_MB"] = "attachments.maximumFileSizeMegabytes",
+        ["RAINDROP_DASHBOARD_ENABLED"] = "dashboard.enabled",
+        ["RAINDROP_DASHBOARD_URL"] = "dashboard.url",
+        ["RAINDROP_DASHBOARD_ALLOWED_NETWORKS"] = "dashboard.allowedNetworks",
+        ["RAINDROP_DASHBOARD_CREDENTIALS_PATH"] = "dashboard.credentialsPath"
     };
 
     private ServerConfig WithEnvironmentOverrides(ConfigurationReport report)
@@ -751,6 +773,7 @@ public sealed record ServerConfig
         ReportUnknownVariables(report);
 
         var urls = Text("RAINDROP_URLS", report);
+        var networks = Text("RAINDROP_DASHBOARD_ALLOWED_NETWORKS", report);
 
         return this with
         {
@@ -789,6 +812,16 @@ public sealed record ServerConfig
                 Enabled = Flag("RAINDROP_ATTACHMENTS_ENABLED", report) ?? Attachments.Enabled,
                 StoragePath = Text("RAINDROP_ATTACHMENTS_PATH", report) ?? Attachments.StoragePath,
                 MaximumFileSizeMegabytes = WholeNumber("RAINDROP_ATTACHMENTS_MAX_MB", report) ?? Attachments.MaximumFileSizeMegabytes
+            },
+            Dashboard = Dashboard with
+            {
+                Enabled = Flag("RAINDROP_DASHBOARD_ENABLED", report) ?? Dashboard.Enabled,
+                Url = Text("RAINDROP_DASHBOARD_URL", report) ?? Dashboard.Url,
+                // Commas, since a CIDR list is what an owner pastes; semicolons are forgiven.
+                AllowedNetworks = networks is null
+                    ? Dashboard.AllowedNetworks
+                    : networks.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                CredentialsPath = Text("RAINDROP_DASHBOARD_CREDENTIALS_PATH", report) ?? Dashboard.CredentialsPath
             }
         };
     }
@@ -1072,6 +1105,13 @@ public sealed record AttachmentConfig(
 /// The largest previewable file a client fetches and shows by itself; a larger one waits until the
 /// member asks. 0 never loads one unasked.
 /// </param>
+public sealed record DashboardConfig(
+    bool Enabled = false,
+    string Url = "https://0.0.0.0:5002",
+    string[]? AllowedNetworks = null,
+    string CredentialsPath = "dashboard-account.json",
+    double SessionIdleMinutes = 30);
+
 public sealed record AttachmentPreviewConfig(string[]? Extensions = null, long AutoLoadMaximumMegabytes = 10)
 {
     public string[]? Extensions { get; init; } = Extensions ?? [.. AttachmentOptions.DefaultPreviewExtensions];

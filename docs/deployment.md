@@ -102,7 +102,11 @@ published to the network, since only the server container talks to it. Back `.en
 `data/postgres` is initialised with that password.
 
 Open these ports to the clients, if the server has a firewall: `5001/tcp` (the API, the event stream and
-the voice signalling relay), `7881/tcp` and `7882/udp` (LiveKit's media).
+the voice signalling relay), `7881/tcp` and `7882/udp` (LiveKit's media). **Do not** open `5002/tcp` to
+the internet: it is the [owner dashboard](dashboard.md), which answers only private networks and is for
+you alone. Set `RAINDROP_DASHBOARD_PUBLISH` in the server's `.env` to publish it on one LAN address, or to
+`127.0.0.1:5002` and reach it with `ssh -L 5002:127.0.0.1:5002 <server>`. Its first setup code is in
+`docker compose logs server`.
 
 The first build pulls about 1 GB of base images; later ones reuse the layer cache. The server's
 certificate and identity key are generated when it first starts, so a client that connects after the

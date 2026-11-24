@@ -115,11 +115,19 @@ picks per connection): dart:io opens WebSockets over HTTP/1.1.
 ## Routes: `IRouteContributor`
 
 [`ServerHost`](../RaindropServer/ServerHost.cs) knows nothing about any transport. It maps every
-registered [`IRouteContributor`](../RaindropServer/IRouteContributor.cs). There are two today:
+registered [`IRouteContributor`](../RaindropServer/IRouteContributor.cs). There are three today:
 - `AddRaindropGrpc`'s, which maps the services.
 - `AddRaindropVoice`'s, `VoiceSignalRoutes`.
+- `AddRaindropDashboard`'s, the [owner dashboard](dashboard.md).
 
 A plugin that serves something of its own registers one more with `TryAddEnumerable`.
+
+**Extra listeners.** Something that is not for clients gets a port of its own:
+[`ServerListener`](../RaindropServer/ServerListener.cs) in `ServerHostOptions.Listeners` (a name, an https
+URL, and which remote addresses it accepts). `ServerHost` listens on it with the same certificate,
+closes connections from refused addresses before the TLS handshake, and scopes endpoints by port: an
+endpoint carrying `ListenerScope(name)` answers on that listener's port only, and nothing else answers
+there — so gRPC is 404 on the dashboard's port and the dashboard is 404 on the client port.
 
 ## DI registration surface
 
@@ -255,8 +263,9 @@ to a fresh server is somebody registering and expecting to own it.
 
 `Build`:
 1. copies the service descriptors into a `WebApplication`
-2. configures Kestrel (TLS, HTTP/1.1 + HTTP/2 via ALPN; see [Transport security](transport-security.md))
-3. maps every `IRouteContributor`
+2. configures Kestrel (TLS, HTTP/1.1 + HTTP/2 via ALPN; see [Transport security](transport-security.md)),
+   listening on `Urls` and every extra listener's URL
+3. adds the listener scoping (when there are extra listeners) and maps every `IRouteContributor`
 
 `Start` validates the options, builds the application, and starts it on a background `Task.Run`, so the
 calling thread stays free for the console loop. It returns an `IAsyncDisposable` that exposes

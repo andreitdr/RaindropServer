@@ -148,6 +148,50 @@ public class ServerConfigTests : IDisposable
     }
 
     [Fact]
+    public void The_dashboard_section_reaches_the_dashboard()
+    {
+        var (config, report) = Read("""
+            { "dashboard": { "enabled": true, "url": "https://0.0.0.0:6002", "allowedNetworks": [ "192.168.1.0/24" ],
+                             "credentialsPath": "owner.json", "sessionIdleMinutes": 15 } }
+            """);
+
+        var options = new RaindropServer.Dashboard.DashboardOptions();
+        config.ApplyTo(options);
+
+        Assert.DoesNotContain(report.Problems, problem => problem.Setting.StartsWith("dashboard"));
+        Assert.True(options.Enabled);
+        Assert.Equal("https://0.0.0.0:6002", options.Url);
+        Assert.Equal(["192.168.1.0/24"], options.AllowedNetworks);
+        Assert.Equal(Path.Combine(AppContext.BaseDirectory, "owner.json"), options.CredentialsPath);
+        Assert.Equal(TimeSpan.FromMinutes(15), options.SessionIdleTimeout);
+    }
+
+    [Fact]
+    public void The_dashboard_left_out_is_off_and_its_networks_left_out_are_the_private_ones()
+    {
+        var (config, _) = Read("{}");
+        var options = new RaindropServer.Dashboard.DashboardOptions();
+        config.ApplyTo(options);
+        Assert.False(options.Enabled);
+
+        (config, _) = Read("""{ "dashboard": { "enabled": true } }""");
+        config.ApplyTo(options);
+        Assert.Equal(RaindropServer.Dashboard.DashboardOptions.DefaultAllowedNetworks, options.AllowedNetworks);
+    }
+
+    [Fact]
+    public void A_dashboard_mistake_is_reported_against_its_setting()
+    {
+        var (_, report) = Read("""
+            { "dashboard": { "enabled": true, "url": "http://0.0.0.0:5002", "allowedNetworks": [ "lan" ], "allowedNetwork": [] } }
+            """);
+
+        Assert.Equal(ConfigurationSeverity.Error, Find(report, "dashboard.url").Severity);
+        Assert.Equal(ConfigurationSeverity.Error, Find(report, "dashboard.allowedNetworks").Severity);
+        Assert.Contains("allowedNetworks", Find(report, "dashboard.allowedNetwork").Remedy);
+    }
+
+    [Fact]
     public void The_screen_share_cap_is_read_from_the_file_and_reaches_the_voice_rules()
     {
         var (config, report) = Read("""{ "voice": { "maximumScreenShares": 1 } }""");

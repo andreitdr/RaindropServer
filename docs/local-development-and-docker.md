@@ -87,7 +87,18 @@ docker compose up -d server
 `depends_on` brings up `postgres` (waiting for it to report healthy) and `livekit` automatically, so
 this one command is enough for a working server with voice channels. The server's own TLS certificate
 and identity key — which must survive restarts, see
-[Transport security](transport-security.md#consequences) — are bind-mounted to `./data/server`.
+[Transport security](transport-security.md#consequences) — are bind-mounted to `./data/server`, with
+the [owner dashboard](dashboard.md)'s account file beside them.
+
+The dashboard is published on port 5002 (`RAINDROP_DASHBOARD_PUBLISH` in `.env` to change it or bind it
+to one address). Its first setup code is printed when the server starts:
+
+```bash
+docker compose logs server | grep "Dashboard setup code"
+```
+
+Then open `https://localhost:5002`. Inside the container it shows the container's own figures under a
+"Running inside Docker" banner rather than the machine's.
 
 To run against SQLite instead (no database container at all), override the `server` service's
 `environment` in a `docker-compose.override.yml` or on the command line:

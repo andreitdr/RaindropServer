@@ -18,6 +18,7 @@ COPY ["ServerCli/ServerCli.csproj", "ServerCli/"]
 COPY ["RaindropServer/RaindropServer.csproj", "RaindropServer/"]
 COPY ["RaindropServer.Grpc/RaindropServer.Grpc.csproj", "RaindropServer.Grpc/"]
 COPY ["RaindropServer.Voice.LiveKit/RaindropServer.Voice.LiveKit.csproj", "RaindropServer.Voice.LiveKit/"]
+COPY ["RaindropServer.Dashboard/RaindropServer.Dashboard.csproj", "RaindropServer.Dashboard/"]
 COPY ["RaindropServer.Data.Sqlite/RaindropServer.Data.Sqlite.csproj", "RaindropServer.Data.Sqlite/"]
 COPY ["RaindropServer.Data.Postgres/RaindropServer.Data.Postgres.csproj", "RaindropServer.Data.Postgres/"]
 COPY ["RaindropServer.Data.SqlServer/RaindropServer.Data.SqlServer.csproj", "RaindropServer.Data.SqlServer/"]
@@ -46,7 +47,9 @@ ENV SERVERCLI_HAS_PROBE=1 \
     RAINDROP_TLS_CERTIFICATE_PATH=/app/data/raindrop.pfx \
     RAINDROP_TLS_IDENTITY_KEY_PATH=/app/data/server-identity.key \
     RAINDROP_DB_CONNECTION_STRING="Data Source=/app/data/raindrop.db" \
-    RAINDROP_ATTACHMENTS_PATH=/app/data/attachments
+    RAINDROP_ATTACHMENTS_PATH=/app/data/attachments \
+    RAINDROP_DASHBOARD_URL=https://0.0.0.0:5002 \
+    RAINDROP_DASHBOARD_CREDENTIALS_PATH=/app/data/dashboard-account.json
 # Created here, owned by the app user, so a named or anonymous volume (which copies the image's
 # ownership) is writable by the non-root server. A bind mount still needs the right owner on the host,
 # which deploy.sh fixes.
@@ -54,7 +57,8 @@ USER root
 RUN mkdir -p /app/data && chown "$APP_UID:$APP_UID" /app/data
 USER $APP_UID
 VOLUME /app/data
-EXPOSE 5001
+# 5001 is for clients; 5002 is the owner's dashboard, which answers only private networks by default.
+EXPOSE 5001 5002
 
 # Point at another database without rebuilding, e.g.
 #   -e RAINDROP_DB_PROVIDER=postgres -e RAINDROP_DB_CONNECTION_STRING="Host=db;Database=raindrop;..." 
