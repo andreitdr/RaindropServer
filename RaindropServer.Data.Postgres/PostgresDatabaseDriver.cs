@@ -150,6 +150,17 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
         )
         """,
 
+        // The permissions each role grants, by name — so a permission this build does not know,
+        // written by a newer or modified one, is kept rather than misread or erased. The flags column
+        // on raindrop_roles is still written for older builds; this is what is read.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_role_permissions (
+            role_id    varchar(36) NOT NULL,
+            permission varchar(64) NOT NULL,
+            PRIMARY KEY (role_id, permission)
+        )
+        """,
+
         // Members muted in every voice call by a moderator ("mute for everyone"). One row per muted
         // member; lifting the mute deletes it.
         """
@@ -280,6 +291,46 @@ public sealed class PostgresDatabaseDriver : RelationalDatabaseDriver
         """
         CREATE INDEX IF NOT EXISTS ix_raindrop_mls_welcomes_device
             ON raindrop_mls_welcomes (user_id, device_id)
+        """,
+
+        // Group recovery: which device submitted each commit (a new table, so the commit log needs no
+        // ALTER), every reset of a channel's group to a new generation (the key refuses a second
+        // reset to the same generation, as the commit log's refuses a second commit for an epoch), and
+        // the devices or accounts a channel's managers keep out of its group.
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_commit_devices (
+            channel_id varchar(36) NOT NULL,
+            epoch      bigint      NOT NULL,
+            device_id  varchar(36) NOT NULL,
+            PRIMARY KEY (channel_id, epoch)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_group_resets (
+            channel_id             varchar(36) NOT NULL,
+            generation             bigint      NOT NULL,
+            reset_at               timestamptz NOT NULL,
+            requested_by_user_id   varchar(36) NOT NULL,
+            requested_by_device_id varchar(36) NOT NULL,
+            reported_kind          varchar(32) NULL,
+            reported_epoch         bigint      NULL,
+            reported_sha256        bytea       NULL,
+            sender_user_id         varchar(36) NULL,
+            sender_device_id       varchar(36) NULL,
+            PRIMARY KEY (channel_id, generation)
+        )
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS raindrop_mls_group_bans (
+            channel_id varchar(36) NOT NULL,
+            user_id    varchar(36) NOT NULL,
+            device_id  varchar(36) NOT NULL,
+            banned_by  varchar(36) NOT NULL,
+            banned_at  timestamptz NOT NULL,
+            PRIMARY KEY (channel_id, user_id, device_id)
+        )
         """,
 
         // End-to-end encrypted messages: MLS ciphertext the server cannot read.

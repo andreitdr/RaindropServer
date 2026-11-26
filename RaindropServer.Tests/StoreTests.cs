@@ -38,6 +38,62 @@ public class StoreTests
 
     [Theory]
     [MemberData(nameof(TestDatabases.Providers), MemberType = typeof(TestDatabases))]
+    public async Task Racing_resets_start_one_generation_which_takes_the_old_group_and_log_with_it(string provider)
+    {
+        var (driver, options) = await TestDatabases.OpenAsync(provider);
+        var groups = driver.CreateMlsGroupStore(options);
+        var channelId = Guid.NewGuid();
+        var device = Guid.NewGuid();
+        await groups.TryCreateAsync(new MlsGroupRecord(channelId, 0, [9], 0, DateTime.UtcNow), default);
+        Assert.True(await groups.TryAppendCommitAsync(Commit(channelId, 0) with { SenderDeviceId = device }, default));
+        Assert.Equal(device, Assert.Single(await groups.ReadLogAsync(channelId, 0, 10, default)).SenderDeviceId);
+        Assert.Equal(0, await groups.GenerationAsync(channelId, default));
+
+        MlsGroupResetRecord Reset(long generation, Guid user) => new(
+            channelId, generation, DateTime.UtcNow, user, Guid.NewGuid(), GroupResetReports.Commit, 0, new byte[32],
+            Guid.NewGuid(), device);
+        var results = await Task.WhenAll(Enumerable.Range(0, 16)
+            .Select(_ => Task.Run(() => groups.TryResetAsync(Reset(1, Guid.NewGuid()), default))));
+
+        Assert.Equal(1, results.Count(started => started));
+        Assert.Equal(1, await groups.GenerationAsync(channelId, default));
+        Assert.Null(await groups.FindAsync(channelId, default));
+        Assert.Empty(await groups.ReadLogAsync(channelId, 0, 10, default));
+
+        // The new generation's group starts again at epoch 0, under the same log key.
+        await groups.TryCreateAsync(new MlsGroupRecord(channelId, 0, [8], 0, DateTime.UtcNow, 1), default);
+        Assert.Equal(1, (await groups.FindAsync(channelId, default))!.Generation);
+        Assert.True(await groups.TryAppendCommitAsync(Commit(channelId, 0), default));
+        Assert.Null(Assert.Single(await groups.ReadLogAsync(channelId, 0, 10, default)).SenderDeviceId);
+
+        var user = Guid.NewGuid();
+        Assert.True(await groups.TryResetAsync(Reset(2, user), default));
+        var latest = await groups.LatestResetByAsync(channelId, user, default);
+        Assert.Equal(2, latest!.Generation);
+        Assert.Equal(device, latest.SenderDeviceId);
+        Assert.Equal([2L, 1L], (await groups.ListResetsAsync(channelId, 10, default)).Select(r => r.Generation));
+
+        // Bans: one device, or every device of an account.
+        var member = Guid.NewGuid();
+        Assert.True(await groups.TryBanAsync(new MlsGroupBanRecord(channelId, member, device, user, DateTime.UtcNow), default));
+        Assert.False(await groups.TryBanAsync(new MlsGroupBanRecord(channelId, member, device, user, DateTime.UtcNow), default));
+        Assert.True(await groups.IsBannedAsync(channelId, member, device, default));
+        Assert.False(await groups.IsBannedAsync(channelId, member, Guid.NewGuid(), default));
+        Assert.False(await groups.IsBannedAsync(channelId, member, null, default));
+        Assert.True(await groups.TryBanAsync(new MlsGroupBanRecord(channelId, member, null, user, DateTime.UtcNow), default));
+        Assert.True(await groups.IsBannedAsync(channelId, member, Guid.NewGuid(), default));
+        Assert.Contains(await groups.ListBansAsync(channelId, default), b => b.DeviceId is null);
+        Assert.True(await groups.UnbanAsync(channelId, member, null, default));
+        Assert.False(await groups.UnbanAsync(channelId, member, null, default));
+        Assert.False(await groups.IsBannedAsync(channelId, member, Guid.NewGuid(), default));
+
+        await groups.DeleteAsync(channelId, default);
+        Assert.Equal(0, await groups.GenerationAsync(channelId, default));
+        Assert.Empty(await groups.ListBansAsync(channelId, default));
+    }
+
+    [Theory]
+    [MemberData(nameof(TestDatabases.Providers), MemberType = typeof(TestDatabases))]
     public async Task Group_info_is_kept_only_for_the_current_epoch_and_the_log_pages_and_prunes(string provider)
     {
         var (driver, options) = await TestDatabases.OpenAsync(provider);

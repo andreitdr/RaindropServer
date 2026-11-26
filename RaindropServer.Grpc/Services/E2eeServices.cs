@@ -293,13 +293,15 @@ public sealed class DeliveryGrpcService : Proto.DeliveryService.DeliveryServiceB
     public override async Task<Proto.SyncGroupResponse> SyncGroup(Proto.SyncGroupRequest request, ServerCallContext context)
     {
         var sync = await _delivery.SyncAsync(context.Session(),
-            new SyncGroupRequest(Id(request.ChannelId, "channel_id"), request.FromEpoch), context.CancellationToken);
+            new SyncGroupRequest(Id(request.ChannelId, "channel_id"), request.FromEpoch, request.Generation),
+            context.CancellationToken);
 
         return new Proto.SyncGroupResponse
         {
             Epoch = sync.Epoch,
             Commits = { sync.Commits.Select(commit => new Proto.GroupCommit { Epoch = commit.Epoch, Message = Bytes(commit.Message) }) },
-            ResyncRequired = sync.ResyncRequired
+            ResyncRequired = sync.ResyncRequired,
+            Generation = sync.Generation
         };
     }
 
@@ -366,6 +368,62 @@ public sealed class DeliveryGrpcService : Proto.DeliveryService.DeliveryServiceB
                 new AckWelcomesRequest(Ids(request.WelcomeIds, "welcome_ids")), context.CancellationToken)).Message
         };
 
+    public override async Task<Proto.GetGroupGenerationResponse> GetGroupGeneration(
+        Proto.GetGroupGenerationRequest request, ServerCallContext context) =>
+        new()
+        {
+            Generation = (await _delivery.GetGenerationAsync(context.Session(),
+                new GroupRequest(Id(request.ChannelId, "channel_id")), context.CancellationToken)).Generation
+        };
+
+    public override async Task<Proto.ResetGroupResponse> ResetGroup(Proto.ResetGroupRequest request, ServerCallContext context)
+    {
+        var reset = await _delivery.ResetGroupAsync(context.Session(),
+            new ResetGroupRequest(
+                Id(request.ChannelId, "channel_id"),
+                request.Generation,
+                request.ReportedEpoch,
+                request.ReportedSha256.IsEmpty ? null : request.ReportedSha256.ToByteArray()),
+            context.CancellationToken);
+
+        return new Proto.ResetGroupResponse { Generation = reset.Generation, Reset = reset.Reset };
+    }
+
+    public override async Task<Proto.ListGroupResetsResponse> ListGroupResets(
+        Proto.ListGroupResetsRequest request, ServerCallContext context)
+    {
+        var resets = await _delivery.ListResetsAsync(context.Session(),
+            new GroupRequest(Id(request.ChannelId, "channel_id")), context.CancellationToken);
+        return new Proto.ListGroupResetsResponse { Resets = { resets.Resets.Select(reset => reset.ToProto()) } };
+    }
+
+    public override async Task<Proto.BanFromGroupResponse> BanFromGroup(Proto.BanFromGroupRequest request, ServerCallContext context) =>
+        new()
+        {
+            Changed = (await _delivery.BanAsync(context.Session(),
+                Ban(request.ChannelId, request.UserId, request.DeviceId), context.CancellationToken)).Changed
+        };
+
+    public override async Task<Proto.UnbanFromGroupResponse> UnbanFromGroup(
+        Proto.UnbanFromGroupRequest request, ServerCallContext context) =>
+        new()
+        {
+            Changed = (await _delivery.UnbanAsync(context.Session(),
+                Ban(request.ChannelId, request.UserId, request.DeviceId), context.CancellationToken)).Changed
+        };
+
+    public override async Task<Proto.ListGroupBansResponse> ListGroupBans(Proto.ListGroupBansRequest request, ServerCallContext context)
+    {
+        var bans = await _delivery.ListBansAsync(context.Session(),
+            new GroupRequest(Id(request.ChannelId, "channel_id")), context.CancellationToken);
+        return new Proto.ListGroupBansResponse { Bans = { bans.Bans.Select(ban => ban.ToProto()) } };
+    }
+
     private static DeviceRef Device(Proto.DeviceRef device) =>
         new(Id(device.UserId, "user_id"), Id(device.DeviceId, "device_id"));
+
+    /// <summary>An empty device id is a ban on every device of the account.</summary>
+    private static GroupBanRequest Ban(string channelId, string userId, string deviceId) =>
+        new(Id(channelId, "channel_id"), Id(userId, "user_id"),
+            string.IsNullOrEmpty(deviceId) ? null : Id(deviceId, "device_id"));
 }

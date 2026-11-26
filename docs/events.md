@@ -82,6 +82,7 @@ which is how a plugin adds its own. `ProtobufEventEncoder` maps each built-in na
 | `handshake` (`e2ee.handshake`) | `HandshakeEvent`: an accepted MLS commit, see [E2EE](e2ee.md#the-delivery-service) | members allowed in the channel's group |
 | `welcome` (`e2ee.welcome`) | `WelcomeEvent`: a Welcome waits in `DeliveryService.ListWelcomes` | the recipient |
 | `group_reconcile` (`e2ee.group.reconcile`) | `GroupReconcileEvent`: compare the group with its roster | members allowed in the channel's group |
+| `group_reset` (`e2ee.group.reset`) | `GroupResetEvent`: the channel's group started a new generation; drop the old one and join this one. See [E2EE](e2ee.md#recovering-a-broken-group) | members allowed in the channel's group |
 | `key_packages_low` (`e2ee.keypackages.low`) | `KeyPackagesLowEvent` | the device's owner |
 | `plugin` (any other name) | `PluginEvent`: the plugin's type name and its own protobuf message as `data` | whoever the plugin's audience says |
 

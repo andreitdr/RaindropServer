@@ -95,7 +95,20 @@ seconds and keeps an hour of them, in memory, for the charts.
 | Connected clients | Open event streams (one per running client), members online, signed-in sessions, people in voice calls and how many calls; an hour of connected clients | `IEventConnectionRegistry`, `ISessionStore.Count`, `IVoiceStateStore` |
 | Accounts | Active, left with data kept, erased | `IUserStore.CountByStatusAsync` — a `COUNT(*)` in the relational stores |
 | Server | Version, protocol, start time, .NET, database provider, voice provider, attachments, TLS and identity fingerprints | `ServerIdentity`, the registered options |
+| Roles | Every role with its member count; an editor for its name and permissions; members, with remove and "give role" | `DashboardRoles` over `RoleService` — see [Roles](#roles) |
 | Storage | Encrypted files and their size, uploads not yet sent, free space on each volume the server writes to | `IAttachmentStore.GetStatisticsAsync`, `DriveInfo` |
+
+### Roles
+
+The **Roles** card (in the Members section) is the owner's way to edit [roles](roles-and-permissions.md)
+without a client. It lists the roles; opening one shows an editor with a checkbox per permission,
+grouped by category, built from the server's own catalogue (`GET /api/permissions`), so it lists exactly
+what this build knows. The `owner` role is read-only, the `everyone` role can have its permissions
+edited but not be renamed or deleted, and deleting any other role asks for confirmation. The role's
+members are listed with a remove button, and "give role" finds an account by username or id; the role
+chips on an account's card open that role. It goes through the `*FromConsoleAsync` methods of
+`RoleService`, so the built-in role rules, unique names and the last-owner guard still apply and the
+same role events are published. Every change is written to the dashboard audit log.
 
 ### The machine
 
@@ -167,6 +180,16 @@ HTTP status for their kind (400, 401, 403 `cross_origin`, 404, 409, 429 `rate_li
 | `POST /api/accounts/{id}/recovery` | session | Issues a recovery code; the only response that carries one |
 | `GET /api/recoveries` | session | Outstanding codes, without the codes |
 | `DELETE /api/recoveries/{id}` | session | Cancels one |
+| `GET /api/permissions` | session | The permission catalogue: name, title, category, summary |
+| `GET /api/roles` | session | Every role, each `{ role, members }` with `members` a count |
+| `GET /api/roles/{id}` | session | `{ role, members: [{ userId, username }] }` |
+| `POST /api/roles` | session | `{ name, permissions?, position? }` → creates a role |
+| `PATCH /api/roles/{id}` | session | Any of `name`, `permissions`, `position`; an absent field is kept, an empty `permissions` list clears them |
+| `DELETE /api/roles/{id}` | session | Deletes the role and takes it from everyone |
+| `POST /api/accounts/{userId}/roles/{roleId}` | session | Gives the account the role |
+| `DELETE /api/accounts/{userId}/roles/{roleId}` | session | Takes it away |
+
+The role endpoints, like the rest, need a signed-in session and a same-origin request.
 
 ## Tests
 
@@ -175,5 +198,7 @@ sign-in, idle and absolute session limits, password change, reset, an unreadable
 cgroup v1/v2 readers and Docker detection against files written the way the kernel writes them, and the
 whole dashboard over `TestServer` (the listener's port simulated by a startup filter): which port answers
 what, nothing before sign-in, a forged origin refused, the counts matching what was registered, and
-issuing, listing and cancelling a recovery code that the server then accepts. `DeviceAuthTests.cs` covers
+issuing, listing and cancelling a recovery code that the server then accepts. `RoleTests.cs` has
+`DashboardRoleTests`: the role endpoints refuse without a sign-in or the dashboard's own origin, and the
+owner creates, edits, assigns and deletes a role through them. `DeviceAuthTests.cs` covers
 issuing by account id, listing, cancelling and lapsing against real `CompleteAuth` redemptions.

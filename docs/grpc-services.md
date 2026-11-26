@@ -42,7 +42,7 @@ marked anonymous.
 | `TextChannelService` (`text.proto`) | `SendMessage`, `SendEncryptedMessage`, `GetHistory`, `DeleteMessage`, `ReportMessage`, `ListReports` | [Messages](messages.md#message-api) |
 | `VoiceService` (`voice.proto`) | `GetVoiceStatus`, `JoinVoice`, `LeaveVoice`, `SetVoiceSelfState`, `MuteVoiceMember` | [Voice](voice.md#voice-api) |
 | `DeviceService` (`devices.proto`) | `RegisterDevice`, `ListDevices`, `RevokeDevice`, `ResetIdentity`, `CreateSessionChallenge`, `BindSession`, `GetKeyBackup`, `PutKeyBackup`, `StartDeviceLink`, `GetDeviceLinkOffer`, `ApproveDeviceLink`, `TakeDeviceLinkApproval` | [E2EE](e2ee.md#api) |
-| `DeliveryService` (`delivery.proto`) | `CreateGroup`, `GetGroupState`, `SubmitCommit`, `PutGroupInfo`, `SyncGroup`, `GetGroupRoster`, `UploadKeyPackages`, `ClaimKeyPackages`, `GetKeyPackageCount`, `ListWelcomes`, `AckWelcomes` | [E2EE](e2ee.md#api) |
+| `DeliveryService` (`delivery.proto`) | `CreateGroup`, `GetGroupState`, `SubmitCommit`, `PutGroupInfo`, `SyncGroup`, `GetGroupRoster`, `UploadKeyPackages`, `ClaimKeyPackages`, `GetKeyPackageCount`, `ListWelcomes`, `AckWelcomes`, `GetGroupGeneration`, `ResetGroup`, `ListGroupResets`, `BanFromGroup`, `UnbanFromGroup`, `ListGroupBans` | [E2EE](e2ee.md#api) |
 | `AttachmentService` (`attachments.proto`) | `GetAttachmentPolicy`, `CreateUpload`, `Upload` *(client stream)*, `GetUploadStatus`, `CompleteUpload`, `CancelUpload`, `Download` *(server stream)* | [Attachments](attachments.md#attachment-api) |
 | `EventService` (`events.proto`) | `Connect` *(bidirectional stream)* | [Events](events.md) |
 

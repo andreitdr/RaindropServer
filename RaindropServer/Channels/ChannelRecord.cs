@@ -20,9 +20,8 @@ public sealed record ChannelRecord
     public required string NameNormalized { get; init; }
 
     /// <summary>
-    /// The UUID of the member who created the channel. They moderate it — renaming, deleting, and
-    /// removing other members' messages in it — unless the server owner has turned that off with
-    /// <see cref="Roles.RoleOptions.ChannelCreatorModeratesOwnChannels"/>.
+    /// The UUID of the member who created the channel. A record of who made it, nothing more: creating
+    /// a channel grants no permissions in it that the creator's roles do not.
     /// </summary>
     public required Guid CreatedBy { get; init; }
 

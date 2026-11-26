@@ -23,6 +23,7 @@ internal sealed class DashboardRoutes(
     DashboardStatusService status,
     DashboardSampler sampler,
     DashboardRecovery recovery,
+    DashboardRoles roles,
     DashboardOptions options) : IRouteContributor
 {
     /// <summary>The cookie a signed-in browser holds. <c>__Host-</c>: https only, this host only, path /.</summary>
@@ -127,6 +128,30 @@ internal sealed class DashboardRoutes(
             recovery.Cancel(userId, Session(context).Username);
             return Results.NoContent();
         }));
+
+        // ── Roles ──
+        Owner(app.MapGet("/api/permissions", () => Results.Ok(DashboardRoles.Permissions())));
+
+        Owner(app.MapGet("/api/roles", async (CancellationToken cancellationToken) =>
+            Results.Ok(await roles.ListAsync(cancellationToken))));
+
+        Owner(app.MapGet("/api/roles/{roleId:guid}", async (Guid roleId, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.GetAsync(roleId, cancellationToken))));
+
+        Owner(app.MapPost("/api/roles", async (DashboardCreateRole request, HttpContext context, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.CreateAsync(request, Session(context).Username, cancellationToken))));
+
+        Owner(app.MapPatch("/api/roles/{roleId:guid}", async (Guid roleId, DashboardUpdateRole request, HttpContext context, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.UpdateAsync(roleId, request, Session(context).Username, cancellationToken))));
+
+        Owner(app.MapDelete("/api/roles/{roleId:guid}", async (Guid roleId, HttpContext context, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.DeleteAsync(roleId, Session(context).Username, cancellationToken))));
+
+        Owner(app.MapPost("/api/accounts/{userId:guid}/roles/{roleId:guid}", async (Guid userId, Guid roleId, HttpContext context, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.AssignAsync(userId, roleId, Session(context).Username, cancellationToken))));
+
+        Owner(app.MapDelete("/api/accounts/{userId:guid}/roles/{roleId:guid}", async (Guid userId, Guid roleId, HttpContext context, CancellationToken cancellationToken) =>
+            Results.Ok(await roles.UnassignAsync(userId, roleId, Session(context).Username, cancellationToken))));
     }
 
     // ── Filters ──────────────────────────────────────────────────────────────

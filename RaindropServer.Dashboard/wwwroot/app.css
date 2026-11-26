@@ -247,6 +247,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .code .mono { flex: 1; font-size: 14px; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-secondary); }
+button.chip { background: none; cursor: pointer; }
+
+.perm-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px 24px; margin-top: 14px; }
+.perm-group { border: none; margin: 0; padding: 0; min-width: 0; }
+.perm-group legend { font-size: 12.5px; font-weight: 500; color: var(--text-secondary); padding: 0; margin-bottom: 4px; }
+label.perm { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; font-size: 13.5px; color: var(--text-primary); }
+label.perm input { width: auto; flex: none; margin-top: 3px; }
+label.perm strong { font-weight: 500; }
 
 .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
 .section-title { margin: 28px 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; }

@@ -111,6 +111,24 @@ public static class MlsFraming
     /// </summary>
     public static byte[] GroupIdFor(Guid channelId) => channelId.ToByteArray(bigEndian: true);
 
+    /// <summary>
+    /// The MLS group id for a generation of a channel's group: <see cref="GroupIdFor(Guid)"/> for
+    /// generation 0, so a group that was never reset keeps the id it always had, and for any later
+    /// generation those 16 bytes followed by the generation as 8 big-endian bytes. The two lengths
+    /// differ, so no generation's id can be another's; the client builds the same bytes.
+    /// </summary>
+    public static byte[] GroupIdFor(Guid channelId, long generation)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(generation);
+        if (generation == 0)
+            return GroupIdFor(channelId);
+
+        var id = new byte[24];
+        channelId.TryWriteBytes(id, bigEndian: true, out _);
+        BinaryPrimitives.WriteInt64BigEndian(id.AsSpan(16), generation);
+        return id;
+    }
+
     private static MlsContentType ContentType(byte value) =>
         value is >= 1 and <= 3 ? (MlsContentType)value : throw Invalid("Unknown content type.");
 

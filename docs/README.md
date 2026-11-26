@@ -35,7 +35,7 @@ same formats is [E2EE](e2ee.md).
 | [End-to-end encryption](e2ee.md) | Identity keys, devices, session binding, key backup and device linking, and the MLS delivery service (groups, commits, key packages, Welcomes) — the server side of E2EE |
 | [Users](users.md) | Registration, login, sessions, leaving/rejoining, password hashing, User API |
 | [Members](members.md) | The roster and presence, Member API |
-| [Roles & permissions](roles-and-permissions.md) | The permission model, built-in roles, who may change what, Role API |
+| [Roles & permissions](roles-and-permissions.md) | The permission model, storage by name, built-in roles, who may change what, Role API |
 | [Channels](channels.md) | Channel types, `IChannelModule`, names, permissions, Channel API |
 | [Messages](messages.md) | Text messages, history paging, deletion/tombstones, Message API |
 | [Attachments](attachments.md) | End-to-end encrypted files in messages: streamed, resumable uploads, what the owner's size and type rules are enforced on, storage, cleanup, previews, Attachment API |

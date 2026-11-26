@@ -41,7 +41,6 @@ is how the Docker container is configured without editing the file.
 
   "roles": {
     "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak" ],
-    "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
   },
 
@@ -144,8 +143,11 @@ See [Roles & permissions](roles-and-permissions.md) for the model these configur
   change a server that's already been seeded. A permission name this build doesn't recognize is a
   startup error naming the offending setting, rather than a role that silently grants less than the
   owner intended.
-- `channelCreatorModeratesOwnChannels` — whether creating a channel also grants moderation rights over
-  it, independent of roles.
+- `channelCreatorModeratesOwnChannels` — **obsolete.** Still accepted so an older `raindrop.json`
+  loads, but it only produces a startup warning and does nothing: roles are the only source of
+  permissions, so creating a channel grants its creator nothing. Remove it, and give the members who
+  should rename, delete or moderate channels a role with `rename_channels`, `delete_channels` or
+  `manage_messages`.
 - `firstMemberBecomesOwner` — whether the first UUID to register is automatically granted the `owner`
   role (see [Roles & permissions](roles-and-permissions.md#the-two-built-in-roles)). Turn this off for
   a server whose owner should instead be granted the role explicitly from the console.

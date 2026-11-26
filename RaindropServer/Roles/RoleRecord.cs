@@ -15,8 +15,17 @@ public sealed record RoleRecord
     /// <summary>The lower-cased name the uniqueness constraint is applied to.</summary>
     public required string NameNormalized { get; init; }
 
-    /// <summary>What holding this role allows.</summary>
+    /// <summary>What holding this role allows: the permissions this build knows.</summary>
     public required Permission Permissions { get; init; }
+
+    /// <summary>
+    /// Permission names stored against this role that this build does not know — written by a newer
+    /// or modified build of the server. They grant nothing and are never sent to a client, but they
+    /// are kept on every save, so running an older build for a while does not erase them.
+    /// </summary>
+    public IReadOnlySet<string> UnknownPermissions { get; init; } = EmptyNames;
+
+    private static readonly IReadOnlySet<string> EmptyNames = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>
     /// Where the role sits in the list, highest first. Presentation only: permissions are the union

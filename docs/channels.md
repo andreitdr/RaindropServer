@@ -74,12 +74,13 @@ resolver once and hands the answer down to the type's own service:
 | Operation | Permission needed |
 |---|---|
 | Post a message | `SendMessages` |
-| Rename a channel | `RenameChannels` (or having created it — see below) |
-| Delete a channel | `DeleteChannels` (or having created it) — its messages are archived first |
+| Rename a channel | `RenameChannels` |
+| Delete a channel | `DeleteChannels` — its messages are archived first |
 | Remove somebody else's message | `ManageMessages` (deleting your *own* needs no permission) |
 
 Every channel a client is shown carries `yourPermissions`, so the client can grey out what the caller
-cannot do rather than guessing at the server's rules. A channel the caller may not see (no
+cannot do rather than guessing at the server's rules. Creating a channel grants its creator nothing
+extra: a member who should tidy up after themselves needs a role with the permission. A channel the caller may not see (no
 `ViewChannel`) is reported as `channel_not_found` rather than `403 Forbidden`, so the API cannot be
 used to enumerate channels somebody has been kept out of.
 
@@ -92,8 +93,8 @@ All authenticated. `raindrop.v1.ChannelService`:
 | `ListChannels` | Every channel the caller may see, with `your_permissions` for each |
 | `CreateChannel` | Create a channel of a given type: `text` or `voice` |
 | `GetChannel` | One channel, and what the caller may do in it |
-| `RenameChannel` | Rename it — needs `RenameChannels`, or having created it |
-| `DeleteChannel` | Delete it and everything in it — needs `DeleteChannels`, or having created it. The messages are [copied to the archive](messages.md#the-deleted-message-archive) first |
+| `RenameChannel` | Rename it — needs `RenameChannels` |
+| `DeleteChannel` | Delete it and everything in it — needs `DeleteChannels`. The messages are [copied to the archive](messages.md#the-deleted-message-archive) first |
 
 Messages (`TextChannelService`) are documented in [Messages](messages.md), and calls (`VoiceService`)
 in [Voice](voice.md).

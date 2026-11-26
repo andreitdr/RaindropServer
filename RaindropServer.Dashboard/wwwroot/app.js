@@ -10,6 +10,7 @@ let history = [];
 let lastStatus = null;
 let lastOk = 0;
 let recoveryState = { query: "", found: null, issued: null, error: "", pending: [] };
+let rolesState = freshRolesState();
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -206,6 +207,7 @@ function showDashboard(username) {
   history = [];
   lastStatus = null;
   recoveryState = { query: "", found: null, issued: null, error: "", pending: [] };
+  rolesState = freshRolesState();
 
   view.status = h("span", { class: "status" }, h("span", { class: "dot", "aria-hidden": "true" }), h("span", { text: "Connecting" }));
   view.version = h("span", { class: "muted" });
@@ -217,6 +219,7 @@ function showDashboard(username) {
   view.accounts = h("section", { class: "card" });
   view.storage = h("section", { class: "card" });
   view.recovery = h("section", { class: "card wide" });
+  view.roles = h("section", { class: "card wide" });
   view.settings = h("section", { class: "card wide" });
 
   const header = h("header", { class: "header" },
@@ -228,14 +231,16 @@ function showDashboard(username) {
   show(header, view.banner,
     h("div", { class: "grid" }, view.process, view.environment, view.clients, view.accounts, view.server, view.storage),
     h("h2", { class: "section-title", text: "Members" }),
-    h("div", { class: "grid" }, view.recovery),
+    h("div", { class: "grid" }, view.roles, view.recovery),
     h("h2", { class: "section-title", text: "This dashboard" }),
     h("div", { class: "grid" }, view.settings));
 
   renderRecovery();
+  renderRoles();
   renderSettings();
   poll(true);
   loadPending();
+  loadRoles();
 }
 
 async function signOut() {
@@ -577,7 +582,12 @@ function foundAccount(a) {
       ["Online now", a.online ? "Yes" : "No"],
       ["Code waiting", a.recovery ? `Yes, until ${when(a.recovery.expiresAtUtc)}` : "No"],
     ]),
-    a.roles.length ? h("div", { class: "chips", style: "margin-top:10px" }, a.roles.map((role) => h("span", { class: "chip", text: role }))) : null,
+    a.roles.length ? h("div", { class: "chips", style: "margin-top:10px" }, a.roles.map((name) => {
+      const role = rolesState.roles.find((r) => r.role.name === name);
+      return role
+        ? h("button", { class: "chip", type: "button", text: name, title: "Open this role", onclick: () => openRole(role.role.roleId) })
+        : h("span", { class: "chip", text: name });
+    })) : null,
     issued ? issuedCode(issued) : h("div", { style: "margin-top:14px" }, issue, confirm));
 }
 
@@ -616,6 +626,223 @@ function pendingTable(pending) {
         }
         await loadPending();
       } }))))));
+}
+
+// ── Roles ─────────────────────────────────────────────────────────────────────
+// A role is a named set of permissions; a member may do the union of every role they hold. The
+// permissions listed are the ones this server's build knows (GET /api/permissions), so an older server
+// simply offers fewer. Nothing here is checked against a permission — whoever is signed in owns the
+// server — but the server still protects the owner and everyone roles and the last owner.
+
+const CATEGORY_TITLES = {
+  general: "General",
+  text: "Text",
+  voice: "Voice",
+  channels: "Channels",
+  moderation: "Moderation",
+  administration: "Administration",
+};
+
+function freshRolesState() {
+  // editing: null, or { roleId (null while creating), kind, name, permissions: Set, members, memberQuery }
+  return { roles: [], permissions: [], editing: null, error: "", notice: "" };
+}
+
+async function loadRoles() {
+  try {
+    const [roles, permissions] = await Promise.all([api("GET", "/api/roles"), api("GET", "/api/permissions")]);
+    rolesState.roles = roles;
+    rolesState.permissions = permissions;
+  } catch (error) {
+    rolesState.error = error.message;
+  }
+  renderRoles();
+}
+
+async function openRole(roleId) {
+  rolesState.error = "";
+  rolesState.notice = "";
+  try {
+    const detail = await api("GET", `/api/roles/${roleId}`);
+    rolesState.editing = {
+      roleId: detail.role.roleId,
+      kind: detail.role.kind,
+      name: detail.role.name,
+      permissions: new Set(detail.role.permissions),
+      members: detail.members,
+      memberQuery: "",
+    };
+  } catch (error) {
+    rolesState.error = error.message;
+  }
+  renderRoles();
+  view.roles.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function newRole() {
+  rolesState.error = "";
+  rolesState.notice = "";
+  rolesState.editing = { roleId: null, kind: "custom", name: "", permissions: new Set(), members: [], memberQuery: "" };
+  renderRoles();
+}
+
+function kindLabel(kind) {
+  return kind === "owner" ? "Built in · cannot be changed" : kind === "everyone" ? "Built in · every member" : "";
+}
+
+function renderRoles() {
+  const r = rolesState;
+  fill(view.roles,
+    h("h2", {}, h("span", { text: "Roles" }), h("span", { class: "hint", text: "members may do everything any of their roles allows" })),
+    r.error ? h("p", { class: "error", role: "alert", text: r.error }) : null,
+    r.notice ? h("p", { class: "secondary", role: "status", text: r.notice }) : null,
+    rolesTable(r.roles),
+    h("div", { class: "row", style: "margin-top:12px" }, h("button", { type: "button", text: "New role", onclick: newRole })),
+    r.editing ? roleEditor(r.editing) : null);
+}
+
+function rolesTable(roles) {
+  if (!roles.length) return h("p", { class: "muted", text: "Loading…" });
+
+  return h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "Role" }), h("th", { text: "Permissions" }), h("th", { class: "num", text: "Members" }), h("th", {}))),
+    h("tbody", {}, roles.map(({ role, members }) => h("tr", {},
+      h("td", {}, h("div", { text: role.name }), kindLabel(role.kind) ? h("div", { class: "muted", text: kindLabel(role.kind) }) : null),
+      h("td", { class: "secondary", text: role.permissions.includes("administrator")
+        ? "Administrator (everything)"
+        : role.permissions.length ? `${role.permissions.length} of ${rolesState.permissions.length}` : "None" }),
+      h("td", { class: "num", text: role.kind === "everyone" ? "All" : count(members) }),
+      h("td", { class: "num" }, h("button", { type: "button", text: role.kind === "owner" ? "View" : "Edit",
+        onclick: () => openRole(role.roleId) }))))));
+}
+
+function roleEditor(e) {
+  const owner = e.kind === "owner";
+  const everyone = e.kind === "everyone";
+  const creating = e.roleId === null;
+  const message = h("p", { class: "error", role: "alert" });
+
+  const name = h("input", { id: "role-name", type: "text", value: e.name, maxlength: "32", autocomplete: "off",
+    disabled: owner || everyone, oninput: () => { e.name = name.value; } });
+
+  // Grouped by category, in the order the server lists them; a category this page does not know is "Other".
+  const groups = new Map();
+  for (const p of rolesState.permissions) {
+    const key = CATEGORY_TITLES[p.category] ? p.category : "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+
+  const checkboxes = [...groups].map(([key, permissions]) => h("fieldset", { class: "perm-group" },
+    h("legend", { text: CATEGORY_TITLES[key] ?? "Other" }),
+    permissions.map((p) => {
+      const box = h("input", { type: "checkbox", id: `perm-${p.name}`, checked: e.permissions.has(p.name), disabled: owner,
+        onchange: () => { if (box.checked) e.permissions.add(p.name); else e.permissions.delete(p.name); } });
+      return h("label", { class: "perm", for: `perm-${p.name}` }, box,
+        h("span", {}, h("strong", { text: p.title ?? p.name }), h("span", { class: "muted", text: ` — ${p.summary}` })));
+    })));
+
+  const save = async (event) => {
+    event.preventDefault();
+    message.textContent = "";
+    const permissions = rolesState.permissions.map((p) => p.name).filter((n) => e.permissions.has(n));
+    try {
+      if (creating) {
+        const role = await api("POST", "/api/roles", { name: e.name, permissions });
+        rolesState.notice = `Created '${role.name}'.`;
+        await loadRoles();
+        await openRole(role.roleId);
+      } else {
+        const body = everyone ? { permissions } : { name: e.name, permissions };
+        const role = await api("PATCH", `/api/roles/${e.roleId}`, body);
+        rolesState.notice = `Saved '${role.name}'.`;
+        await loadRoles();
+        await openRole(role.roleId);
+      }
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  };
+
+  const confirmDelete = h("div", { hidden: true },
+    h("div", { class: "warning-box", role: "alert" },
+      h("strong", { text: `Delete '${e.name}'?` }),
+      h("div", { text: "Everyone holding it loses what it grants. This cannot be undone." })),
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "danger", type: "button", text: "Yes, delete it", onclick: async () => {
+        try {
+          const deleted = await api("DELETE", `/api/roles/${e.roleId}`);
+          rolesState.editing = null;
+          rolesState.notice = deleted.message;
+          await loadRoles();
+        } catch (error) {
+          message.textContent = error.message;
+        }
+      } }),
+      h("button", { type: "button", text: "Cancel", onclick: () => { confirmDelete.hidden = true; } })));
+
+  const form = h("form", { onsubmit: save },
+    h("label", { for: "role-name", text: "Name" }), name,
+    everyone ? h("p", { class: "muted", text: "Every member holds this role. Its name cannot change; its permissions are what a member can do before anybody gives them a role." }) : null,
+    owner ? h("p", { class: "muted", text: "The owner role holds administrator, which is every permission, including ones added later. It cannot be changed or deleted." }) : null,
+    h("div", { class: "perm-groups" }, checkboxes),
+    owner ? null : h("div", { class: "row", style: "margin-top:14px" },
+      h("button", { class: "primary", type: "submit", text: creating ? "Create role" : "Save" }),
+      creating || everyone ? null : h("button", { class: "danger", type: "button", text: "Delete role", onclick: () => { confirmDelete.hidden = false; } }),
+      h("button", { type: "button", text: "Close", onclick: () => { rolesState.editing = null; renderRoles(); } })),
+    message,
+    confirmDelete);
+
+  return h("div", { class: "found" },
+    h("h3", { text: creating ? "New role" : e.name }),
+    form,
+    creating || everyone ? null : roleMembers(e),
+    owner ? h("div", { class: "row", style: "margin-top:14px" },
+      h("button", { type: "button", text: "Close", onclick: () => { rolesState.editing = null; renderRoles(); } })) : null);
+}
+
+function roleMembers(e) {
+  const message = h("p", { class: "error", role: "alert" });
+  const input = h("input", { id: "role-member", type: "search", placeholder: "Username or account id", value: e.memberQuery,
+    autocomplete: "off", spellcheck: "false", oninput: () => { e.memberQuery = input.value; } });
+
+  const add = h("form", { class: "row", onsubmit: async (event) => {
+    event.preventDefault();
+    message.textContent = "";
+    try {
+      const account = await api("GET", `/api/accounts/lookup?q=${encodeURIComponent(input.value.trim())}`);
+      const result = await api("POST", `/api/accounts/${account.userId}/roles/${e.roleId}`);
+      rolesState.notice = result.message;
+      await loadRoles();
+      await openRole(e.roleId);
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  } }, input, h("button", { type: "submit", text: "Give role" }));
+
+  const list = e.members.length
+    ? h("table", {}, h("tbody", {}, e.members.map((m) => h("tr", {},
+      h("td", { text: m.username ?? m.userId }),
+      h("td", { class: "num" }, h("button", { class: "danger", type: "button", text: "Remove", onclick: async (event) => {
+        event.target.disabled = true;
+        try {
+          const result = await api("DELETE", `/api/accounts/${m.userId}/roles/${e.roleId}`);
+          rolesState.notice = result.message;
+          await loadRoles();
+          await openRole(e.roleId);
+        } catch (error) {
+          event.target.disabled = false;
+          message.textContent = error.message;
+        }
+      } }))))))
+    : h("p", { class: "muted", text: "Nobody holds this role yet." });
+
+  return h("div", {},
+    h("h3", { class: "section-title", text: "Members with this role" }),
+    list,
+    h("label", { for: "role-member", text: "Give it to" }),
+    add,
+    message);
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

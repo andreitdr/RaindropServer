@@ -106,12 +106,16 @@ public sealed class TextChannelService
         var envelope = MlsFraming.Parse(request.Message);
         if (envelope.WireFormat != MlsWireFormat.PrivateMessage || envelope.ContentType != MlsContentType.Application)
             throw ApiException.BadRequest("invalid_mls_message", "That is not an encrypted MLS application message.");
+        var group = await _groups.FindAsync(access.Channel.ChannelId, cancellationToken);
+        var generation = group?.Generation ?? await _groups.GenerationAsync(access.Channel.ChannelId, cancellationToken);
         if (envelope.GroupId is null
-            || !envelope.GroupId.AsSpan().SequenceEqual(MlsFraming.GroupIdFor(access.Channel.ChannelId)))
-            throw ApiException.BadRequest("wrong_group", "That message is for a different channel's group.");
-
-        var group = await _groups.FindAsync(access.Channel.ChannelId, cancellationToken)
-                    ?? throw ApiException.NotFound("group_not_found", "This channel has no encryption group yet.");
+            || !envelope.GroupId.AsSpan().SequenceEqual(MlsFraming.GroupIdFor(access.Channel.ChannelId, generation)))
+            throw ApiException.BadRequest("wrong_group",
+                "That message is for a different channel's group, or another generation of this one's.");
+        if (group is null)
+            throw ApiException.NotFound("group_not_found", "This channel has no encryption group yet.");
+        if (await _groups.IsBannedAsync(access.Channel.ChannelId, session.UserId, deviceId, cancellationToken))
+            throw ApiException.Forbidden("not_allowed_in_group", "This device is kept out of this channel's group.");
         var epoch = (long)envelope.Epoch;
         if (epoch > group.Epoch || epoch < group.Epoch - _options.MaximumPastEpochs)
             throw ApiException.Conflict("stale_epoch",

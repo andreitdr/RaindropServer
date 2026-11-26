@@ -42,7 +42,13 @@ public sealed class RoleGrpcService : Proto.RoleService.RoleServiceBase
             Permissions =
             {
                 RoleService.Catalogue().Permissions.Select(permission =>
-                    new Proto.PermissionDescription { Name = permission.Name, Summary = permission.Summary })
+                    new Proto.PermissionDescription
+                    {
+                        Name = permission.Name,
+                        Title = permission.Title,
+                        Category = permission.Category,
+                        Summary = permission.Summary
+                    })
             }
         });
 

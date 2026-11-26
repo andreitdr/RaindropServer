@@ -45,7 +45,6 @@
   // edited through the API, and changing this setting leaves it alone.
   "roles": {
     "defaultMemberPermissions": [ "view_channel", "send_messages", "attach_files", "create_channels", "connect", "speak", "video", "screen_share" ],
-    "channelCreatorModeratesOwnChannels": true,
     "firstMemberBecomesOwner": true
   },
 

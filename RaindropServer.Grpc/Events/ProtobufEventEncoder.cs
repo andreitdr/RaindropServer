@@ -100,6 +100,10 @@ public sealed class ProtobufEventEncoder : IEventEncoder
         },
         (DeliveryEventTypes.GroupReconcile, GroupReconcileEvent reconcile) =>
             new() { GroupReconcile = new Proto.GroupReconcileEvent { ChannelId = Text(reconcile.ChannelId) } },
+        (DeliveryEventTypes.GroupReset, GroupResetEvent reset) => new()
+        {
+            GroupReset = new Proto.GroupResetEvent { ChannelId = Text(reset.ChannelId), Generation = reset.Generation }
+        },
         (DeliveryEventTypes.KeyPackagesLow, KeyPackagesLowEvent low) => new()
         {
             KeyPackagesLow = new Proto.KeyPackagesLowEvent { DeviceId = Text(low.DeviceId), Remaining = low.Remaining }

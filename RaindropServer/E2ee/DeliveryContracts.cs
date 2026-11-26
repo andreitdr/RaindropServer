@@ -1,8 +1,9 @@
 namespace RaindropServer.E2ee;
 
 // The MLS delivery service's contracts. Every MLS message is opaque bytes, protobuf `bytes` on the
-// wire. Groups are named by their channel; the MLS group id is the channel's UUID
-// as 16 big-endian bytes.
+// wire. Groups are named by their channel and generation; the MLS group id is the channel's UUID as
+// 16 big-endian bytes, followed for a generation after 0 by the generation as 8 big-endian bytes
+// (MlsFraming.GroupIdFor).
 
 /// <param name="UserId">The device's owner.</param>
 /// <param name="DeviceId">The device.</param>
@@ -21,7 +22,8 @@ public record CreateGroupRequest(Guid ChannelId, byte[] GroupInfo);
 /// <param name="Epoch">The epoch the next commit must be made in.</param>
 /// <param name="GroupInfo">The latest published group info, for joining by external commit.</param>
 /// <param name="GroupInfoEpoch">The epoch <paramref name="GroupInfo"/> describes; behind <paramref name="Epoch"/> until a member publishes a newer one.</param>
-public record GroupStateResponse(Guid ChannelId, long Epoch, byte[]? GroupInfo, long GroupInfoEpoch);
+/// <param name="Generation">The group's generation, which its MLS group id names.</param>
+public record GroupStateResponse(Guid ChannelId, long Epoch, byte[]? GroupInfo, long GroupInfoEpoch, long Generation = 0);
 
 /// <param name="ChannelId">The channel.</param>
 /// <param name="Commit">The MLS commit, made in the group's current epoch.</param>
@@ -42,7 +44,8 @@ public record PutGroupInfoRequest(Guid ChannelId, byte[] GroupInfo);
 
 /// <param name="ChannelId">The channel.</param>
 /// <param name="FromEpoch">The epoch this device is in: commits made in it and later are returned.</param>
-public record SyncGroupRequest(Guid ChannelId, long FromEpoch);
+/// <param name="Generation">The generation this device's group is in; 0 from a client that predates generations.</param>
+public record SyncGroupRequest(Guid ChannelId, long FromEpoch, long Generation = 0);
 
 /// <param name="Epoch">One commit, made in this epoch.</param>
 /// <param name="Message">The MLS commit.</param>
@@ -51,14 +54,44 @@ public record HandshakeSummary(long Epoch, byte[] Message);
 /// <param name="Epoch">The group's current epoch.</param>
 /// <param name="Commits">Commits from the requested epoch on, oldest first — possibly one page of many.</param>
 /// <param name="ResyncRequired">
-/// True when commits this device needs have been pruned: it must rejoin by external commit, and loses
-/// the messages in between, as forward-only history means it would anyway.
+/// True when commits this device needs have been pruned, or its group is of another generation than
+/// <paramref name="Generation"/>: it must rejoin, and loses the messages in between, as forward-only
+/// history means it would anyway.
 /// </param>
-public record SyncGroupResponse(long Epoch, IReadOnlyList<HandshakeSummary> Commits, bool ResyncRequired);
+/// <param name="Generation">The group's current generation.</param>
+public record SyncGroupResponse(long Epoch, IReadOnlyList<HandshakeSummary> Commits, bool ResyncRequired, long Generation = 0);
 
 /// <param name="ChannelId">The channel.</param>
 /// <param name="Devices">Every device that should be in the channel's group right now.</param>
 public record GroupRosterResponse(Guid ChannelId, IReadOnlyList<DeviceRef> Devices);
+
+/// <param name="Generation">The channel group's current generation, whether or not its group exists yet.</param>
+public record GroupGenerationResponse(Guid ChannelId, long Generation);
+
+/// <param name="ChannelId">The channel.</param>
+/// <param name="Generation">The generation the caller found broken.</param>
+/// <param name="ReportedEpoch">The epoch of the commit, or of the group info, it cannot get past.</param>
+/// <param name="ReportedSha256">
+/// SHA-256 of that commit or group info as the server holds it; null only for a channel manager's
+/// reset without a report.
+/// </param>
+public record ResetGroupRequest(Guid ChannelId, long Generation, long ReportedEpoch, byte[]? ReportedSha256);
+
+/// <param name="Generation">The generation the channel's group is in now.</param>
+/// <param name="Reset">True when this request started it; false when the caller's generation was already behind.</param>
+public record ResetGroupResponse(long Generation, bool Reset);
+
+/// <param name="Resets">Newest first.</param>
+public record GroupResetsResponse(IReadOnlyList<MlsGroupResetRecord> Resets);
+
+/// <param name="ChannelId">The channel whose group it is.</param>
+/// <param name="UserId">The account.</param>
+/// <param name="DeviceId">One of its devices, or null for every one.</param>
+public record GroupBanRequest(Guid ChannelId, Guid UserId, Guid? DeviceId);
+
+public record GroupBanChangedResponse(bool Changed);
+
+public record GroupBansResponse(IReadOnlyList<MlsGroupBanRecord> Bans);
 
 // ── Key packages ─────────────────────────────────────────────────────────────
 
@@ -105,6 +138,12 @@ public static class DeliveryEventTypes
 
     /// <summary>A device is running out of one-time key packages. Data: <see cref="KeyPackagesLowEvent"/>. To its owner.</summary>
     public const string KeyPackagesLow = "e2ee.keypackages.low";
+
+    /// <summary>
+    /// A channel's group started a new generation: members drop the old one and join this one. Data:
+    /// <see cref="GroupResetEvent"/>. To the group's audience.
+    /// </summary>
+    public const string GroupReset = "e2ee.group.reset";
 }
 
 public record HandshakeEvent(Guid ChannelId, long Epoch, byte[] Message);
@@ -112,5 +151,7 @@ public record HandshakeEvent(Guid ChannelId, long Epoch, byte[] Message);
 public record WelcomeEvent(Guid ChannelId, Guid DeviceId);
 
 public record GroupReconcileEvent(Guid ChannelId);
+
+public record GroupResetEvent(Guid ChannelId, long Generation);
 
 public record KeyPackagesLowEvent(Guid DeviceId, int Remaining);

@@ -181,6 +181,7 @@ public sealed record ServerConfig
         ValidateUsers(report);
         Apply(report, "channels", ApplyTo, (ChannelOptions options) => options.Validate(report.Section("channels")));
         Apply(report, "roles", ApplyTo, (RoleOptions options) => options.Validate(report.Section("roles")));
+        ValidateRoles(report.Section("roles"));
         Apply(report, "attachments", ApplyTo, (AttachmentOptions options) => options.Validate(report.Section("attachments")));
         Apply(report, "dashboard", ApplyTo, (DashboardOptions options) => options.Validate(report.Section("dashboard")));
 
@@ -527,8 +528,20 @@ public sealed record ServerConfig
             }
         }
 
-        options.ChannelCreatorModeratesOwnChannels = Roles.ChannelCreatorModeratesOwnChannels;
         options.FirstMemberBecomesOwner = Roles.FirstMemberBecomesOwner;
+    }
+
+    /// <summary>
+    /// Reports role settings this build no longer has. Still read rather than refused, so an owner's
+    /// older <c>raindrop.json</c> loads; a warning says the setting now does nothing.
+    /// </summary>
+    private void ValidateRoles(ConfigurationReport report)
+    {
+        if (Roles.ChannelCreatorModeratesOwnChannels is not null)
+            report.Warn("channelCreatorModeratesOwnChannels",
+                "no longer does anything: creating a channel grants its creator nothing their roles do not.",
+                "Remove the setting. To let some members rename, delete or moderate channels, give them a role with " +
+                "rename_channels, delete_channels or manage_messages.");
     }
 
     /// <summary>
@@ -992,9 +1005,8 @@ public sealed record ChannelConfig(
 /// role exists, changing this does not reach back and overwrite what administrators have made it.
 /// </param>
 /// <param name="ChannelCreatorModeratesOwnChannels">
-/// Whether creating a channel makes you its moderator, whatever your roles say. On by default, so a
-/// member who can create a channel can also tidy it up afterwards. Turn it off for a server where
-/// roles are meant to be the only answer to who may do what.
+/// Obsolete and ignored: roles are the only source of permissions, so creating a channel grants
+/// nothing. Still read so an older file loads, with a warning.
 /// </param>
 /// <param name="FirstMemberBecomesOwner">
 /// Whether the first UUID to register is granted the owner role. On by default: a self-hosted server
@@ -1003,7 +1015,7 @@ public sealed record ChannelConfig(
 /// </param>
 public sealed record RoleConfig(
     string[]? DefaultMemberPermissions = null,
-    bool ChannelCreatorModeratesOwnChannels = true,
+    bool? ChannelCreatorModeratesOwnChannels = null,
     bool FirstMemberBecomesOwner = true);
 
 /// <param name="Provider">

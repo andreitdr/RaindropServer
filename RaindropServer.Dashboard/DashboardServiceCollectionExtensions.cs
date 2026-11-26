@@ -32,6 +32,7 @@ public static class DashboardServiceCollectionExtensions
         services.TryAddSingleton<DashboardAuth>();
         services.TryAddSingleton<DashboardStatusService>();
         services.TryAddSingleton<DashboardRecovery>();
+        services.TryAddSingleton<DashboardRoles>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IRouteContributor, DashboardRoutes>());
 
         // An account file that is there but unreadable would refuse every sign-in; said at start instead.

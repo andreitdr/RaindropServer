@@ -439,6 +439,40 @@ public class GrpcTests
         Assert.Equal("yes", StringValue.Parser.ParseFrom(plugin.Plugin.Data).Value);
     }
 
+    // ── Roles ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_permission_catalogue_carries_a_title_and_a_category_for_every_permission()
+    {
+        await using var server = await GrpcServer.StartAsync();
+        var (token, _) = await server.RegisterAsync();
+
+        var catalogue = await new Proto.RoleService.RoleServiceClient(server.Channel)
+            .ListPermissionsAsync(new Proto.ListPermissionsRequest(), GrpcServer.As(token));
+
+        var manageRoles = catalogue.Permissions.Single(p => p.Name == "manage_roles");
+        Assert.Equal("Manage roles", manageRoles.Title);
+        Assert.Equal("administration", manageRoles.Category);
+        Assert.All(catalogue.Permissions, p => Assert.True(p.HasTitle && p.Category.Length > 0, p.Name));
+    }
+
+    [Fact]
+    public async Task A_member_who_created_a_channel_cannot_rename_it_without_a_role_that_allows_it()
+    {
+        await using var server = await GrpcServer.StartAsync();
+        await server.RegisterAsync(); // the first member owns the server
+        var (token, _) = await server.RegisterAsync();
+        var channels = new Proto.ChannelService.ChannelServiceClient(server.Channel);
+
+        var channel = await channels.CreateChannelAsync(
+            new Proto.CreateChannelRequest { Type = "text", Name = "mine" }, GrpcServer.As(token));
+        Assert.DoesNotContain("rename_channels", channel.Channel.YourPermissions);
+
+        var refused = await Refused(() => channels.RenameChannelAsync(
+            new Proto.RenameChannelRequest { ChannelId = channel.Channel.ChannelId, Name = "ours" }, GrpcServer.As(token)).ResponseAsync);
+        Assert.Equal("missing_permission", ReasonOf(refused));
+    }
+
     // ── Attachments ──────────────────────────────────────────────────────────
 
     /// <summary>A member with a text channel and a session bound to a device, as uploading needs.</summary>

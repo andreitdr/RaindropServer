@@ -12,10 +12,17 @@ request fail) but is never *trusted* about it — every check runs server-side, 
 
 ## Permissions
 
+Roles hold permissions; **members get roles only, never permissions directly**, and what a member may
+do is the union of their roles. Roles are custom and editable, per server — by a member with
+`manage_roles` through the role API, or by the owner from the [dashboard](dashboard.md#roles).
+
+The permissions themselves are **hard-coded per build** and modular: each server's build advertises
+the ones it knows (`ListPermissions`, with a title and a category for an editor), so a client talking
+to an older and a newer server sees each server's own set.
+
 [`Permission`](../RaindropServer/Roles/Permission.cs) is a `[Flags]` enum backed by `long` rather than
-the default `int`: the permission set lives in a single database column, there's no schema migration
-mechanism (see [Database modules](database-modules.md)), so the room for another fifty-odd permissions
-has to exist from day one. The permissions today:
+the default `int`, leaving room for another fifty-odd permissions. In the database they are stored by
+name, not as that number (see [Storage](#storage)). The permissions today:
 
 | Flag | Wire name | Grants |
 |---|---|---|
@@ -30,7 +37,7 @@ has to exist from day one. The permissions today:
 | `MuteMembers` | `mute_members` | Mute other members in voice channels, for everyone — checked server-wide, never per channel |
 | `CreateChannels` | `create_channels` | Create new channels on this server |
 | `RenameChannels` | `rename_channels` | Rename existing channels |
-| `DeleteChannels` | `delete_channels` | Delete channels, and everything inside them |
+| `DeleteChannels` | `delete_channels` | Delete channels, and everything inside them. Also what makes somebody a manager of a channel's end-to-end encrypted group: reset it without a report, read who reset it and whose commit broke it, and ban a device or account from it ([E2EE](e2ee.md#recovering-a-broken-group)) |
 | `ManageRoles` | `manage_roles` | Create roles and hand them out to members |
 | `Administrator` | `administrator` | Every permission, including ones added later |
 
@@ -39,12 +46,29 @@ Two conventions hold everywhere in the codebase:
 - **Permissions travel as names, never as a bitfield.** A client too old to know a permission lists
   the ones it understands and ignores the rest — exactly like `PresenceStatus` and `ChannelType`.
   [`PermissionNames`](../RaindropServer/Roles/Permission.cs) is the single table everything else is
-  derived from (wire names, the parser, and the catalogue `RoleService.ListPermissions` serves), so
-  adding a permission means adding one row to it.
+  derived from (wire names, titles, categories, the parser, and the catalogue
+  `RoleService.ListPermissions` serves), so adding a permission means adding one row to it. A row has a
+  `Title` ("Manage roles") and a `Category` (`general`, `text`, `voice`, `channels`, `moderation` or
+  `administration`, an open set a client files as "other" when it does not know it); `Lookup` turns a
+  name into a flag and `Split` separates a stored set into known flags and unknown names.
 - **`Administrator` is expanded, never compared literally.** `PermissionExtensions.Expand` turns it
   into every permission this build has, so an administrator is never refused something merely because
   the bit for it wasn't set when their role was written. That's what keeps the built-in owner role
   correct as the enum grows over time.
+
+## Storage
+
+[`RelationalRoleStore`](../RaindropServer/Data/Relational/RelationalRoleStore.cs) stores a role's permissions **by name**, one
+row per permission in `raindrop_role_permissions(role_id, permission)`. A name this build does not know
+(a role written by a newer build) becomes `RoleRecord.UnknownPermissions`: it grants nothing, is never
+sent to a client, and is written back on every save so editing the role here cannot erase it.
+
+`raindrop_roles.permissions` (a `bigint`) is still written with the bits this build knows, so a
+downgraded older build keeps working. A role with **no** name rows is read from that column, which is
+how roles that predate the table migrate: lazily, and written as names the next time they are saved —
+there is no one-time copy. Known limitation: edits made while an older build was running are not
+carried back into the name rows after upgrading again, since only a role with no name rows falls back
+to the `bigint`.
 
 ## The two built-in roles
 
@@ -119,15 +143,14 @@ so a member who left in one session cannot keep acting through a token still hel
 same check is what makes it safe to keep role assignments after somebody leaves: they grant nothing
 until the account is active again, and are still there if that person rejoins.
 
-Roles are **server-wide** — the resolver's optional `ChannelRecord?` parameter only changes the answer
-for one rule, which is about a particular channel: **whoever creates a channel moderates it**
-(renaming, deleting, and removing other members' messages in it), whatever their roles otherwise say.
-`MuteMembers` is deliberately *not* part of that rule: a mute for everyone follows its target into
-every call on the server, so it is checked server-wide.
-That's the rule the server ran on before it had roles at all, kept so a member who can create a
-channel isn't unable to tidy it up afterwards. `RoleOptions.ChannelCreatorModeratesOwnChannels` turns
-it off for a server where roles alone should decide. Per-channel role overrides, if ever wanted, would
-go here and nowhere else.
+Roles are **server-wide**, and they are the only source of permissions: creating a channel grants its
+creator nothing, so rename, delete and `manage_messages` need a role like everything else. (An earlier
+build gave a channel's creator those rights, behind `RoleOptions.ChannelCreatorModeratesOwnChannels`;
+both are gone, and the `roles.channelCreatorModeratesOwnChannels` setting is still read but only
+produces a warning.) The resolver's `ChannelRecord?` parameter stays as the place per-channel role
+overrides would go, if ever wanted. Authors deleting their *own* messages is ownership, not a
+permission, and does not go through the resolver. `MuteMembers` is checked server-wide, because a mute
+for everyone follows its target into every call.
 
 Drawing a channel list asks the resolver once per channel, so the union of a member's roles is cached
 in [`RolePermissionCache`](../RaindropServer/Roles/RolePermissionCache.cs), and **every write through
@@ -137,6 +160,15 @@ Raindrop server is a single process — the same assumption `InMemorySessionStor
 directly in SQL (bypassing the running server) takes effect only on the next restart, which is exactly
 why the console `grant`/`revoke` commands go through the running server's own `RoleService` rather than
 touching the database directly.
+
+## Console and dashboard
+
+`RoleService` has a core method per operation that takes the caller's permissions (`Permission? caller`);
+the gRPC methods pass the caller's, and the owner's console and [dashboard](dashboard.md#roles) use the
+`CreateFromConsoleAsync`, `UpdateFromConsoleAsync`, `DeleteFromConsoleAsync`, `AssignFromConsoleAsync`,
+`UnassignFromConsoleAsync` and `GetForConsoleAsync` twins. They skip the permission check (the owner is
+trusted) but not the rest: the built-in role rules, unique names and the last-owner guard still apply,
+and the same events are published. Console `grant`/`revoke` are unchanged.
 
 ## Role API
 
@@ -175,13 +207,14 @@ wire a role is `raindrop.v1.Role`, its kind the enum `RoleKind`, and permissions
 - `RoleListResponse(Roles)`
 - `RoleDetail(Role, Members)` — the UUIDs holding a role, in grant order; empty for `everyone`, which
   nobody is explicitly assigned.
-- `MemberRolesResponse(UserId, Roles, Permissions)` — `Roles` includes `everyone` first even though
-  nobody is assigned it; `Permissions` is the fully-expanded union.
+- `MemberRolesResponse(UserId, Roles, Permissions)` — `Roles` includes `everyone` even though
+  nobody is assigned it (highest position first, so it comes last); `Permissions` is the fully-expanded union.
 - `RoleDeletedResponse(RoleId, Message)`
 - `MemberRoleChangedResponse(UserId, RoleId, Changed, Message)` — `AssignRole`/`UnassignRole` answer with
   `Changed`, which is `false` when the member already held the role or already didn't. **Neither case
   is an error** — the request describes a target state, and that state now holds.
-- `PermissionCatalogueResponse(Permissions)` — the catalogue a client builds a role editor from.
+- `PermissionCatalogueResponse(Permissions)` — the catalogue a client builds a role editor from; each
+  `PermissionDescription(Name, Title, Category, Summary)`.
 
 ### Error codes
 

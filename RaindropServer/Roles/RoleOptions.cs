@@ -17,15 +17,6 @@ public sealed class RoleOptions
         Permission.Connect | Permission.Speak | Permission.Video | Permission.ScreenShare;
 
     /// <summary>
-    /// Whether creating a channel makes you its moderator: able to rename it, delete it, and delete
-    /// other members' messages in it, whatever your roles say. On by default, because it is the rule
-    /// a server ran on before it had roles and because it keeps a member who can create a channel
-    /// from being unable to tidy it up afterwards. Turn it off for a server where roles are meant to
-    /// be the only answer to who may do what.
-    /// </summary>
-    public bool ChannelCreatorModeratesOwnChannels { get; set; } = true;
-
-    /// <summary>
     /// Whether the first UUID to register is granted the <see cref="RoleKind.Owner"/> role. On by
     /// default: a self-hosted server has no account to administer it otherwise, and a fresh server
     /// where nobody can create a role is one nobody can ever configure. Turn it off on a server

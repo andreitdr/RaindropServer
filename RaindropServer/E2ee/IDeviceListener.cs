@@ -95,4 +95,23 @@ public sealed class E2eeOptions
 
     /// <summary>The most commits one sync returns; a device further behind asks again.</summary>
     public int SyncPageSize { get; set; } = 500;
+
+    /// <summary>
+    /// How long a member waits between resets of one channel's group (a channel manager does not).
+    /// Resets are already one per generation and need a reported commit or group info of the current
+    /// generation; this bounds what one account can make everybody else rejoin. Zero switches it off.
+    /// </summary>
+    public TimeSpan GroupResetCooldown { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How long after a reset only the device that asked for it may create the new generation's group,
+    /// so nobody else can race it to that group's first state.
+    /// </summary>
+    public TimeSpan GroupCreatorReservation { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a group info may lag behind the group's epoch before a member may report it as what
+    /// it cannot join from. A committer publishes one right after its commit; this is the time it has.
+    /// </summary>
+    public TimeSpan GroupInfoGrace { get; set; } = TimeSpan.FromSeconds(30);
 }

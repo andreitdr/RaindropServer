@@ -211,7 +211,8 @@ internal static class ToWire
         {
             ChannelId = Text(state.ChannelId),
             Epoch = state.Epoch,
-            GroupInfoEpoch = state.GroupInfoEpoch
+            GroupInfoEpoch = state.GroupInfoEpoch,
+            Generation = state.Generation
         };
 
         if (state.GroupInfo is { } info)
@@ -224,6 +225,36 @@ internal static class ToWire
     {
         UserId = Text(device.UserId),
         DeviceId = Text(device.DeviceId)
+    };
+
+    public static Proto.GroupReset ToProto(this MlsGroupResetRecord reset)
+    {
+        var wire = new Proto.GroupReset
+        {
+            Generation = reset.Generation,
+            ResetAt = Time(reset.ResetAtUtc),
+            RequestedByUserId = Text(reset.RequestedByUserId),
+            RequestedByDeviceId = Text(reset.RequestedByDeviceId),
+            ReportedKind = reset.ReportedKind ?? "",
+            ReportedEpoch = reset.ReportedEpoch ?? 0
+        };
+
+        if (reset.ReportedSha256 is { } digest)
+            wire.ReportedSha256 = Bytes(digest);
+        if (reset.SenderUserId is { } sender)
+            wire.ReportedSenderUserId = Text(sender);
+        if (reset.SenderDeviceId is { } device)
+            wire.ReportedSenderDeviceId = Text(device);
+
+        return wire;
+    }
+
+    public static Proto.GroupBan ToProto(this MlsGroupBanRecord ban) => new()
+    {
+        UserId = Text(ban.UserId),
+        DeviceId = ban.DeviceId is { } device ? Text(device) : "",
+        BannedByUserId = Text(ban.BannedBy),
+        BannedAt = Time(ban.BannedAtUtc)
     };
 
     public static Proto.PendingWelcome ToProto(this PendingWelcome welcome) => new()

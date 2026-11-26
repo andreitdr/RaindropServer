@@ -106,16 +106,46 @@ public sealed class RoleService
     }
 
     // ── The lifecycle ────────────────────────────────────────────────────────
+    // Each write is a public method for a member, which checks ManageRoles and hands the caller's
+    // permissions to a core method, and a *FromConsoleAsync twin for the console and the dashboard,
+    // which hands it null. The core methods hold every other rule, so the two paths cannot drift:
+    // the built-in roles, unique names and the last owner are protected whoever is asking.
 
     /// <summary>Creates a role. Needs <see cref="Permission.ManageRoles"/> and every permission it grants.</summary>
     public async Task<RoleSummary> CreateAsync(
         UserSession session, CreateRoleRequest request, CancellationToken cancellationToken)
     {
         var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
+        return await CreateCoreAsync(caller, request, cancellationToken);
+    }
 
+    /// <summary>
+    /// Edits a role. Absent fields are left alone, so renaming cannot accidentally clear a permission
+    /// set; an empty permission list, on the other hand, clears it deliberately.
+    /// </summary>
+    public async Task<RoleSummary> UpdateAsync(
+        UserSession session, UpdateRoleRequest request, CancellationToken cancellationToken)
+    {
+        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
+        return await UpdateCoreAsync(caller, request, cancellationToken);
+    }
+
+    /// <summary>Deletes a role and takes it away from everyone holding it. Built-in roles are refused.</summary>
+    public async Task<RoleDeletedResponse> DeleteAsync(
+        UserSession session, RoleRequest request, CancellationToken cancellationToken)
+    {
+        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
+        return await DeleteCoreAsync(caller, request, cancellationToken);
+    }
+
+    private async Task<RoleSummary> CreateCoreAsync(
+        Permission? caller, CreateRoleRequest request, CancellationToken cancellationToken)
+    {
         var name = RoleNamePolicy.Validate(request.Name);
         var permissions = PermissionNames.Parse(request.Permissions);
-        RequireGrantable(caller, permissions, "create a role granting");
+
+        if (caller is { } held)
+            RequireGrantable(held, permissions, "create a role granting");
 
         var normalized = RoleNamePolicy.Normalize(name);
         await RequireNameFreeAsync(normalized, cancellationToken);
@@ -140,14 +170,9 @@ public sealed class RoleService
         return summary;
     }
 
-    /// <summary>
-    /// Edits a role. Absent fields are left alone, so renaming cannot accidentally clear a permission
-    /// set; an empty permission list, on the other hand, clears it deliberately.
-    /// </summary>
-    public async Task<RoleSummary> UpdateAsync(
-        UserSession session, UpdateRoleRequest request, CancellationToken cancellationToken)
+    private async Task<RoleSummary> UpdateCoreAsync(
+        Permission? caller, UpdateRoleRequest request, CancellationToken cancellationToken)
     {
-        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
         var role = await RequireRoleAsync(request.RoleId, cancellationToken);
 
         if (role.Kind == RoleKind.Owner)
@@ -155,9 +180,13 @@ public sealed class RoleService
                 "The owner role cannot be edited. It is what keeps this server administrable.");
 
         // Editing a role you could not have created is the same escalation by another route, so the
-        // set it already grants is checked alongside the set it is being given.
+        // set it already grants is checked alongside the set it is being given. Names this build does
+        // not know (role.UnknownPermissions) are neither checked nor touched: they grant nothing here,
+        // and the `with` below carries them over, so saving from this build cannot erase them.
         var permissions = request.Permissions is null ? role.Permissions : PermissionNames.Parse(request.Permissions);
-        RequireGrantable(caller, role.Permissions | permissions, "change a role granting");
+
+        if (caller is { } held)
+            RequireGrantable(held, role.Permissions | permissions, "change a role granting");
 
         var name = role.Name;
         var normalized = role.NameNormalized;
@@ -193,18 +222,17 @@ public sealed class RoleService
         return summary;
     }
 
-    /// <summary>Deletes a role and takes it away from everyone holding it. Built-in roles are refused.</summary>
-    public async Task<RoleDeletedResponse> DeleteAsync(
-        UserSession session, RoleRequest request, CancellationToken cancellationToken)
+    private async Task<RoleDeletedResponse> DeleteCoreAsync(
+        Permission? caller, RoleRequest request, CancellationToken cancellationToken)
     {
-        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
         var role = await RequireRoleAsync(request.RoleId, cancellationToken);
 
         if (role.IsBuiltIn)
             throw ApiException.Forbidden("role_immutable",
                 $"The {RoleKindNames.Of(role.Kind)} role is built in and cannot be deleted.");
 
-        RequireGrantable(caller, role.Permissions, "delete a role granting");
+        if (caller is { } held)
+            RequireGrantable(held, role.Permissions, "delete a role granting");
 
         await _store.DeleteAsync(role.RoleId, cancellationToken);
         _cache.Clear();
@@ -224,18 +252,8 @@ public sealed class RoleService
     public async Task<MemberRoleChangedResponse> AssignAsync(
         UserSession session, MemberRoleRequest request, CancellationToken cancellationToken)
     {
-        var (caller, role, member) = await ResolveAssignmentAsync(session, request, cancellationToken);
-        RequireGrantable(caller, role.Permissions, "hand out a role granting");
-
-        var assigned = await _store.AssignAsync(
-            new RoleAssignment(member.UserId, role.RoleId, UtcNow, session.UserId), cancellationToken);
-
-        await RoleChangedAsync(assigned, member.UserId, role.RoleId, true);
-
-        return new MemberRoleChangedResponse(member.UserId, role.RoleId, assigned,
-            assigned
-                ? $"{member.Username} now has the '{role.Name}' role."
-                : $"{member.Username} already had the '{role.Name}' role.");
+        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
+        return await AssignCoreAsync(caller, session.UserId, request, cancellationToken);
     }
 
     /// <summary>
@@ -245,8 +263,36 @@ public sealed class RoleService
     public async Task<MemberRoleChangedResponse> UnassignAsync(
         UserSession session, MemberRoleRequest request, CancellationToken cancellationToken)
     {
-        var (caller, role, member) = await ResolveAssignmentAsync(session, request, cancellationToken);
-        RequireGrantable(caller, role.Permissions, "take away a role granting");
+        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
+        return await UnassignCoreAsync(caller, request, cancellationToken);
+    }
+
+    private async Task<MemberRoleChangedResponse> AssignCoreAsync(
+        Permission? caller, Guid? assignedBy, MemberRoleRequest request, CancellationToken cancellationToken)
+    {
+        var (role, member) = await ResolveAssignmentAsync(request, cancellationToken);
+
+        if (caller is { } held)
+            RequireGrantable(held, role.Permissions, "hand out a role granting");
+
+        var assigned = await _store.AssignAsync(
+            new RoleAssignment(member.UserId, role.RoleId, UtcNow, assignedBy), cancellationToken);
+
+        await RoleChangedAsync(assigned, member.UserId, role.RoleId, true);
+
+        return new MemberRoleChangedResponse(member.UserId, role.RoleId, assigned,
+            assigned
+                ? $"{member.Username} now has the '{role.Name}' role."
+                : $"{member.Username} already had the '{role.Name}' role.");
+    }
+
+    private async Task<MemberRoleChangedResponse> UnassignCoreAsync(
+        Permission? caller, MemberRoleRequest request, CancellationToken cancellationToken)
+    {
+        var (role, member) = await ResolveAssignmentAsync(request, cancellationToken);
+
+        if (caller is { } held)
+            RequireGrantable(held, role.Permissions, "take away a role granting");
 
         if (role.Kind == RoleKind.Owner)
             await RequireAnotherOwnerAsync(role, member.UserId, cancellationToken);
@@ -270,6 +316,48 @@ public sealed class RoleService
     /// <summary>Every role on this server, for the console to print. No permission check.</summary>
     public Task<IReadOnlyList<RoleRecord>> ListForConsoleAsync(CancellationToken cancellationToken) =>
         _store.ListAsync(cancellationToken);
+
+    /// <summary>One role and who holds it, for the dashboard. No permission check.</summary>
+    public async Task<RoleDetail> GetForConsoleAsync(Guid roleId, CancellationToken cancellationToken)
+    {
+        var role = await RequireRoleAsync(roleId, cancellationToken);
+        var members = role.Kind == RoleKind.Everyone
+            ? []
+            : await _store.ListMembersAsync(role.RoleId, cancellationToken);
+
+        return new RoleDetail(ToSummary(role), members);
+    }
+
+    /// <summary>
+    /// Creates a role from the console or the dashboard. No permission check; every other rule of
+    /// <see cref="CreateAsync"/> holds, and members hear about it the same way.
+    /// </summary>
+    public Task<RoleSummary> CreateFromConsoleAsync(CreateRoleRequest request, CancellationToken cancellationToken) =>
+        CreateCoreAsync(null, request, cancellationToken);
+
+    /// <summary>
+    /// Edits a role from the console or the dashboard. No permission check, but the owner role is
+    /// still immutable and the everyone role still keeps its name.
+    /// </summary>
+    public Task<RoleSummary> UpdateFromConsoleAsync(UpdateRoleRequest request, CancellationToken cancellationToken) =>
+        UpdateCoreAsync(null, request, cancellationToken);
+
+    /// <summary>Deletes a role from the console or the dashboard. No permission check; built-in roles are still refused.</summary>
+    public Task<RoleDeletedResponse> DeleteFromConsoleAsync(RoleRequest request, CancellationToken cancellationToken) =>
+        DeleteCoreAsync(null, request, cancellationToken);
+
+    /// <summary>Grants a role by id from the console or the dashboard. No permission check.</summary>
+    public Task<MemberRoleChangedResponse> AssignFromConsoleAsync(
+        MemberRoleRequest request, CancellationToken cancellationToken) =>
+        AssignCoreAsync(null, null, request, cancellationToken);
+
+    /// <summary>
+    /// Takes a role away by id from the console or the dashboard. No permission check, but the last
+    /// owner still keeps the owner role: hand it to somebody else first.
+    /// </summary>
+    public Task<MemberRoleChangedResponse> UnassignFromConsoleAsync(
+        MemberRoleRequest request, CancellationToken cancellationToken) =>
+        UnassignCoreAsync(null, request, cancellationToken);
 
     /// <summary>Grants a role by name to a member by username, from the console. No permission check.</summary>
     /// <returns>A line to print to the server owner.</returns>
@@ -474,13 +562,12 @@ public sealed class RoleService
     }
 
     /// <summary>
-    /// Everything an assign or unassign needs: the caller's permissions, the role, and the member —
-    /// each of which has to exist and be a member before the operation is worth checking.
+    /// Everything an assign or unassign needs: the role and the member, each of which has to exist —
+    /// and the member be active — before the operation is worth checking.
     /// </summary>
-    private async Task<(Permission Caller, RoleRecord Role, UserRecord Member)> ResolveAssignmentAsync(
-        UserSession session, MemberRoleRequest request, CancellationToken cancellationToken)
+    private async Task<(RoleRecord Role, UserRecord Member)> ResolveAssignmentAsync(
+        MemberRoleRequest request, CancellationToken cancellationToken)
     {
-        var caller = await RequireManageRolesAsync(session.UserId, cancellationToken);
         var role = await RequireRoleAsync(request.RoleId, cancellationToken);
 
         if (role.Kind == RoleKind.Everyone)
@@ -493,7 +580,7 @@ public sealed class RoleService
             throw ApiException.NotFound("member_not_found",
                 $"There is no active member {request.UserId} on this server.");
 
-        return (caller, role, member);
+        return (role, member);
     }
 
     /// <summary>Resolves a username and a role name for the console, reporting either miss plainly.</summary>

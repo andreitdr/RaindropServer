@@ -39,8 +39,10 @@ Code: [`RaindropServer/E2ee/`](../RaindropServer/E2ee); on the wire `raindrop.v1
 `raindrop.v1.DeliveryService` ([`devices.proto`](../../RaindropProto/raindrop/v1/devices.proto),
 [`delivery.proto`](../../RaindropProto/raindrop/v1/delivery.proto)), served by
 [`E2eeServices.cs`](../RaindropServer.Grpc/Services/E2eeServices.cs). Capabilities in `GetServerInfo`:
-`e2ee.devices.v1` (identities), `e2ee.delivery.v1` (the delivery service) and `e2ee.voice.v1` (calls
-are end-to-end encrypted, so clients refuse to join one they cannot encrypt).
+`e2ee.devices.v1` (identities), `e2ee.delivery.v1` (the delivery service), `e2ee.group-reset.v1` (group
+generations: a broken group is [replaced](#recovering-a-broken-group), and every commit is attributed to
+its device) and `e2ee.voice.v1` (calls are end-to-end encrypted, so clients refuse to join one they cannot
+encrypt).
 
 ## The model
 
@@ -78,8 +80,10 @@ server being able to read or substitute it. The cryptography is in
 [`RaindropCrypto/crates/raindrop_crypto/src/link.rs`](../../RaindropCrypto/docs/device-linking.md).
 
 1. **New device** (password session): makes its device key and an X25519 key, uploads the *offer*
-   (`device-link/start`), and shows a **link code**: `RDL1-<link id>-<commitment>`. The commitment is
-   128 bits of SHA-256 over the offer.
+   (`device-link/start`), and shows a **link code**: `RDL2-<link id>-<commitment>-<code secret>`. The commitment is
+   128 bits of SHA-256 over the offer; the 16-byte code secret never reaches the server and is the
+   salt the approval is sealed with, so the server cannot seal an identity of its own to the new
+   device.
 2. **Existing device** (bound session): the user enters the code. The device fetches the offer
    (`device-link/offer`) and refuses it unless it matches the commitment, so a substituted offer is
    caught. It then certifies the new key and encrypts the identity secret and pins to the offer's
@@ -245,15 +249,30 @@ message) is protobuf `bytes`; the server stores and relays them as it receives t
 | `ClaimKeyPackages` | `{channel_id, devices}` returns one `{user_id, device_id, key_package}` per device that has one and belongs in the group; others are skipped |
 | `ListWelcomes` | Welcomes for this device: `{welcome_id, channel_id, epoch, welcome}` |
 | `AckWelcomes` | `{welcome_ids}` forgets processed Welcomes |
+| `GetGroupGeneration` | `{channel_id}` returns `{generation}`, the current one, whether or not its group exists yet |
+| `ResetGroup` | `{channel_id, generation, reported_epoch, reported_sha256}` starts a new generation; returns `{generation, reset}`. See [Recovering a broken group](#recovering-a-broken-group) |
+| `ListGroupResets` | channel managers: `{channel_id}` returns every reset, newest first, with who asked and whose commit they reported |
+| `BanFromGroup` / `UnbanFromGroup` | channel managers: `{channel_id, user_id, device_id}` (empty device: every device of the account) returns `{changed}` |
+| `ListGroupBans` | channel managers: `{channel_id}` returns `{user_id, device_id, banned_by_user_id, banned_at}` each |
+
+`GroupState` and `SyncGroup` also carry the group's `generation`, and `SyncGroup` takes the caller's: a
+device in another generation is answered `resync_required` with the current one. A client that predates
+generations sends 0, which is every group on a channel that was never reset.
 
 **Error codes:**
 - certificates and identity: `invalid_certificate`, `certificate_mismatch`, `identity_mismatch`
 - devices: `device_exists`, `too_many_devices` (10 per user), `device_not_found`
 - session binding: `device_required`, `no_challenge`, `invalid_signature`
 - lookups and payloads: `too_many_users`, `invalid_backup`, `invalid_link`, `link_not_found`
-- delivery: `group_exists`, `group_not_found`, `epoch_conflict`, `wrong_group`, `invalid_mls_message`,
-  `invalid_welcome`, `not_allowed_in_group`, `too_many_key_packages`, `too_many_devices`,
+- delivery: `group_exists`, `group_not_found`, `epoch_conflict`, `wrong_group` (another channel's group,
+  or another generation of this one's), `invalid_mls_message`, `invalid_welcome`, `not_allowed_in_group`
+  (also: a device or account a manager banned from the group), `too_many_key_packages`, `too_many_devices`,
   `channel_not_found`
+- group recovery: `report_mismatch` (the report names no commit in the log and not the group info),
+  `group_info_pending` (the group info has not had time to catch up yet), `group_reserved` (only the device
+  that reset may create the new generation yet), `rate_limited` (this member reset the channel's group a
+  moment ago), `missing_permission` (a reset without a report, or a ban, by somebody who is not a channel
+  manager), `invalid_payload` (a hash that is not 32 bytes, or a generation that does not exist yet)
 
 ## Events
 
@@ -268,6 +287,7 @@ Open-string types. The first three go to every connected member:
 | `e2ee.handshake` | `HandshakeEvent(ChannelId, Epoch, Message)`: an accepted commit. Sent to the group's policy audience, not to everyone. |
 | `e2ee.welcome` | `WelcomeEvent(ChannelId, DeviceId)`, to the recipient only |
 | `e2ee.group.reconcile` | `GroupReconcileEvent(ChannelId)`, to the group's audience |
+| `e2ee.group.reset` | `GroupResetEvent(ChannelId, Generation)`: the group started a new generation, to the group's audience |
 | `e2ee.keypackages.low` | `KeyPackagesLowEvent(DeviceId, Remaining)`, to the owner only |
 
 ## Storage
@@ -283,14 +303,22 @@ Three tables, created like every other (see [Database modules](database-modules.
   unused codes' hashes, comma-separated
 - `raindrop_pending_recoveries(user_id, device_id, signature_key, requested_at, eligible_at, cancelled_at, PK(user_id, device_id))`
 
-The delivery service adds four more:
+The delivery service adds these:
 
-- `raindrop_mls_groups(channel_id PK, epoch, group_info, group_info_epoch, updated_at)`
+- `raindrop_mls_groups(channel_id PK, epoch, group_info, group_info_epoch, updated_at)` — the current
+  generation's group; its generation is read from the resets
 - `raindrop_mls_commits(channel_id, epoch, message, sender_user_id, created_at, PK(channel_id, epoch))`
+- `raindrop_mls_commit_devices(channel_id, epoch, device_id, PK(channel_id, epoch))` — the device that
+  submitted each commit, written in the same transaction (a table of its own, so the log needed no `ALTER`)
 - `raindrop_mls_key_packages(package_id PK, user_id, device_id, key_package, last_resort, created_at)`
 - `raindrop_mls_welcomes(welcome_id PK, user_id, device_id, channel_id, epoch, welcome, created_at)`
+- `raindrop_mls_group_resets(channel_id, generation, reset_at, requested_by_user_id, requested_by_device_id,
+  reported_kind, reported_epoch, reported_sha256, sender_user_id, sender_device_id, PK(channel_id, generation))`
+  — one row per reset; the key refuses a second reset to the same generation
+- `raindrop_mls_group_bans(channel_id, user_id, device_id, banned_by, banned_at, PK(channel_id, user_id, device_id))`
+  — the empty UUID as the device bans every device of the account
 
-Deleting a channel drops its group, log and Welcomes.
+Deleting a channel drops its group, log, Welcomes, resets and bans.
 
 Only public keys and opaque blobs are stored. A member whose account is **erased** has all three
 cleared (`ErasedMemberCleanup`). A member who leaves with their data preserved keeps them for a
@@ -299,8 +327,10 @@ return.
 ## The delivery service
 
 [`MlsDeliveryService`](../RaindropServer/E2ee/MlsDeliveryService.cs). Every channel has at most one MLS
-group, named by the channel: its group id is the channel UUID as 16 big-endian bytes. The server is
-never a member of any group.
+group at a time, named by the channel and its **generation**: the group id is the channel UUID as 16
+big-endian bytes for generation 0 (every group that was never reset), and those 16 bytes followed by the
+generation as 8 big-endian bytes for any later one (`MlsFraming.GroupIdFor`; the client's
+`groupIdForChannel` builds the same bytes). The server is never a member of any group.
 
 ### What it can see
 
@@ -319,7 +349,11 @@ so a key package is wrapped with wire format `key_package`, not bare.
   Accepting it advances the epoch and appends it to the log in one transaction. The log's key
   `(channel_id, epoch)` makes the database itself refuse a second commit for an epoch. The loser gets
   `409 epoch_conflict`: it discards its pending commit, syncs, processes the winner, and retries if the
-  change is still needed. So every member sees the same epochs and a group cannot fork.
+  change is still needed. So every member sees the same epochs and a group cannot fork. When a submit
+  fails in a way that does not say whether the server took the commit (a timeout, a dropped
+  connection), the client does not discard it: it keeps it pending and settles it by syncing. The
+  server must therefore relay commit bytes exactly as stored, because clients match their own commit's
+  echo by the SHA-256 of its bytes.
 - **Only devices take part.** Every call needs a session [bound to a device](#the-model), so a password
   alone cannot read a group's commits or claim anybody's key packages. A revoked device is refused even
   if a session of it somehow survived.
@@ -358,6 +392,54 @@ so a key package is wrapped with wire format `key_package`, not bare.
 every added device against the roster and against the identity key they pinned. That, and showing
 members every device that joins, is what keeps a malicious member or server from adding one unnoticed.
 
+### Recovering a broken group
+
+The server cannot read a commit, so it accepts any well-framed one for the current epoch — including one no
+member can process: garbage, or a valid commit adding a device whose certificate does not verify. Every
+member is then stuck behind it, and nobody can join either: the group info for the next epoch could only
+come from whoever made the commit, and an external commit built on the older one loses the epoch forever.
+Such a group is **replaced, not repaired**:
+
+1. **Attribution.** Every commit is stored with the device whose bound session submitted it
+   (`raindrop_mls_commit_devices`). That is the server's own record — a session is bound by the device's
+   signature — so a broken commit is attributed to a device, not to whatever the commit claims.
+2. **Report.** A member that cannot process a logged commit drops its copy (keeping its cached messages),
+   tries once to rejoin from the group info, and when that fails too calls `ResetGroup` with its
+   generation and the SHA-256 of the commit (or of the group info it cannot join from). The server checks
+   the report names the commit it holds at that epoch, or the group info it holds — it cannot check that
+   either is really broken, so the report is what makes the reset accountable. A group info behind the
+   epoch can only be reported after `E2eeOptions.GroupInfoGrace` (30 s) without a newer one
+   (`group_info_pending`), since a committer publishes one right after committing.
+3. **One reset per generation.** The reset row's key `(channel_id, generation)` refuses a second reset
+   to the same generation, and a report for a generation that is already behind changes nothing and
+   answers the current one — so members who found the same broken commit end up in one new generation.
+   The reset and the dropping of the old generation's group, log and Welcomes are one transaction; group
+   creation, resets, commits and group infos are serialised per channel, so none is checked against one
+   generation and stored in another. `e2ee.group.reset` tells the group's audience.
+4. **Rebuild.** For `E2eeOptions.GroupCreatorReservation` (30 s) only the device that reset may create
+   the new generation's group (`group_reserved` for anybody else), so nobody can race it to that group's
+   first state. Everybody else joins it — by Welcome when the creator adds them, or by external commit —
+   and every member is validated by every device, exactly as for any group. Commits, group infos and
+   encrypted messages for an older generation's group id are `wrong_group`.
+
+**Limits.** A member may reset one channel's group once per `E2eeOptions.GroupResetCooldown` (a minute,
+`rate_limited`). A **channel manager** — `delete_channels` in the channel, which already lets them delete
+the channel and its group outright — may reset without a report and without a limit, read the resets
+(`ListGroupResets`: who asked, from which device, what they reported, and for a commit the account and
+device that submitted it), and **ban** a device, or every device of an account, from the channel's group
+(`BanFromGroup`). A banned device leaves the roster, cannot be claimed or welcomed, is refused every
+delivery call and encrypted message for the channel (`not_allowed_in_group`), and an account banned on
+every device stops receiving the group's events; members are told to reconcile, which commits its removal.
+
+**What it does not change.** The server still cannot read a message or change a group: a new generation is
+a new MLS group created by a member, and nothing joins it unvalidated. A reset does not let a member keep
+anybody out — every device on the roster may still join the new generation by itself — and is recorded with
+who asked. What a member who keeps breaking the group *can* still do is make everybody rejoin, once per
+break, until a manager bans them: the server cannot tell a broken commit from a good one, so that is
+contained by attribution and bans rather than prevented. Messages sent in the old generation that a device
+had not yet decrypted are lost to it, as they would be after `resync_required`; what it had decrypted stays
+in its cache.
+
 ### Key packages
 
 Each device keeps up to 200 one-time key packages on the server (uploads of up to 100), plus one
@@ -380,6 +462,7 @@ consumed. Below 10 left, the owner gets `e2ee.keypackages.low`.
   - identities: devices per user, challenge lifetime, link lifetime, backup size, users per listing
   - delivery: message size, key packages per device and per upload, low watermark, Welcome recipients,
     log length, sync page size
+  - group recovery: `GroupResetCooldown`, `GroupCreatorReservation`, `GroupInfoGrace`
 
 Ed25519 comes from BouncyCastle, wrapped in
 [`Security/Ed25519Signatures`](../RaindropServer/Security/Ed25519Signatures.cs), the only file that

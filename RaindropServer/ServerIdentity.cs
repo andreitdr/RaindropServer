@@ -52,6 +52,14 @@ public sealed record ServerIdentity(
     public const string E2eeDeliveryCapability = "e2ee.delivery.v1";
 
     /// <summary>
+    /// Advertised when a channel's group can be reset to a new generation (<c>DeliveryService.ResetGroup</c>,
+    /// the <c>generation</c> fields, <c>e2ee.group.reset</c>), and every commit is attributed to the
+    /// device that submitted it. A client that sees it follows generations; one that does not keeps
+    /// to generation 0, which is every group on a server without it.
+    /// </summary>
+    public const string E2eeGroupResetCapability = "e2ee.group-reset.v1";
+
+    /// <summary>
     /// Advertised when calls on this server are end-to-end encrypted: clients encrypt their media with
     /// a key from the voice channel's MLS group, so the media server forwards audio it cannot hear.
     /// A client refuses to join a call it cannot encrypt on a server that says this.

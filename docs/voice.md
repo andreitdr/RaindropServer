@@ -44,7 +44,7 @@ Voice uses the same server-wide roles as everything else (see
 | `Speak` | `speak` | Be heard. Without it you join as a listener: the participant is `suppressed`, and LiveKit refuses your microphone. |
 | `Video` | `video` | Be seen. Without it the participant is `camera_suppressed` and LiveKit refuses their camera. Separate from `speak`, so a member can be heard without being seen. |
 | `ScreenShare` | `screen_share` | Share a screen or a window. Without it the participant is `screen_share_suppressed` and LiveKit refuses their share. Separate from `video`, so an owner can let members be seen without letting them put a film in front of the whole call. A window's sound additionally needs them to be able to speak. |
-| `MuteMembers` | `mute_members` | Mute or unmute somebody for everyone. Checked **server-wide**, never per channel, and not part of the channel-creator rule, because a mute follows its target into every call. |
+| `MuteMembers` | `mute_members` | Mute or unmute somebody for everyone. Checked **server-wide**, never per channel, because a mute follows its target into every call. |
 
 `connect`, `speak`, `video` and `screen_share` are in the `everyone` role by default. An existing server gains them
 once through a **permission rollout**; see below.

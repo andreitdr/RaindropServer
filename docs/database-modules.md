@@ -76,7 +76,7 @@ Each is one file: `SqliteDatabaseDriver.cs`, `PostgresDatabaseDriver.cs`, `SqlSe
 2. Override `CreateConnection` and `SchemaStatements` — both are declared `protected internal` on the
    base and should be overridden as `protected override` in the derived driver.
 3. Give it a unique `Name`.
-4. Add the DDL for every table, including `raindrop_deleted_messages` — a driver that leaves a table out
+4. Add the DDL for every table, including `raindrop_role_permissions` and `raindrop_deleted_messages` — a driver that leaves a table out
    will fail the first time something needs it. (A driver deriving from `RelationalDatabaseDriver` gets the
    store itself for free; it only supplies the per-dialect DDL.) `IDatabaseDriver` gained
    `CreateDeletedMessageStore` with the archive, so a third-party driver that implements the interface
@@ -85,10 +85,12 @@ Each is one file: `SqliteDatabaseDriver.cs`, `PostgresDatabaseDriver.cs`, `SqlSe
 ## Schema
 
 Tables: `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`, `raindrop_roles`,
-`raindrop_member_roles`, `raindrop_deleted_messages`, `raindrop_permission_rollouts`,
+`raindrop_role_permissions`, `raindrop_member_roles`, `raindrop_deleted_messages`, `raindrop_permission_rollouts`,
 `raindrop_voice_mutes`, and for [end-to-end encryption](e2ee.md#storage) `raindrop_user_identities`,
 `raindrop_devices`, `raindrop_key_backups`, `raindrop_identity_vaults`, `raindrop_authenticators` and the delivery service's `raindrop_mls_groups`,
-`raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`, and
+`raindrop_mls_commits`, `raindrop_mls_commit_devices` (which device submitted each commit),
+`raindrop_mls_key_packages`, `raindrop_mls_welcomes`, `raindrop_mls_group_resets` (every reset of a channel's
+group to a new generation) and `raindrop_mls_group_bans` (devices and accounts kept out of a channel's group), and
 `raindrop_encrypted_messages` (encrypted messages, merged with `raindrop_text_messages` when history is
 read), `raindrop_message_reports` (reported encrypted messages, with the text the reporter revealed) — public keys and opaque blobs in byte columns (`BLOB`, `bytea`, `varbinary`), epochs as `bigint` — and
 `raindrop_attachments` ([attachments](attachments.md)).
@@ -138,10 +140,16 @@ Notable design choices, all driven by the same constraint — **there is no migr
 somewhere in the wild would need a guarded `ALTER TABLE` per dialect (which SQLite makes especially
 awkward):
 
-- `raindrop_roles.permissions` is a `bigint` holding a `[Flags]` enum (see
-  [Roles & permissions](roles-and-permissions.md#permissions)) rather than a narrower column or a row
-  per permission — the room to grow had to exist from day one, since there's no later migration to add
-  it.
+- **Permissions are stored by name**, one row per role and permission in `raindrop_role_permissions`
+  (`role_id`, `permission`, both the primary key), so a new permission needs no schema change and a
+  name this build does not know survives a save (see
+  [Roles & permissions](roles-and-permissions.md#permissions)). `raindrop_roles.permissions` is still
+  a `bigint` and is still written with the bits this build knows, so an older build, which reads only
+  that column, keeps working after a downgrade. A role with **no** name rows is read from the `bigint`:
+  that is how roles written before the table existed carry over, lazily, and they are written as names
+  the next time they are saved (there is no one-time copy). Known limitation: edits made while an older
+  build was running are not carried back into the name rows after upgrading again, because only a role
+  with no name rows falls back to the `bigint`.
 - The role table's position column is spelled `sort_order` rather than `position`, because `position`
   is a reserved keyword in PostgreSQL.
 - **There are no foreign keys anywhere in the schema**, `raindrop_member_roles` included. A message

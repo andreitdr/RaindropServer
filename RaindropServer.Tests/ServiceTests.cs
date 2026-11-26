@@ -42,7 +42,7 @@ public class DeliveryServiceTests
             driver.CreateMlsGroupStore(options),
             driver.CreateKeyPackageStore(options),
             driver.CreateWelcomeStore(options),
-            devices, channels, users, policy, events, new E2eeOptions());
+            devices, channels, users, policy, new ManagerPermissions(), events, new E2eeOptions());
         var channel = await Sessions.ChannelAsync(channels, Fixtures.ChannelId);
         return new Setup(delivery, policy, events, devices, users, channel);
     }
@@ -616,7 +616,7 @@ public class ReturningMemberTests
         var events = new RecordingPublisher();
         var cache = new RolePermissionCache();
         var roleService = new RoleService(roles, users,
-            new RolePermissionResolver(roles, users, roleOptions, cache), cache, roleOptions, events);
+            new RolePermissionResolver(roles, users, cache), cache, roleOptions, events);
         var userOptions = new UserOptions();
         var userService = new UserService(users, new Pbkdf2PasswordHasher(1_000),
             new InMemorySessionStore(userOptions), userOptions, events,

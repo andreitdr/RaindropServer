@@ -98,8 +98,8 @@ Two independent rules:
 - **Anyone may always delete their own message.** No permission is involved — not `ManageMessages`,
   not `SendMessages` — so a member whose roles grant almost nothing can still take back what they said.
   (They must still be able to *see* the channel: one they cannot see answers `channel_not_found`.)
-- Deleting **someone else's** message needs `ManageMessages` in that channel (a channel's creator has
-  it implicitly, see [Channels](channels.md#permissions)).
+- Deleting **someone else's** message needs `ManageMessages` (see [Channels](channels.md#permissions)). Having
+  created the channel counts for nothing.
 
 ## The deleted-message archive
 

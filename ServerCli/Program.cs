@@ -132,7 +132,8 @@ services.AddSingleton(new ServerIdentity(
     Capabilities =
     [
         .. fingerprint is null ? Array.Empty<string>() : [ServerIdentity.TlsIdentityBindingCapability],
-        ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeVoiceCapability,
+        ServerIdentity.E2eeDevicesCapability, ServerIdentity.E2eeDeliveryCapability, ServerIdentity.E2eeGroupResetCapability,
+        ServerIdentity.E2eeVoiceCapability,
         // Camera video needs a media server to carry it and a cap above zero to allow it. Left out
         // otherwise, so a client hides the camera button rather than offering one that always fails.
         .. config.Voice.Provider is not null && config.Voice.MaximumCameraPublishers > 0

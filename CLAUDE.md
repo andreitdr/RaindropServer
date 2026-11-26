@@ -169,7 +169,8 @@ suite), built against the sibling RaindropProto checkout:
   else. Its own username and password (not a Raindrop account), created on first visit with a one-time
   setup code printed at start; in-memory cookie sessions. The page is plain HTML/JS embedded in the
   assembly, under a strict CSP. Host metrics are per OS (`/proc`, Mach/`sysctl` and Win32 P/Invoke),
-  container metrics read the cgroup. Idle unless `dashboard.enabled`.
+  container metrics read the cgroup. It also manages roles (`DashboardRoles`: list, edit permissions,
+  create, delete, give and take away), each change written to its audit log. Idle unless `dashboard.enabled`.
 - **ServerCli** (`ServerCli/`) — the executable everyone runs. It reads `raindrop.json`, enables one
   database module, registers the domain (`AddRaindropServer`) and the gRPC transport
   (`AddRaindropGrpc`), starts the server, and hosts the owner's console. `ServerCli probe <url>` asks a
@@ -293,8 +294,15 @@ the identity layer, the MLS delivery service, encrypted text messages and encryp
 - **Key backup** (`raindrop_key_backups`), **device linking** through `IDeviceLinkRelay` (in memory,
   opaque offer/approval; the link code's commitment stops the server substituting keys), **identity
   reset** with the password (publishes `e2ee.identity.reset`).
-- **Delivery service** (`MlsDeliveryService`): one MLS group per channel (group id = channel UUID,
-  16 big-endian bytes); the server reads only the cleartext envelope (`MlsFraming`). **One commit per
+- **Delivery service** (`MlsDeliveryService`): one MLS group per channel at a time, named by its
+  **generation** (group id = channel UUID, 16 big-endian bytes, for generation 0; those plus the
+  generation as 8 big-endian bytes after a reset). A group nobody can process is replaced by
+  `ResetGroup` (a member reports the commit or group info; a channel manager — `delete_channels` —
+  needs no report), once per generation, announced by `e2ee.group.reset` under the
+  `e2ee.group-reset.v1` capability; commits are attributed to the submitting device
+  (`raindrop_mls_commit_devices`), and managers can ban a device or account from a group
+  (`raindrop_mls_group_bans`, resets listed from `raindrop_mls_group_resets`). Commit bytes are
+  relayed unchanged, since clients hash them; the server reads only the cleartext envelope (`MlsFraming`). **One commit per
   epoch** — epoch bump and log insert in one transaction, and `raindrop_mls_commits`' key
   `(channel_id, epoch)` refuses a second; the loser gets `epoch_conflict`. Every call needs a bound
   session. Who belongs is `IE2eeMembershipPolicy` (default: `view_channel`, plus `connect` for voice),
@@ -398,13 +406,14 @@ they may do is the union.** Roles live on the server and are keyed to the member
 login like everything else about them. A client is *told* what it may do, so it can grey out a
 button rather than let a request fail — but it is never trusted about it: every check runs here.
 
-`Permission` is a `[Flags]` enum backed by `long` rather than `int`: the set lives in one database
-column, there is no migration mechanism here (see **Database modules**), so the room for another
-fifty permissions has to exist from the start. The permissions are `ViewChannel`, `SendMessages`,
+`Permission` is a `[Flags]` enum backed by `long` rather than `int`, so the code has room for another
+fifty permissions; in the database they are stored **by name** (see **Database modules**). Permissions
+are hard-coded per build: each server advertises the ones it knows through `ListPermissions` (with a
+title and a category for an editor), so a client sees each server's own set. Users get roles only,
+never permissions directly. The permissions are `ViewChannel`, `SendMessages`,
 `AttachFiles` (add files to messages, checked in the channel beside `SendMessages`), `ManageMessages`, `CreateChannels`, `RenameChannels`, `DeleteChannels`, `ManageRoles`,
 `Administrator`, and for voice `Connect`, `Speak`, `Video`, `ScreenShare` and `MuteMembers` (the last checked server-wide,
-never per channel, and not part of the channel-creator rule — a mute for everyone follows its target
-into every call).
+never per channel — a mute for everyone follows its target into every call).
 
 Two conventions hold everywhere:
 
@@ -449,7 +458,11 @@ granted the role from the console instead.
 
 #### Who may change what
 
-Every write goes through `RoleService`, and two rules do the work:
+Every write goes through `RoleService`, which has one core method per operation taking the caller's
+permissions (`Permission? caller`). The gRPC methods pass the caller's; the console and the dashboard
+use the `*FromConsoleAsync` twins (`Create`, `Update`, `Delete`, `Assign`, `Unassign`, `Get`), which
+skip the permission check — the owner at the console is trusted — but keep the built-in role rules,
+unique names, the last-owner guard and the events. Two rules do the work:
 
 - **The built-in roles are protected**, as above.
 - **Nobody may hand out what they do not hold.** Creating, editing, deleting, assigning or
@@ -472,13 +485,11 @@ through a token still held in another. That check is also what makes it safe to 
 assignments after somebody leaves: they grant nothing until the account is active again, and are
 still there if they rejoin.
 
-Roles are **server-wide**, so the `ChannelRecord?` parameter only changes the answer for the one rule
-that is about a particular channel: **whoever creates a channel moderates it** — renaming, deleting,
-and removing other members' messages in it — whatever their roles say. That is the rule the server
-ran on before it had roles, and it keeps a member who can create a channel from being unable to tidy
-it up afterwards; `RoleOptions.ChannelCreatorModeratesOwnChannels` turns it off for a server where
-roles are meant to be the only answer. Per-channel role overrides, if they are ever wanted, go here
-and nothing outside this class changes.
+Roles are **server-wide**, and roles are the **only** source of permissions: creating a channel grants
+its creator nothing (the old channel-creator rule, and `RoleOptions.ChannelCreatorModeratesOwnChannels`
+with it, are gone; the `roles.channelCreatorModeratesOwnChannels` key still loads but only warns). The
+`ChannelRecord?` parameter is kept as the place per-channel role overrides would go, if they are ever
+wanted. Authors deleting their own messages is ownership, not a permission, and is checked elsewhere.
 
 Drawing a channel list asks the resolver once per channel, so the union of a member's roles is cached
 in `RolePermissionCache` and every write through `RoleService` clears the whole thing. The
@@ -698,21 +709,28 @@ through `ApplyRowLimit`, which SQL Server overrides and the others inherit.
 Adding a driver: derive from `RelationalDatabaseDriver`, override `CreateConnection` and
 `SchemaStatements` (as `protected override` — the base declares them `protected internal`), and give
 it a unique `Name`. The tables are `raindrop_users`, `raindrop_channels`, `raindrop_text_messages`,
-`raindrop_roles`, `raindrop_member_roles`, `raindrop_deleted_messages` (the owner-only archive of deleted
+`raindrop_roles`, `raindrop_role_permissions` (a role's permissions, by name), `raindrop_member_roles`,
+`raindrop_deleted_messages` (the owner-only archive of deleted
 message text), `raindrop_permission_rollouts` (which one-time permission grants this database has had),
 `raindrop_voice_mutes` (members muted for everyone), and for end-to-end encryption
 `raindrop_user_identities`, `raindrop_devices`, `raindrop_key_backups`, `raindrop_identity_vaults`,
 `raindrop_authenticators`, `raindrop_pending_recoveries` (devices waiting to be let in without an
 authenticator code), and the delivery service's
-`raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_key_packages`, `raindrop_mls_welcomes`,
+`raindrop_mls_groups`, `raindrop_mls_commits`, `raindrop_mls_commit_devices`, `raindrop_mls_key_packages`,
+`raindrop_mls_welcomes`, `raindrop_mls_group_resets`, `raindrop_mls_group_bans`,
 `raindrop_encrypted_messages` and `raindrop_message_reports`, and `raindrop_attachments` (records of
 encrypted files; the bytes live in `IAttachmentStorage`) — everything after the first five added as new
 tables, so existing databases gain them without an `ALTER`.
 
 `EnsureSchemaAsync` **only creates what is missing** — there is no migration mechanism, so adding a
 column to a table that already exists in the wild needs a guarded `ALTER TABLE` per dialect, which
-SQLite makes awkward. That is why `raindrop_roles.permissions` is a `bigint` holding a flags enum
-rather than a narrower column or a row per permission: the room to grow had to be there on day one.
+SQLite makes awkward. That is why permissions are rows of names in `raindrop_role_permissions` (`role_id`, `permission`,
+both the key) rather than a column: a new permission needs no schema change, and a name this build does
+not know is kept in `RoleRecord.UnknownPermissions` (grants nothing, never sent, preserved on every
+save). `raindrop_roles.permissions` is still a `bigint` written with the known bits so a downgraded
+build works, and a role with no name rows is read from it — that is how older roles migrate, lazily,
+written as names on their next save. Known limitation: edits made under an older build are not carried
+back into the name rows after upgrading again.
 The role table's `sort_order` column is spelled that way because `position` is a keyword in
 PostgreSQL.
 
@@ -848,8 +866,8 @@ Connection string examples per provider:
 - `sqlserver` — `Server=localhost,1433;Database=raindrop;User Id=raindrop;Password=…;TrustServerCertificate=True`
 
 The `roles` section is `defaultMemberPermissions` (permission *names*, seeding the `everyone` role
-the first time this server runs and never afterwards), `channelCreatorModeratesOwnChannels` and
-`firstMemberBecomesOwner`. A permission name this build does not have is a startup error naming the
+the first time this server runs and never afterwards), and `firstMemberBecomesOwner`. The
+obsolete `channelCreatorModeratesOwnChannels` is still accepted but only produces a warning. A permission name this build does not have is a startup error naming the
 setting, rather than a role that silently grants less than the owner meant.
 
 Relative TLS certificate paths resolve against the executable's directory; the SQLite path is

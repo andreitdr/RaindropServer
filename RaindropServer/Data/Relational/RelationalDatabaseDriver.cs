@@ -147,6 +147,7 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         "raindrop_channels",
         "raindrop_roles",
         "raindrop_member_roles",
+        "raindrop_role_permissions",
         "raindrop_text_messages",
         "raindrop_deleted_messages",
         "raindrop_permission_rollouts",
@@ -161,6 +162,9 @@ public abstract class RelationalDatabaseDriver : IDatabaseDriver
         "raindrop_mls_commits",
         "raindrop_mls_key_packages",
         "raindrop_mls_welcomes",
+        "raindrop_mls_commit_devices",
+        "raindrop_mls_group_resets",
+        "raindrop_mls_group_bans",
         "raindrop_encrypted_messages",
         "raindrop_message_reports",
         "raindrop_attachments"
