@@ -1,12 +1,12 @@
 name: Release
 
-# Starts when release.sh pushes a version tag (vX.Y.Z). Builds and tests the tagged commit (ci.yml),
+# Starts when release.sh pushes a version tag (vX.Y.Z.T: major, minor, update, hotfix). Builds and tests the tagged commit (ci.yml),
 # packages the artefact, and only if all of that succeeded publishes a GitHub release for the tag
 # with the artefact attached. GitHub adds the source-code zip itself.
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: read

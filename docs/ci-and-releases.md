@@ -44,8 +44,13 @@ Each project is tagged in its own repository, and the workflow comments point at
 the folder that holds all three checkouts. That script is not part of this repository. Every release
 it makes carries a changelog: drafted from the commit subjects since the previous tag (editable before
 tagging) or taken from `--notes-dir DIR/<Repo>.md`. Tagging by hand
-(`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers the same workflow; use an annotated tag
-(`git tag -a vX.Y.Z --cleanup=verbatim -F notes`) to keep the changelog.
+(`git tag vX.Y.Z.T && git push origin vX.Y.Z.T`) triggers the same workflow; use an annotated tag
+(`git tag -a vX.Y.Z.T --cleanup=verbatim -F notes`) to keep the changelog.
+
+Versions are **X.Y.Z.T**: major (still 0), minor (what a release was before this scheme), update (an
+update of the minor version) and hotfix (quick, easy bug fixes only); `release.sh major|minor|update|hotfix`
+raises one and resets the ones after it. The releases before were tagged `vA.B.C` and count as
+`0.A.B.C`, so the first new one after `v2.2.1` is the hotfix `v0.2.2.2`.
 
 ## What CI does not do
 
